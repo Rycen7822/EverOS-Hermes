@@ -48,6 +48,19 @@ Secrets stay in the normal Hermes secret file, so users can edit `~/.hermes/.env
 - **Explicit memory mirroring**: Hermes `on_memory_write()` writes durable memory events to EverOS.
 - **Safe secret hygiene**: examples use placeholders only; `.env` and local reference checkouts are ignored.
 
+## Rust version
+
+A feature-parity Rust port is available under [`rust-version/`](rust-version/). It keeps this Python version intact while adding a native `everos-hermes-rust` binary for the stdio MCP server plus a thin Hermes Python shim that delegates provider behavior to Rust.
+
+Quick build:
+
+```bash
+cd rust-version
+cargo build --release
+```
+
+See [`rust-version/README.md`](rust-version/README.md) for Rust MCP/provider configuration and verification commands.
+
 ## Install
 
 | Variant | Best for | Runtime requirements | Status |
