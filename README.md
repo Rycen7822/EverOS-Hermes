@@ -2,7 +2,7 @@
 
 # EverOS-Hermes
 
-**EverOS Cloud memory for Hermes Agent: one Python package that provides both a stdio MCP server and a Hermes memory provider.**
+**EverOS Cloud memory for Hermes Agent: Python source plus a Rust prebuilt package for both stdio MCP tools and a Hermes memory provider.**
 
 Search EverOS before a turn, capture completed conversations after a turn, and expose explicit EverOS memory tools without duplicating API keys in MCP config.
 
@@ -15,7 +15,8 @@ Search EverOS before a turn, capture completed conversations after a turn, and e
   <a href="https://github.com/Rycen7822/EverOS-Hermes"><img src="https://img.shields.io/badge/GitHub-EverOS--Hermes-0969da?style=for-the-badge" alt="GitHub repository"></a>
   <a href="src/everos_hermes/mcp_server.py"><img src="https://img.shields.io/badge/MCP-9%20tools-2ea44f?style=for-the-badge" alt="MCP: nine tools"></a>
   <a href="integrations/hermes"><img src="https://img.shields.io/badge/Hermes-memory%20provider-5865F2?style=for-the-badge" alt="Hermes memory provider"></a>
-  <a href="pyproject.toml"><img src="https://img.shields.io/badge/Runtime-Python%203.10%2B-blue?style=for-the-badge" alt="Python 3.10+"></a>
+  <a href="rust-version/README.md"><img src="https://img.shields.io/badge/Runtime-Python%20%7C%20Rust-blue?style=for-the-badge" alt="Runtime: Python and Rust"></a>
+  <a href="https://github.com/Rycen7822/EverOS-Hermes/releases"><img src="https://img.shields.io/badge/Rust%20Prebuilt-available-0969da?style=for-the-badge" alt="Rust prebuilt package available"></a>
 </p>
 
 > EverOS-Hermes is for Hermes Agent users who want EverOS as a long-term memory backend.
@@ -33,7 +34,8 @@ EverOS-Hermes keeps those surfaces in one small package:
 
 1. a shared stdlib EverOS REST client;
 2. a FastMCP stdio server with EverOS memory tools;
-3. a thin Hermes `MemoryProvider` plugin that can be copied into `~/.hermes/plugins/everos`.
+3. a thin Hermes `MemoryProvider` plugin that can be copied into `~/.hermes/plugins/everos`;
+4. a Rust runtime and Linux x86_64 prebuilt release package for fast local installs.
 
 Secrets stay in the normal Hermes secret file, so users can edit `~/.hermes/.env` instead of embedding keys in MCP `env:` blocks.
 
@@ -42,7 +44,7 @@ Secrets stay in the normal Hermes secret file, so users can edit `~/.hermes/.env
 - **Hermes memory provider**: set `memory.provider: everos` to recall and capture through EverOS.
 - **Nine MCP tools**: save, add, flush, search, get, delete, task status, get settings, and update settings.
 - **Dotenv fallback**: credential lookup is `process env` -> `$HERMES_HOME/.env` -> `~/.hermes/.env`.
-- **Low dependency surface**: EverOS API client uses Python stdlib; MCP uses `mcp` / FastMCP.
+- **Two runtimes**: Python/FastMCP source implementation plus a Rust binary with a prebuilt Linux x86_64 package.
 - **Search-before-generation loop**: `prefetch()` calls EverOS hybrid search for episodic/profile memory.
 - **Capture-after-generation loop**: `sync_turn()` stores user/assistant turns and can flush immediately.
 - **Explicit memory mirroring**: Hermes `on_memory_write()` writes durable memory events to EverOS.
@@ -65,28 +67,103 @@ See [`rust-version/README.md`](rust-version/README.md) for Rust MCP/provider con
 
 | Variant | Best for | Runtime requirements | Status |
 | --- | --- | --- | --- |
-| Source / editable install | Normal use today, development, debugging | Python 3.10+, Hermes Agent, EverOS API key | Available |
-| Hermes provider plugin | Automatic recall/capture in Hermes | Source package installed in Hermes' Python env | Available |
-| stdio MCP server | Explicit EverOS tools in Hermes or another MCP client | Source package installed where MCP command runs | Available |
-| Prebuilt package | One-command distribution | TBD | Planned, not yet published |
+| Rust prebuilt package | Normal Linux x86_64 installs, especially MCP-only use and quick Hermes provider setup | Linux x86_64; Hermes Agent for provider/MCP registration; no Rust toolchain | Available as a GitHub release asset |
+| Python version | Editing, debugging, or using the original FastMCP/provider implementation | Python 3.10+, `pip`, Hermes Agent, EverOS API key | Available |
+| Rust from source | Native local use on other platforms, development, and reproducible builds | Rust toolchain; Python only for the thin Hermes provider shim | Available |
+
+EverOS credentials are read from process env -> `$HERMES_HOME/.env` -> `~/.hermes/.env`. Do not duplicate secrets in MCP `env:` blocks unless you intentionally need a per-server override.
 
 ### Agent Self-Install Prompts
 
-Copy one of these prompts into a coding agent if you want it to install EverOS-Hermes for itself.
+Copy the matching prompt into Hermes, Codex, or another coding agent when you want it to install EverOS-Hermes for itself.
 
-Hermes provider + MCP, recommended:
-
-```text
-Install EverOS-Hermes from repo `https://github.com/Rycen7822/EverOS-Hermes` for Hermes Agent. Clone it to a stable local tools directory, run `python -m pip install -e .`, copy `integrations/hermes` to `~/.hermes/plugins/everos`, set `memory.provider: everos`, add MCP server `everos` with `python -m everos_hermes.mcp_server`, put `EVEROS_API_KEY` and optional `EVEROS_USER_ID` in `~/.hermes/.env` without committing secrets, then verify with `python -m pytest -q`, `hermes mcp test everos`, and a fresh Hermes session.
-```
-
-MCP-only install:
+Rust prebuilt package, recommended on Linux x86_64:
 
 ```text
-Install only the EverOS-Hermes MCP server from repo `https://github.com/Rycen7822/EverOS-Hermes`. Clone it, run `python -m pip install -e .`, add MCP server `everos` using `python -m everos_hermes.mcp_server`, keep `EVEROS_API_KEY` in `~/.hermes/.env`, and verify with `hermes mcp test everos` plus `tools/list` showing the EverOS tools.
+Install EverOS-Hermes for Hermes Agent from repo `https://github.com/Rycen7822/EverOS-Hermes`. Prefer the latest Rust prebuilt release asset named like `everos-hermes-rust-<version>-x86_64-unknown-linux-gnu.tar.gz`; install it under `~/.local/share/everos-hermes`, put `EVEROS_API_KEY` and optional `EVEROS_USER_ID` in `~/.hermes/.env`, add MCP server `everos` with command `~/.local/share/everos-hermes/bin/everos-hermes-rust` and arg `mcp`, copy `~/.local/share/everos-hermes/integrations/hermes` to `~/.hermes/plugins/everos` if provider hooks are desired, set `EVEROS_HERMES_RUST_BIN` to the installed binary, set `memory.provider: everos`, and verify with `everos-hermes-rust --help`, `hermes mcp test everos`, and a fresh Hermes session. If the host is not Linux x86_64 or no matching prebuilt asset exists, use the Rust-from-source prompt instead.
 ```
 
-### Source / Editable Install
+Python version, for editing or debugging the source implementation:
+
+```text
+Install the Python/source version of EverOS-Hermes from repo `https://github.com/Rycen7822/EverOS-Hermes`, not the Rust prebuilt package. Clone it to a stable local tools directory, run `python -m pip install -e .`, copy `integrations/hermes` to `~/.hermes/plugins/everos` if provider hooks are desired, set `memory.provider: everos`, add MCP server `everos` with `python -m everos_hermes.mcp_server`, put `EVEROS_API_KEY` and optional `EVEROS_USER_ID` in `~/.hermes/.env`, then verify with `python -m pytest -q`, `hermes mcp test everos`, and a fresh Hermes session.
+```
+
+Rust from source, for platform-specific native builds:
+
+```text
+Build EverOS-Hermes Rust from source by cloning `https://github.com/Rycen7822/EverOS-Hermes`, then running `cd rust-version && cargo build --release && cargo test --tests`. Install or copy `rust-version/target/release/everos-hermes-rust` under `~/.local/share/everos-hermes/bin`, copy `rust-version/integrations/hermes` under `~/.local/share/everos-hermes/integrations/hermes`, register MCP `everos` to the binary with arg `mcp`, set `EVEROS_HERMES_RUST_BIN` to the binary for Hermes provider use, keep secrets in `~/.hermes/.env`, and verify with `everos-hermes-rust --help`, `hermes mcp test everos`, and a fresh Hermes session.
+```
+
+### Rust Prebuilt Package
+
+The Rust prebuilt package is published as a GitHub release asset for Linux x86_64. Use the Python or Rust-from-source paths below for other hosts.
+
+Release asset shape:
+
+```text
+https://github.com/Rycen7822/EverOS-Hermes/releases/download/v<version>/everos-hermes-rust-<version>-<target>.tar.gz
+```
+
+Current Linux x86_64 asset:
+
+```text
+everos-hermes-rust-0.1.0-x86_64-unknown-linux-gnu.tar.gz
+```
+
+Install flow:
+
+```bash
+VERSION=0.1.0
+TARGET=x86_64-unknown-linux-gnu
+INSTALL_DIR="$HOME/.local/share/everos-hermes"
+ASSET="everos-hermes-rust-${VERSION}-${TARGET}.tar.gz"
+
+mkdir -p "$INSTALL_DIR"
+curl -L -o "/tmp/$ASSET" \
+  "https://github.com/Rycen7822/EverOS-Hermes/releases/download/v${VERSION}/${ASSET}"
+tar -xzf "/tmp/$ASSET" -C "$INSTALL_DIR" --strip-components=1
+"$INSTALL_DIR/bin/everos-hermes-rust" --help
+```
+
+Optional checksum verification:
+
+```bash
+curl -L -o "/tmp/$ASSET.sha256" \
+  "https://github.com/Rycen7822/EverOS-Hermes/releases/download/v${VERSION}/${ASSET}.sha256"
+(cd /tmp && sha256sum -c "$ASSET.sha256")
+```
+
+MCP registration snippet for Hermes:
+
+```yaml
+mcp_servers:
+  everos:
+    command: /home/you/.local/share/everos-hermes/bin/everos-hermes-rust
+    args:
+      - mcp
+```
+
+Hermes memory provider snippet:
+
+```bash
+mkdir -p ~/.hermes/plugins
+cp -R "$INSTALL_DIR/integrations/hermes" ~/.hermes/plugins/everos
+printf '\nEVEROS_HERMES_RUST_BIN=%s\n' "$INSTALL_DIR/bin/everos-hermes-rust" >> ~/.hermes/.env
+```
+
+Then set:
+
+```yaml
+memory:
+  provider: everos
+```
+
+Restart Hermes CLI/WebUI/gateway after changing memory provider config. MCP tools and the memory provider are independent surfaces; you may enable either or both.
+
+### Python Version
+
+Use this path when you want the editable Python implementation or want to debug FastMCP / provider behavior directly.
 
 ```bash
 git clone https://github.com/Rycen7822/EverOS-Hermes.git
@@ -96,6 +173,37 @@ python -m pytest tests -q
 ```
 
 If Hermes runs under a different Python environment than your shell, install the package with that interpreter instead.
+
+Fallback MCP registration:
+
+```yaml
+mcp_servers:
+  everos:
+    command: python
+    args:
+      - -m
+      - everos_hermes.mcp_server
+```
+
+### Rust From Source
+
+Build the Rust binary locally:
+
+```bash
+git clone https://github.com/Rycen7822/EverOS-Hermes.git
+cd EverOS-Hermes/rust-version
+cargo build --release
+cargo test --tests --no-fail-fast
+target/release/everos-hermes-rust --help
+```
+
+Create the same release archive shape locally:
+
+```bash
+./scripts/package-release.sh
+```
+
+See [`rust-version/README.md`](rust-version/README.md) for Rust-specific MCP/provider details.
 
 ## Required Secrets
 

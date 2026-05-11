@@ -45,20 +45,83 @@ rust-version/
   integrations/hermes/
     __init__.py     # minimal Python shim for Hermes plugin API
     plugin.yaml
-  tests/parity.rs   # parity + stdio integration tests
+  scripts/package-release.sh  # reproducible prebuilt package builder
+  tests/parity.rs              # parity + stdio integration tests
 ```
 
-## Build
+## Install
+
+| Variant | Best for | Runtime requirements | Status |
+| --- | --- | --- | --- |
+| Rust prebuilt package | Normal Linux x86_64 use | Linux x86_64; no Rust toolchain | Available as a GitHub release asset |
+| Rust from source | Other platforms, development, reproducible local builds | Rust toolchain | Available |
+| Python shim for Hermes provider | Registering Rust provider hooks in Hermes | Python only because Hermes loads plugin entrypoints in Python | Included in both prebuilt and source trees |
+
+### Rust Prebuilt Package
+
+Release asset shape:
+
+```text
+https://github.com/Rycen7822/EverOS-Hermes/releases/download/v<version>/everos-hermes-rust-<version>-<target>.tar.gz
+```
+
+Current Linux x86_64 asset:
+
+```text
+everos-hermes-rust-0.1.0-x86_64-unknown-linux-gnu.tar.gz
+```
+
+Linux x86_64 install example:
+
+```bash
+VERSION=0.1.0
+TARGET=x86_64-unknown-linux-gnu
+INSTALL_DIR="$HOME/.local/share/everos-hermes"
+ASSET="everos-hermes-rust-${VERSION}-${TARGET}.tar.gz"
+
+mkdir -p "$INSTALL_DIR"
+curl -L -o "/tmp/$ASSET" \
+  "https://github.com/Rycen7822/EverOS-Hermes/releases/download/v${VERSION}/${ASSET}"
+tar -xzf "/tmp/$ASSET" -C "$INSTALL_DIR" --strip-components=1
+"$INSTALL_DIR/bin/everos-hermes-rust" --help
+```
+
+The archive contains:
+
+```text
+bin/everos-hermes-rust
+integrations/hermes/__init__.py
+integrations/hermes/plugin.yaml
+README.md
+INSTALL.md
+```
+
+Optional checksum verification:
+
+```bash
+curl -L -o "/tmp/$ASSET.sha256" \
+  "https://github.com/Rycen7822/EverOS-Hermes/releases/download/v${VERSION}/${ASSET}.sha256"
+(cd /tmp && sha256sum -c "$ASSET.sha256")
+```
+
+### Rust From Source
 
 ```bash
 cd /home/xu/project/tools/EverOS-Hermes/rust-version
 cargo build --release
+cargo test --tests --no-fail-fast
 ```
 
 The binary will be:
 
 ```text
 /home/xu/project/tools/EverOS-Hermes/rust-version/target/release/everos-hermes-rust
+```
+
+Create a local release archive:
+
+```bash
+./scripts/package-release.sh
 ```
 
 For development smoke tests, `target/debug/everos-hermes-rust` also works.
