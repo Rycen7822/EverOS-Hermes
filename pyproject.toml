@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "everos-hermes"
+version = "0.1.0"
+description = "EverOS MCP server and Hermes Agent memory provider"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "mcp>=1.0.0",
+  "pydantic>=2.0.0",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[project.scripts]
+everos-mcp = "everos_hermes.mcp_server:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

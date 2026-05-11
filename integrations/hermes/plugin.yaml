@@ -1,0 +1,9 @@
+name: everos
+version: 0.1.0
+description: "EverOS Cloud long-term memory provider for Hermes Agent with MCP tools."
+author: "Hermes Agent integration"
+homepage: "https://everos.evermind.ai/"
+hooks:
+  - on_session_end
+  - on_memory_write
+  - on_pre_compress
