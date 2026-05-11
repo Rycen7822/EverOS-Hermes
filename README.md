@@ -4,7 +4,7 @@
 
 **EverOS Cloud memory for Hermes Agent: Python source plus a Rust prebuilt package for both stdio MCP tools and a Hermes memory provider.**
 
-Search EverOS before a turn, capture completed conversations after a turn, and expose explicit EverOS memory tools without duplicating API keys in MCP config.
+Use EverOS either as explicit MCP tools, or as an optional Hermes memory provider that can recall before a turn and capture completed user/assistant turns after the response.
 
 </div>
 
@@ -20,8 +20,8 @@ Search EverOS before a turn, capture completed conversations after a turn, and e
 </p>
 
 > EverOS-Hermes is for Hermes Agent users who want EverOS as a long-term memory backend.
-> For local-only memory, Hermes' built-in provider may be simpler. For explicit EverOS API access only,
-> the MCP server can be enabled without switching Hermes' memory provider.
+> MCP-only mode exposes tools but does not automatically search or save memory; provider mode adds
+> Hermes' automatic memory hooks.
 
 ## Why
 
@@ -41,13 +41,11 @@ Secrets stay in the normal Hermes secret file, so users can edit `~/.hermes/.env
 
 ## Features
 
-- **Hermes memory provider**: set `memory.provider: everos` to recall and capture through EverOS.
-- **Nine MCP tools**: save, add, flush, search, get, delete, task status, get settings, and update settings.
+- **Optional Hermes memory provider**: set `memory.provider: everos` when you want automatic recall/capture hooks.
+- **Nine explicit MCP tools**: save, add, flush, search, get, delete, task status, get settings, and update settings.
 - **Dotenv fallback**: credential lookup is `process env` -> `$HERMES_HOME/.env` -> `~/.hermes/.env`.
 - **Two runtimes**: Python/FastMCP source implementation plus a Rust binary with a prebuilt Linux x86_64 package.
-- **Search-before-generation loop**: `prefetch()` calls EverOS hybrid search for episodic/profile memory.
-- **Capture-after-generation loop**: `sync_turn()` stores user/assistant turns and can flush immediately.
-- **Explicit memory mirroring**: Hermes `on_memory_write()` writes durable memory events to EverOS.
+- **Configurable provider loop**: `auto_recall`, `auto_capture`, and `flush_after_turn` can be tuned in `$HERMES_HOME/everos.json`.
 - **Safe secret hygiene**: examples use placeholders only; `.env` and local reference checkouts are ignored.
 
 ## Rust version
@@ -254,10 +252,12 @@ Restart Hermes CLI / WebUI / gateway, or start a fresh session after changing me
 
 ### Provider Behavior
 
+This section applies only when `memory.provider: everos` is enabled. It is separate from the MCP server.
+
 | Hook | EverOS action |
 | --- | --- |
-| `prefetch(query)` | `POST /api/v1/memories/search` with `method="hybrid"`, `top_k=5`, and `memory_types=["episodic_memory", "profile"]`. |
-| `sync_turn(user, assistant)` | `POST /api/v1/memories`, then `POST /api/v1/memories/flush` by default. |
+| `prefetch(query)` | If `auto_recall=true`, searches EverOS before a turn and injects compact results when any are found. |
+| `sync_turn(user, assistant)` | If `auto_capture=true`, saves the completed user/assistant turn; `flush_after_turn=true` makes extraction run immediately. |
 | `on_memory_write()` | Mirrors explicit Hermes memory writes to EverOS. |
 | `on_session_end()` | Flushes the active EverOS session. |
 
@@ -292,7 +292,7 @@ Advanced non-secret provider settings live in `$HERMES_HOME/everos.json`:
 
 ## Use as MCP Server
 
-After installing the package, add this to `~/.hermes/config.yaml`:
+After installing the package, add this to `~/.hermes/config.yaml`. MCP-only mode does not run provider hooks; it only makes tools available for the model to call explicitly.
 
 ```yaml
 mcp_servers:
@@ -359,19 +359,15 @@ Common search call shape:
 
 Use `method="agentic"` only for complex multi-part retrieval because it is slower and more expensive than `hybrid`.
 
-## How It Works
+## Runtime Modes
 
-```text
-Hermes user turn
-  -> EverOS provider prefetch(query)
-  -> EverOS hybrid search injects compact memory context
-  -> LLM response
-  -> EverOS provider sync_turn(user, assistant)
-  -> EverOS add memories
-  -> optional EverOS flush for near-immediate extraction
-```
+| Mode | Enable with | Automatic behavior | Use when |
+| --- | --- | --- | --- |
+| MCP-only | `mcp_servers.everos` | None. The model must call EverOS tools explicitly. | You want manual search/save/delete tools without changing Hermes memory. |
+| Provider-only | `memory.provider: everos` | Optional recall before each turn, capture after each completed user/assistant turn, and flush on session end. | You want EverOS as Hermes' memory backend. |
+| Both | Both config blocks | Provider hooks plus explicit MCP tools. | You want automatic memory and manual EverOS controls. |
 
-The MCP tools are separate from automatic provider hooks. Enable both when you want automatic memory plus explicit EverOS control tools.
+For lower latency or stricter control, keep `auto_capture=true` but set `auto_recall=false` in `$HERMES_HOME/everos.json`; the agent can still search manually through `everos_memory_search` or `everos_search_memories`.
 
 ## Project Layout
 
@@ -412,7 +408,7 @@ git diff --check
 ## Security Notes
 
 - Do not commit EverOS API keys, `.env`, MCP `env:` blocks with real credentials, or generated cache directories.
-- The client sends `Authorization: Bearer <EVEROS_API_KEY>` only at request time.
+- The client sends `Authorization: Bearer ***` only at request time.
 - `everos_delete_memories` and `everos_memory_forget` are destructive and require explicit confirmation flags.
 - EverOS extraction is asynchronous by default; flushing makes newly added messages searchable sooner but can add API work.
 
@@ -421,4 +417,4 @@ git diff --check
 - Python package: available.
 - Hermes memory provider plugin: available.
 - stdio MCP server: available.
-- Prebuilt package / release artifacts: planned, not yet published.
+- Rust prebuilt package / release artifacts: available on GitHub Releases.
