@@ -21,3 +21,6 @@ venv/
 # Reference checkout; do not vendor into this repo
 agentmemory-main/
 agentmemory-main
+
+# Local problem notes / scratch issue inventory
+problems.md

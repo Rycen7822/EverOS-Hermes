@@ -106,13 +106,13 @@ https://github.com/Rycen7822/EverOS-Hermes/releases/download/v<version>/everos-h
 Current Linux x86_64 asset:
 
 ```text
-everos-hermes-rust-0.1.0-x86_64-unknown-linux-gnu.tar.gz
+everos-hermes-rust-0.1.1-x86_64-unknown-linux-gnu.tar.gz
 ```
 
 Install flow:
 
 ```bash
-VERSION=0.1.0
+VERSION=0.1.1
 TARGET=x86_64-unknown-linux-gnu
 INSTALL_DIR="$HOME/.local/share/everos-hermes"
 ASSET="everos-hermes-rust-${VERSION}-${TARGET}.tar.gz"
@@ -265,10 +265,10 @@ Hermes provider tools exposed to the agent:
 
 | Tool | Purpose |
 | --- | --- |
-| `everos_memory_save` | Save an explicit long-term memory and optionally flush. |
+| `everos_memory_save` | Queue an explicit memory message and optionally request extraction; `saved=true` does not guarantee immediate structured/profile recall. |
 | `everos_memory_search` | Search EverOS memory for the configured user. |
 | `everos_memory_get` | Retrieve structured memories by type and page. |
-| `everos_memory_flush` | Force EverOS extraction for the user/session. |
+| `everos_memory_flush` | Force EverOS extraction for the user/session; accepts per-call `timeout` and returns retryable timeout guidance. |
 | `everos_memory_forget` | Delete a memory by id; requires `confirm=true`. |
 
 Advanced non-secret provider settings live in `$HERMES_HOME/everos.json`:
@@ -335,10 +335,10 @@ The MCP server exposes nine tools:
 
 | Tool | Purpose | Read-only? |
 | --- | --- | --- |
-| `everos_save_memory` | Save one explicit text memory, then optionally flush. | No |
+| `everos_save_memory` | Queue one explicit text memory message, then optionally flush; response separates queue/extraction/searchability state. | No |
 | `everos_add_memories` | Add one or more user/assistant/tool messages. | No |
-| `everos_flush_memories` | Trigger boundary detection and extraction immediately. | No |
-| `everos_search_memories` | Search with keyword, vector, hybrid, or agentic retrieval. | Yes |
+| `everos_flush_memories` | Trigger extraction immediately; supports per-call `timeout` and retryable timeout responses. | No |
+| `everos_search_memories` | Search with keyword, vector, hybrid, or agentic retrieval; vector fields are stripped unless `include_vectors=true`. | Yes |
 | `everos_get_memories` | Retrieve structured memories with pagination. | Yes |
 | `everos_delete_memories` | Delete by memory id or confirmed user/session scope. | No, destructive |
 | `everos_get_task_status` | Check an asynchronous extraction task. | Yes |
@@ -353,11 +353,13 @@ Common search call shape:
   "method": "hybrid",
   "top_k": 5,
   "memory_types": ["episodic_memory", "profile"],
+  "include_original_data": false,
+  "include_vectors": false,
   "response_format": "markdown"
 }
 ```
 
-Use `method="agentic"` only for complex multi-part retrieval because it is slower and more expensive than `hybrid`.
+Use `method="agentic"` only for complex multi-part retrieval because it is slower and more expensive than `hybrid`. Even when `include_original_data=true`, embedding/vector fields are removed by default to avoid flooding context; set `include_vectors=true` only for debugging.
 
 ## Runtime Modes
 
@@ -408,7 +410,7 @@ git diff --check
 ## Security Notes
 
 - Do not commit EverOS API keys, `.env`, MCP `env:` blocks with real credentials, or generated cache directories.
-- The client sends `Authorization: Bearer ***` only at request time.
+- The client sends `Authorization: Bearer <token>` only at request time; examples use placeholders only.
 - `everos_delete_memories` and `everos_memory_forget` are destructive and require explicit confirmation flags.
 - EverOS extraction is asynchronous by default; flushing makes newly added messages searchable sooner but can add API work.
 

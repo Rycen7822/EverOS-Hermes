@@ -110,6 +110,86 @@ def test_search_memories_uses_hybrid_defaults_and_filter(monkeypatch):
     }
 
 
+def test_search_memories_strips_vectors_from_original_data_by_default(monkeypatch):
+    from everos_hermes.client import EverOSClient
+
+    payload = {
+        "data": {
+            "episodes": [{"id": "ep1", "vector": [0.1, 0.2], "summary": "Coffee"}],
+            "original_data": {
+                "episodes": {
+                    "ep1": {"id": "ep1", "vector": [0.1, 0.2], "nested": {"embedding": [0.3]}}
+                }
+            },
+        }
+    }
+
+    def fake_urlopen(req, timeout):
+        return FakeHTTPResponse(payload)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    client = EverOSClient(api_key="sk-test")
+
+    result = client.search_memories(query="coffee", user_id="user_001", include_original_data=True)
+
+    rendered = json.dumps(result)
+    assert "vector" not in rendered
+    assert "embedding" not in rendered
+    assert result["data"]["episodes"][0]["summary"] == "Coffee"
+
+
+def test_search_memories_can_keep_vectors_for_debug(monkeypatch):
+    from everos_hermes.client import EverOSClient
+
+    payload = {"data": {"episodes": [{"id": "ep1", "vector": [0.1, 0.2]}]}}
+
+    def fake_urlopen(req, timeout):
+        return FakeHTTPResponse(payload)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    client = EverOSClient(api_key="sk-test")
+
+    result = client.search_memories(query="coffee", user_id="user_001", include_vectors=True)
+
+    assert result["data"]["episodes"][0]["vector"] == [0.1, 0.2]
+
+
+def test_flush_memories_accepts_per_call_timeout(monkeypatch):
+    from everos_hermes.client import EverOSClient
+
+    captured = {}
+
+    def fake_urlopen(req, timeout):
+        captured["timeout"] = timeout
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return FakeHTTPResponse({"data": {"status": "extracted"}})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    client = EverOSClient(api_key="sk-test", timeout=7)
+
+    client.flush_memories(user_id="user_001", session_id="sess-1", timeout=31)
+
+    assert captured == {"timeout": 31, "body": {"user_id": "user_001", "session_id": "sess-1"}}
+
+
+def test_timeout_error_is_actionable(monkeypatch):
+    from everos_hermes.client import EverOSClient, EverOSTimeoutError
+
+    def fake_urlopen(req, timeout):
+        raise TimeoutError()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    client = EverOSClient(api_key="sk-test")
+
+    with pytest.raises(EverOSTimeoutError) as exc:
+        client.flush_memories(user_id="user_001", session_id="sess-1")
+
+    message = str(exc.value)
+    assert "timed out" in message
+    assert "search" in message
+    assert exc.value.retryable is True
+
+
 def test_http_error_includes_everos_message(monkeypatch):
     from everos_hermes.client import EverOSClient, EverOSError
 

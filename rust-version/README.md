@@ -68,13 +68,13 @@ https://github.com/Rycen7822/EverOS-Hermes/releases/download/v<version>/everos-h
 Current Linux x86_64 asset:
 
 ```text
-everos-hermes-rust-0.1.0-x86_64-unknown-linux-gnu.tar.gz
+everos-hermes-rust-0.1.1-x86_64-unknown-linux-gnu.tar.gz
 ```
 
 Linux x86_64 install example:
 
 ```bash
-VERSION=0.1.0
+VERSION=0.1.1
 TARGET=x86_64-unknown-linux-gnu
 INSTALL_DIR="$HOME/.local/share/everos-hermes"
 ASSET="everos-hermes-rust-${VERSION}-${TARGET}.tar.gz"
@@ -173,14 +173,16 @@ Manual launch:
 
 When configured in Hermes, this is a stdio child process. Hermes starts it when MCP is loaded/tested and restarts it on `/reload-mcp` or process restart.
 
+Even when `include_original_data=true`, vector fields are stripped by default to avoid flooding context; set `include_vectors=true` only for debugging.
+
 ### MCP tools
 
 | Tool | Purpose | Read-only? |
 | --- | --- | --- |
-| `everos_save_memory` | Save one explicit text memory, then optionally flush. | No |
+| `everos_save_memory` | Queue one explicit text memory message, then optionally flush; response separates queue/extraction/searchability state. | No |
 | `everos_add_memories` | Add one or more user/assistant/tool messages. | No |
-| `everos_flush_memories` | Trigger boundary detection and extraction immediately. | No |
-| `everos_search_memories` | Search with keyword, vector, hybrid, or agentic retrieval. | Yes |
+| `everos_flush_memories` | Trigger extraction immediately; supports per-call `timeout` and retryable timeout responses. | No |
+| `everos_search_memories` | Search with keyword, vector, hybrid, or agentic retrieval; vector fields are stripped unless `include_vectors=true`. | Yes |
 | `everos_get_memories` | Retrieve structured memories by type and page. | Yes |
 | `everos_delete_memories` | Delete by memory id or confirmed user/session scope. | No, destructive |
 | `everos_get_task_status` | Check an async extraction task. | Yes |
@@ -224,10 +226,10 @@ Restart Hermes CLI/WebUI/gateway after changing the provider. MCP tools and the 
 
 | Tool | Purpose |
 | --- | --- |
-| `everos_memory_save` | Save an explicit long-term memory and optionally flush. |
+| `everos_memory_save` | Queue an explicit memory message and optionally request extraction; `saved=true` does not guarantee immediate structured/profile recall. |
 | `everos_memory_search` | Search EverOS memory for the configured user. |
 | `everos_memory_get` | Retrieve structured memories by type and page. |
-| `everos_memory_flush` | Force EverOS extraction for the user/session. |
+| `everos_memory_flush` | Force EverOS extraction for the user/session; accepts per-call `timeout` and returns retryable timeout guidance. |
 | `everos_memory_forget` | Delete a memory by id; requires `confirm=true`. |
 
 Advanced non-secret provider settings remain compatible with the Python version and live in `$HERMES_HOME/everos.json`.
@@ -266,6 +268,7 @@ The test suite includes:
 - context formatter parity;
 - provider availability/user-id/tool-schema parity;
 - provider save tool behavior;
+- vector stripping / `include_vectors` parity for search;
 - real binary stdio MCP initialize + tools/list smoke test.
 
 ## Security notes

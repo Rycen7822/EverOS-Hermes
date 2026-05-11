@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "everos-hermes"
-version = "0.1.0"
+version = "0.1.1"
 description = "EverOS MCP server and Hermes Agent memory provider"
 readme = "README.md"
 requires-python = ">=3.10"

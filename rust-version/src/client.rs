@@ -1,4 +1,5 @@
 use crate::env::get_env;
+use crate::formatting::strip_vectors;
 use reqwest::Method;
 use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
@@ -20,8 +21,10 @@ pub enum EverOSError {
     InvalidBaseUrl(String),
     #[error("EverOS request failed: {0}")]
     Request(String),
-    #[error("EverOS request timed out")]
-    Timeout,
+    #[error(
+        "EverOS request timed out during {method} {path}. The server may still be processing the request; search existing memories or check a prior task/request id before retrying."
+    )]
+    Timeout { method: String, path: String },
     #[error("EverOS returned invalid JSON from {url}: {source}")]
     InvalidJson {
         url: String,
@@ -75,8 +78,10 @@ impl EverOSClient {
         body: Option<Value>,
         timeout: Option<f64>,
     ) -> Result<Value> {
-        let url = format!("{}{}", self.base_url, normalize_path(path));
-        let method = Method::from_bytes(method.to_ascii_uppercase().as_bytes())
+        let normalized_path = normalize_path(path);
+        let url = format!("{}{}", self.base_url, normalized_path);
+        let method_name = method.to_ascii_uppercase();
+        let method = Method::from_bytes(method_name.as_bytes())
             .map_err(|err| EverOSError::Request(err.to_string()))?;
         let effective_timeout = timeout.unwrap_or(self.timeout);
         let client = Client::builder()
@@ -93,7 +98,10 @@ impl EverOSClient {
         }
         let resp = req.send().map_err(|err| {
             if err.is_timeout() {
-                EverOSError::Timeout
+                EverOSError::Timeout {
+                    method: method_name.clone(),
+                    path: normalized_path.clone(),
+                }
             } else {
                 EverOSError::Request(err.to_string())
             }
@@ -167,6 +175,7 @@ impl EverOSClient {
         user_id: &str,
         session_id: Option<&str>,
         agent: bool,
+        timeout: Option<f64>,
     ) -> Result<Value> {
         let path = if agent {
             "/api/v1/memories/agent/flush"
@@ -177,16 +186,16 @@ impl EverOSClient {
             "POST",
             path,
             Some(json!({"user_id": user_id, "session_id": session_id})),
-            None,
+            timeout,
         )
     }
 
-    pub fn flush_group_memories(&self, group_id: &str) -> Result<Value> {
+    pub fn flush_group_memories(&self, group_id: &str, timeout: Option<f64>) -> Result<Value> {
         self.request_json(
             "POST",
             "/api/v1/memories/group/flush",
             Some(json!({"group_id": group_id})),
-            None,
+            timeout,
         )
     }
 
@@ -232,6 +241,7 @@ impl EverOSClient {
         top_k: u64,
         radius: Option<f64>,
         include_original_data: bool,
+        include_vectors: bool,
         timeout: Option<f64>,
     ) -> Result<Value> {
         let resolved_filters = build_filters(user_id, group_id, session_id, filters);
@@ -241,7 +251,7 @@ impl EverOSClient {
                 .map(|item| item.to_string())
                 .collect()
         });
-        self.request_json(
+        let response = self.request_json(
             "POST",
             "/api/v1/memories/search",
             Some(json!({
@@ -254,7 +264,12 @@ impl EverOSClient {
                 "include_original_data": include_original_data,
             })),
             timeout,
-        )
+        )?;
+        Ok(if include_vectors {
+            response
+        } else {
+            strip_vectors(&response)
+        })
     }
 
     pub fn delete_memories(

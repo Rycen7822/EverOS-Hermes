@@ -19,6 +19,7 @@ def test_initialize_prefers_gateway_user_id(monkeypatch, tmp_path):
     from everos_hermes.provider import EverOSMemoryProvider
 
     monkeypatch.setenv("EVEROS_API_KEY", "sk-test")
+    monkeypatch.delenv("EVEROS_USER_ID", raising=False)
     provider = EverOSMemoryProvider()
     provider.initialize(
         session_id="sess-1",
@@ -140,6 +141,39 @@ def test_memory_save_tool_returns_json_string_and_flushes(monkeypatch, tmp_path)
 
     result = json.loads(raw)
     assert result["saved"] is True
+    assert result["message_queued"] is True
+    assert result["extraction_requested"] is True
+    assert result["flush"]["status"] == "extracted"
+    assert result["searchable"] is None
     assert result["task_id"] == "task-9"
     assert calls[0][0] == "add"
     assert calls[1][0] == "flush"
+
+
+def test_memory_flush_tool_accepts_timeout_and_reports_timeout(monkeypatch, tmp_path):
+    from everos_hermes.client import EverOSTimeoutError
+    from everos_hermes.provider import EverOSMemoryProvider
+
+    calls = []
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def flush_memories(self, **kwargs):
+            calls.append(kwargs)
+            raise EverOSTimeoutError("EverOS request timed out; search before retrying")
+
+    monkeypatch.setenv("EVEROS_API_KEY", "sk-test")
+    monkeypatch.setenv("EVEROS_USER_ID", "u1")
+    monkeypatch.setattr("everos_hermes.provider.EverOSClient", FakeClient)
+
+    provider = EverOSMemoryProvider()
+    provider.initialize(session_id="sess-1", hermes_home=str(tmp_path), platform="cli")
+    raw = provider.handle_tool_call("everos_memory_flush", {"session_id": "sess-2", "timeout": 45})
+
+    result = json.loads(raw)
+    assert calls == [{"user_id": "u1", "session_id": "sess-2", "agent": False, "timeout": 45}]
+    assert result["ok"] is False
+    assert result["retryable"] is True
+    assert result["operation"] == "flush"

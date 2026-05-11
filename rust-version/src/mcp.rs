@@ -1,4 +1,4 @@
-use crate::client::{DEFAULT_MEMORY_TYPES, EverOSClient};
+use crate::client::{DEFAULT_MEMORY_TYPES, EverOSClient, EverOSError};
 use crate::env::get_env;
 use crate::formatting::{format_search_context, pretty_json};
 use serde_json::{Value, json};
@@ -45,10 +45,10 @@ pub fn run_stdio() -> anyhow::Result<()> {
 
 pub fn tool_definitions() -> Vec<Value> {
     vec![
-        json!({"name":"everos_save_memory","title":"Save EverOS Memory","description":"Save one explicit text memory to EverOS.","inputSchema":{"type":"object","properties":{"content":{"type":"string"},"user_id":{"type":"string"},"session_id":{"type":"string"},"flush":{"type":"boolean","default":true},"async_mode":{"type":"boolean","default":true}},"required":["content"]},"annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":true}}),
-        json!({"name":"everos_add_memories","title":"Add EverOS Memory Messages","description":"Add one or more personal or agent-trajectory messages to EverOS.","inputSchema":{"type":"object","properties":{"messages":{"type":"array","items":{"type":"object"}},"user_id":{"type":"string"},"session_id":{"type":"string"},"async_mode":{"type":"boolean","default":true},"agent":{"type":"boolean","default":false},"flush":{"type":"boolean","default":false}},"required":["messages"]},"annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":true}}),
-        json!({"name":"everos_flush_memories","title":"Flush EverOS Memories","description":"Trigger EverOS boundary detection and memory extraction immediately.","inputSchema":{"type":"object","properties":{"user_id":{"type":"string"},"session_id":{"type":"string"},"agent":{"type":"boolean","default":false}}},"annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}}),
-        json!({"name":"everos_search_memories","title":"Search EverOS Memories","description":"Search EverOS memory using keyword, vector, hybrid, or agentic retrieval.","inputSchema":{"type":"object","properties":{"query":{"type":"string"},"user_id":{"type":"string"},"session_id":{"type":"string"},"method":{"type":"string","enum":["keyword","vector","hybrid","agentic"],"default":"hybrid"},"top_k":{"type":"integer","default":5},"memory_types":{"type":"array","items":{"type":"string"}},"include_original_data":{"type":"boolean","default":false},"response_format":{"type":"string","enum":["json","markdown"],"default":"json"}},"required":["query"]},"annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}}),
+        json!({"name":"everos_save_memory","title":"Save EverOS Memory","description":"Queue one explicit text memory message for EverOS extraction. saved=true means the message was accepted, not that structured memory is already searchable.","inputSchema":{"type":"object","properties":{"content":{"type":"string"},"user_id":{"type":"string"},"session_id":{"type":"string"},"flush":{"type":"boolean","default":true},"async_mode":{"type":"boolean","default":true},"flush_timeout":{"type":"number"}},"required":["content"]},"annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":true}}),
+        json!({"name":"everos_add_memories","title":"Add EverOS Memory Messages","description":"Add one or more personal or agent-trajectory messages to EverOS.","inputSchema":{"type":"object","properties":{"messages":{"type":"array","items":{"type":"object"}},"user_id":{"type":"string"},"session_id":{"type":"string"},"async_mode":{"type":"boolean","default":true},"agent":{"type":"boolean","default":false},"flush":{"type":"boolean","default":false},"flush_timeout":{"type":"number"}},"required":["messages"]},"annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":true}}),
+        json!({"name":"everos_flush_memories","title":"Flush EverOS Memories","description":"Trigger EverOS boundary detection and memory extraction immediately. Timeout errors are retryable; search/status checks should happen before retrying.","inputSchema":{"type":"object","properties":{"user_id":{"type":"string"},"session_id":{"type":"string"},"agent":{"type":"boolean","default":false},"timeout":{"type":"number"}}},"annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}}),
+        json!({"name":"everos_search_memories","title":"Search EverOS Memories","description":"Search EverOS memory using keyword, vector, hybrid, or agentic retrieval. Vector fields are stripped by default even when include_original_data=true; set include_vectors=true only for debugging.","inputSchema":{"type":"object","properties":{"query":{"type":"string"},"user_id":{"type":"string"},"session_id":{"type":"string"},"method":{"type":"string","enum":["keyword","vector","hybrid","agentic"],"default":"hybrid"},"top_k":{"type":"integer","default":5},"memory_types":{"type":"array","items":{"type":"string"}},"include_original_data":{"type":"boolean","default":false},"include_vectors":{"type":"boolean","default":false},"response_format":{"type":"string","enum":["json","markdown"],"default":"json"}},"required":["query"]},"annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}}),
         json!({"name":"everos_get_memories","title":"Get EverOS Memories","description":"Retrieve structured EverOS memories by memory_type with pagination.","inputSchema":{"type":"object","properties":{"user_id":{"type":"string"},"session_id":{"type":"string"},"memory_type":{"type":"string","enum":["episodic_memory","profile","agent_case","agent_skill"],"default":"episodic_memory"},"page":{"type":"integer","default":1},"page_size":{"type":"integer","default":20},"response_format":{"type":"string","enum":["json","markdown"],"default":"json"}}},"annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}}),
         json!({"name":"everos_delete_memories","title":"Delete EverOS Memories","description":"Delete EverOS memory by exact memory_id, or batch-delete by user/session when explicitly confirmed.","inputSchema":{"type":"object","properties":{"memory_id":{"type":"string"},"user_id":{"type":"string"},"session_id":{"type":"string"},"confirm":{"type":"boolean","default":false}}},"annotations":{"readOnlyHint":false,"destructiveHint":true,"idempotentHint":true,"openWorldHint":true}}),
         json!({"name":"everos_get_task_status","title":"Get EverOS Task Status","description":"Check an asynchronous EverOS extraction task status.","inputSchema":{"type":"object","properties":{"task_id":{"type":"string"}},"required":["task_id"]},"annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}}),
@@ -108,6 +108,7 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
             let session_id = optional_string(&value, "session_id");
             let flush = bool_arg(&value, "flush", true);
             let async_mode = bool_arg(&value, "async_mode", true);
+            let flush_timeout = float_arg(&value, "flush_timeout");
             let client = make_client()?;
             let result = client.add_memories(
                 &uid,
@@ -116,12 +117,22 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
                 async_mode,
                 false,
             )?;
-            if flush {
-                client.flush_memories(&uid, session_id.as_deref(), false)?;
-            }
-            Ok(pretty_json(
-                &json!({"saved":true,"user_id":uid,"session_id":session_id,"status":result.pointer("/data/status").and_then(Value::as_str).unwrap_or(""),"task_id":result.pointer("/data/task_id").and_then(Value::as_str).unwrap_or("")}),
-            ))
+            let flush_payload = if flush {
+                match client.flush_memories(&uid, session_id.as_deref(), false, flush_timeout) {
+                    Ok(response) => Some(flush_result_payload(&response)),
+                    Err(err @ EverOSError::Timeout { .. }) => Some(timeout_payload("flush", &err)),
+                    Err(err) => return Err(err.into()),
+                }
+            } else {
+                None
+            };
+            Ok(pretty_json(&save_result_payload(
+                &result,
+                &uid,
+                session_id.as_deref(),
+                flush,
+                flush_payload,
+            )))
         }
         "everos_add_memories" => {
             let messages = value
@@ -134,23 +145,36 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
             let async_mode = bool_arg(&value, "async_mode", true);
             let agent = bool_arg(&value, "agent", false);
             let flush = bool_arg(&value, "flush", false);
+            let flush_timeout = float_arg(&value, "flush_timeout");
             let client = make_client()?;
             let result =
                 client.add_memories(&uid, session_id.as_deref(), messages, async_mode, agent)?;
             if flush {
-                client.flush_memories(&uid, session_id.as_deref(), agent)?;
+                match client.flush_memories(&uid, session_id.as_deref(), agent, flush_timeout) {
+                    Ok(response) => Ok(pretty_json(
+                        &json!({"ok": true, "add": result, "flush": flush_result_payload(&response)}),
+                    )),
+                    Err(err @ EverOSError::Timeout { .. }) => Ok(pretty_json(
+                        &json!({"ok": true, "add": result, "flush": timeout_payload("flush", &err)}),
+                    )),
+                    Err(err) => Err(err.into()),
+                }
+            } else {
+                Ok(pretty_json(&result))
             }
-            Ok(pretty_json(&result))
         }
         "everos_flush_memories" => {
             let uid = optional_string(&value, "user_id").unwrap_or_else(default_user_id);
             let session_id = optional_string(&value, "session_id");
             let agent = bool_arg(&value, "agent", false);
-            Ok(pretty_json(&make_client()?.flush_memories(
-                &uid,
-                session_id.as_deref(),
-                agent,
-            )?))
+            let timeout = float_arg(&value, "timeout");
+            match make_client()?.flush_memories(&uid, session_id.as_deref(), agent, timeout) {
+                Ok(response) => Ok(pretty_json(&response)),
+                Err(err @ EverOSError::Timeout { .. }) => {
+                    Ok(pretty_json(&timeout_payload("flush", &err)))
+                }
+                Err(err) => Err(err.into()),
+            }
         }
         "everos_search_memories" => {
             let query = required_string(&value, "query")?;
@@ -170,6 +194,7 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
                 })
                 .filter(|items| !items.is_empty());
             let include_original_data = bool_arg(&value, "include_original_data", false);
+            let include_vectors = bool_arg(&value, "include_vectors", false);
             let response = make_client()?.search_memories(
                 &query,
                 Some(&uid),
@@ -181,6 +206,7 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
                 top_k,
                 None,
                 include_original_data,
+                include_vectors,
                 None,
             )?;
             Ok(render(
@@ -320,6 +346,69 @@ fn render(response: &Value, response_format: &str) -> String {
     pretty_json(response)
 }
 
+fn flush_result_payload(response: &Value) -> Value {
+    let data = response.get("data").unwrap_or(response);
+    let mut payload = serde_json::Map::new();
+    payload.insert("ok".to_string(), Value::Bool(true));
+    for key in ["status", "request_id", "task_id", "message"] {
+        if let Some(value) = data.get(key).filter(|value| !value.is_null()) {
+            payload.insert(key.to_string(), value.clone());
+        }
+    }
+    Value::Object(payload)
+}
+
+fn timeout_payload(operation: &str, err: &EverOSError) -> Value {
+    json!({
+        "ok": false,
+        "operation": operation,
+        "error": err.to_string(),
+        "retryable": true,
+        "suggested_next_actions": [
+            "search existing memories before retrying, because the server may have completed the request after the client timed out",
+            "if the operation returned a task_id or request_id earlier, check that status before issuing another write/flush",
+            "retry with a longer timeout only if search/status checks do not show the expected result"
+        ]
+    })
+}
+
+fn save_result_payload(
+    result: &Value,
+    user_id: &str,
+    session_id: Option<&str>,
+    flush_requested: bool,
+    flush: Option<Value>,
+) -> Value {
+    let status = result
+        .pointer("/data/status")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let task_id = result
+        .pointer("/data/task_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let extraction_requested = flush_requested
+        || !task_id.is_empty()
+        || matches!(status, "queued" | "processing" | "success");
+    json!({
+        "saved": true,
+        "message_queued": true,
+        "extraction_requested": extraction_requested,
+        "searchable": Value::Null,
+        "user_id": user_id,
+        "session_id": session_id,
+        "status": status,
+        "task_id": task_id,
+        "flush": flush.unwrap_or_else(|| {
+            if flush_requested {
+                json!({"ok": false, "error": "flush requested but no flush result was recorded"})
+            } else {
+                json!({"ok": Value::Null, "status": "not_requested"})
+            }
+        }),
+    })
+}
+
 fn required_string(value: &Value, key: &str) -> anyhow::Result<String> {
     let text = optional_string(value, key).unwrap_or_default();
     if text.trim().is_empty() {
@@ -360,6 +449,17 @@ fn int_arg(value: &Value, key: &str, default: i64, low: i64, high: i64) -> i64 {
         })
         .unwrap_or(default)
         .clamp(low, high)
+}
+
+fn float_arg(value: &Value, key: &str) -> Option<f64> {
+    value
+        .get(key)
+        .and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str().and_then(|text| text.parse::<f64>().ok()))
+        })
+        .filter(|value| value.is_finite() && *value > 0.0)
 }
 
 fn now_ms() -> u128 {

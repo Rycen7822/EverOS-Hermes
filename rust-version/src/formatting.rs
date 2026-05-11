@@ -1,4 +1,6 @@
-use serde_json::Value;
+use serde_json::{Map, Value};
+
+const VECTOR_KEYS: [&str; 3] = ["vector", "embedding", "embeddings"];
 
 pub fn compact_json(data: &Value) -> String {
     serde_json::to_string(data).unwrap_or_else(|_| "null".to_string())
@@ -6,6 +8,23 @@ pub fn compact_json(data: &Value) -> String {
 
 pub fn pretty_json(data: &Value) -> String {
     serde_json::to_string_pretty(data).unwrap_or_else(|_| "null".to_string())
+}
+
+pub fn strip_vectors(data: &Value) -> Value {
+    match data {
+        Value::Object(map) => {
+            let mut cleaned = Map::new();
+            for (key, value) in map {
+                if VECTOR_KEYS.contains(&key.as_str()) {
+                    continue;
+                }
+                cleaned.insert(key.clone(), strip_vectors(value));
+            }
+            Value::Object(cleaned)
+        }
+        Value::Array(items) => Value::Array(items.iter().map(strip_vectors).collect()),
+        other => other.clone(),
+    }
 }
 
 pub fn format_search_context(response: &Value, max_items: usize) -> String {

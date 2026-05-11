@@ -1,6 +1,6 @@
 use everos_hermes_rust::client::{DEFAULT_BASE_URL, DEFAULT_MEMORY_TYPES, EverOSClient};
 use everos_hermes_rust::env::{get_env, read_dotenv};
-use everos_hermes_rust::formatting::format_search_context;
+use everos_hermes_rust::formatting::{format_search_context, strip_vectors};
 use everos_hermes_rust::mcp::TOOL_NAMES;
 use everos_hermes_rust::provider::{EverOSProvider, ProviderInit};
 use serde_json::{Value, json};
@@ -153,6 +153,7 @@ fn client_search_uses_hybrid_defaults_and_session_filter() {
             5,
             None,
             false,
+            false,
             None,
         )
         .unwrap();
@@ -167,6 +168,64 @@ fn client_search_uses_hybrid_defaults_and_session_filter() {
     assert_eq!(body["memory_types"], json!(DEFAULT_MEMORY_TYPES));
     assert_eq!(body["top_k"], 5);
     assert_eq!(body.get("radius"), None);
+}
+
+#[test]
+fn client_search_strips_vectors_by_default_but_can_keep_them() {
+    let payload = json!({
+        "data": {
+            "episodes": [{"id":"ep1","summary":"Coffee","vector":[0.1,0.2]}],
+            "original_data": {"episodes": {"ep1": {"vector":[0.1,0.2],"embedding":[0.3]}}}
+        }
+    });
+
+    let stripped = strip_vectors(&payload);
+    assert!(stripped.to_string().contains("Coffee"));
+    assert!(!stripped.to_string().contains("vector"));
+    assert!(!stripped.to_string().contains("embedding"));
+
+    let (base_url, handle) = one_request_server(payload.clone());
+    let client = EverOSClient::new("test-key", &base_url, 10.0).unwrap();
+    let response = client
+        .search_memories(
+            "coffee",
+            Some("user_001"),
+            None,
+            None,
+            None,
+            "hybrid",
+            None,
+            5,
+            None,
+            true,
+            false,
+            None,
+        )
+        .unwrap();
+    handle.join().unwrap();
+    assert!(response.to_string().contains("Coffee"));
+    assert!(!response.to_string().contains("vector"));
+
+    let (base_url, handle) = one_request_server(payload);
+    let client = EverOSClient::new("test-key", &base_url, 10.0).unwrap();
+    let response = client
+        .search_memories(
+            "coffee",
+            Some("user_001"),
+            None,
+            None,
+            None,
+            "hybrid",
+            None,
+            5,
+            None,
+            true,
+            true,
+            None,
+        )
+        .unwrap();
+    handle.join().unwrap();
+    assert_eq!(response["data"]["episodes"][0]["vector"], json!([0.1, 0.2]));
 }
 
 #[test]
@@ -264,11 +323,91 @@ fn provider_save_tool_adds_memory_and_flushes() {
     let request = handle_add.join().unwrap();
 
     assert_eq!(response["saved"], true);
+    assert_eq!(response["message_queued"], true);
+    assert_eq!(response["extraction_requested"], true);
+    assert_eq!(response["searchable"], Value::Null);
+    assert_eq!(response["flush"]["status"], "not_requested");
     assert_eq!(response["task_id"], "task-9");
     assert!(request.starts_with("POST /api/v1/memories HTTP/1.1"));
     assert_eq!(parse_http_body(&request)["user_id"], "u1");
 
     remove_env("HERMES_HOME");
+}
+
+#[test]
+fn mcp_search_tool_strips_vectors_and_exposes_new_safety_parameters() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let (base_url, handle) = one_request_server(json!({
+        "data": {
+            "episodes": [{"id":"ep1","summary":"Coffee","vector":[0.1,0.2]}],
+            "original_data": {"episodes": {"ep1": {"vector":[0.1,0.2],"summary":"Coffee"}}}
+        }
+    }));
+    set_env("EVEROS_API_KEY", "test-key");
+    set_env("EVEROS_BASE_URL", &base_url);
+    set_env("EVEROS_USER_ID", "u1");
+
+    let raw = everos_hermes_rust::mcp::call_tool(
+        "everos_search_memories",
+        json!({"query":"coffee","include_original_data":true}),
+    )
+    .unwrap();
+    let request = handle.join().unwrap();
+    let response: Value = serde_json::from_str(&raw).unwrap();
+
+    assert_eq!(parse_http_body(&request)["include_original_data"], true);
+    assert!(response.to_string().contains("Coffee"));
+    assert!(!response.to_string().contains("vector"));
+
+    let tools = everos_hermes_rust::mcp::tool_definitions();
+    let search = tools
+        .iter()
+        .find(|tool| tool["name"] == "everos_search_memories")
+        .unwrap();
+    assert!(
+        search["inputSchema"]["properties"]
+            .get("include_vectors")
+            .is_some()
+    );
+    let flush = tools
+        .iter()
+        .find(|tool| tool["name"] == "everos_flush_memories")
+        .unwrap();
+    assert!(flush["inputSchema"]["properties"].get("timeout").is_some());
+
+    remove_env("EVEROS_API_KEY");
+    remove_env("EVEROS_BASE_URL");
+    remove_env("EVEROS_USER_ID");
+}
+
+#[test]
+fn mcp_save_tool_returns_queue_semantics_when_flush_disabled() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let (base_url, handle) =
+        one_request_server(json!({"data":{"status":"queued","task_id":"task-mcp"}}));
+    set_env("EVEROS_API_KEY", "test-key");
+    set_env("EVEROS_BASE_URL", &base_url);
+    set_env("EVEROS_USER_ID", "u1");
+
+    let raw = everos_hermes_rust::mcp::call_tool(
+        "everos_save_memory",
+        json!({"content":"User prefers pytest.","session_id":"sess-1","flush":false}),
+    )
+    .unwrap();
+    let request = handle.join().unwrap();
+    let response: Value = serde_json::from_str(&raw).unwrap();
+
+    assert_eq!(parse_http_body(&request)["session_id"], "sess-1");
+    assert_eq!(response["saved"], true);
+    assert_eq!(response["message_queued"], true);
+    assert_eq!(response["extraction_requested"], true);
+    assert_eq!(response["searchable"], Value::Null);
+    assert_eq!(response["flush"]["status"], "not_requested");
+    assert_eq!(response["task_id"], "task-mcp");
+
+    remove_env("EVEROS_API_KEY");
+    remove_env("EVEROS_BASE_URL");
+    remove_env("EVEROS_USER_ID");
 }
 
 #[test]

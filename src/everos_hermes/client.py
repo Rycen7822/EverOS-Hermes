@@ -7,6 +7,7 @@ import urllib.request
 from typing import Any, Mapping
 
 from .env import get_env
+from .formatting import strip_vectors
 
 DEFAULT_BASE_URL = "https://api.evermind.ai"
 DEFAULT_TIMEOUT = 10.0
@@ -15,6 +16,17 @@ DEFAULT_MEMORY_TYPES = ["episodic_memory", "profile"]
 
 class EverOSError(RuntimeError):
     """Raised when an EverOS API request fails."""
+
+
+class EverOSTimeoutError(EverOSError):
+    """Raised when an EverOS request times out but may still be processing."""
+
+    retryable = True
+    suggested_next_actions = [
+        "search existing memories before retrying, because the server may have completed the request after the client timed out",
+        "if the operation returned a task_id or request_id earlier, check that status before issuing another write/flush",
+        "retry with a longer timeout only if search/status checks do not show the expected result",
+    ]
 
 
 class EverOSClient:
@@ -51,9 +63,11 @@ class EverOSClient:
         except urllib.error.HTTPError as exc:
             raise _http_error_to_everos_error(exc) from exc
         except urllib.error.URLError as exc:
+            if isinstance(exc.reason, TimeoutError):
+                raise _timeout_error(method, path) from exc
             raise EverOSError(f"EverOS request failed: {exc.reason}") from exc
         except TimeoutError as exc:
-            raise EverOSError("EverOS request timed out") from exc
+            raise _timeout_error(method, path) from exc
         except json.JSONDecodeError as exc:
             raise EverOSError(f"EverOS returned invalid JSON from {url}: {exc}") from exc
 
@@ -89,12 +103,12 @@ class EverOSClient:
             {"group_id": group_id, "group_meta": group_meta, "messages": messages, "async_mode": async_mode},
         )
 
-    def flush_memories(self, *, user_id: str, session_id: str | None = None, agent: bool = False) -> dict[str, Any]:
+    def flush_memories(self, *, user_id: str, session_id: str | None = None, agent: bool = False, timeout: float | None = None) -> dict[str, Any]:
         path = "/api/v1/memories/agent/flush" if agent else "/api/v1/memories/flush"
-        return self.request_json("POST", path, {"user_id": user_id, "session_id": session_id})
+        return self.request_json("POST", path, {"user_id": user_id, "session_id": session_id}, timeout=timeout)
 
-    def flush_group_memories(self, *, group_id: str) -> dict[str, Any]:
-        return self.request_json("POST", "/api/v1/memories/group/flush", {"group_id": group_id})
+    def flush_group_memories(self, *, group_id: str, timeout: float | None = None) -> dict[str, Any]:
+        return self.request_json("POST", "/api/v1/memories/group/flush", {"group_id": group_id}, timeout=timeout)
 
     def get_memories(
         self,
@@ -136,6 +150,7 @@ class EverOSClient:
         top_k: int = 5,
         radius: float | None = None,
         include_original_data: bool = False,
+        include_vectors: bool = False,
         timeout: float | None = None,
     ) -> dict[str, Any]:
         resolved_filters = _build_filters(user_id=user_id, group_id=group_id, session_id=session_id, filters=filters)
@@ -148,7 +163,8 @@ class EverOSClient:
             "radius": radius,
             "include_original_data": include_original_data,
         }
-        return self.request_json("POST", "/api/v1/memories/search", body, timeout=timeout)
+        response = self.request_json("POST", "/api/v1/memories/search", body, timeout=timeout)
+        return response if include_vectors else strip_vectors(response)
 
     def delete_memories(
         self,
@@ -234,3 +250,10 @@ def _http_error_to_everos_error(exc: urllib.error.HTTPError) -> EverOSError:
     except Exception:
         pass
     return EverOSError(f"EverOS API error {detail or exc.reason}")
+
+
+def _timeout_error(method: str, path: str) -> EverOSTimeoutError:
+    return EverOSTimeoutError(
+        f"EverOS request timed out during {method.upper()} {_normalize_path(path)}. "
+        "The server may still be processing the request; search existing memories or check a prior task/request id before retrying."
+    )

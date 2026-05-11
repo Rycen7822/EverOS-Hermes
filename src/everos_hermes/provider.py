@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-from .client import DEFAULT_BASE_URL, DEFAULT_MEMORY_TYPES, EverOSClient, EverOSError
+from .client import DEFAULT_BASE_URL, DEFAULT_MEMORY_TYPES, EverOSClient, EverOSError, EverOSTimeoutError
 from .env import get_env
 from .formatting import format_search_context, pretty_json
 
@@ -83,7 +83,7 @@ _TRIVIAL_RE = re.compile(r"^(ok|okay|thanks|thank you|got it|sure|yes|no|yep|nop
 
 SAVE_SCHEMA = {
     "name": "everos_memory_save",
-    "description": "Save an explicit long-term memory to EverOS and optionally flush extraction immediately.",
+    "description": "Queue an explicit long-term memory message in EverOS and optionally request extraction; saved=true does not guarantee a structured memory is immediately searchable.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -127,11 +127,12 @@ GET_SCHEMA = {
 
 FLUSH_SCHEMA = {
     "name": "everos_memory_flush",
-    "description": "Force EverOS memory extraction for the configured user/session.",
+    "description": "Force EverOS memory extraction for the configured user/session. Timeout errors are retryable; search/status checks should happen before retrying.",
     "parameters": {
         "type": "object",
         "properties": {
             "session_id": {"type": "string", "description": "Optional session id."},
+            "timeout": {"type": "number", "description": "Optional per-call timeout in seconds."},
         },
     },
 }
@@ -217,6 +218,59 @@ def _as_bool(value: Any, default: bool) -> bool:
 
 def _tool_error(message: str) -> str:
     return json.dumps({"error": message}, ensure_ascii=False)
+
+
+def _timeout_payload(operation: str, exc: EverOSTimeoutError) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "operation": operation,
+        "error": str(exc),
+        "retryable": bool(getattr(exc, "retryable", True)),
+        "suggested_next_actions": list(getattr(exc, "suggested_next_actions", [])),
+    }
+
+
+def _flush_result_payload(response: dict[str, Any]) -> dict[str, Any]:
+    data = response.get("data", {}) if isinstance(response, dict) else {}
+    payload: dict[str, Any] = {"ok": True}
+    if isinstance(data, dict):
+        for key in ("status", "request_id", "task_id", "message"):
+            if data.get(key):
+                payload[key] = data[key]
+    return payload
+
+
+def _save_result_payload(
+    *,
+    result: dict[str, Any],
+    user_id: str,
+    session_id: str | None,
+    flush_requested: bool,
+    flush_result: dict[str, Any] | None = None,
+    flush_error: EverOSTimeoutError | None = None,
+) -> dict[str, Any]:
+    data = result.get("data", {}) if isinstance(result, dict) else {}
+    status = data.get("status", "") if isinstance(data, dict) else ""
+    task_id = data.get("task_id", "") if isinstance(data, dict) else ""
+    payload: dict[str, Any] = {
+        "saved": True,
+        "message_queued": True,
+        "extraction_requested": bool(task_id or status in {"queued", "processing", "success"} or flush_requested),
+        "searchable": None,
+        "user_id": user_id,
+        "session_id": session_id,
+        "status": status,
+        "task_id": task_id,
+    }
+    if flush_result is not None:
+        payload["flush"] = _flush_result_payload(flush_result)
+    elif flush_error is not None:
+        payload["flush"] = _timeout_payload("flush", flush_error)
+    elif flush_requested:
+        payload["flush"] = {"ok": False, "error": "flush requested but no flush result was recorded"}
+    else:
+        payload["flush"] = {"ok": None, "status": "not_requested"}
+    return payload
 
 
 def _now_ms() -> int:
@@ -380,11 +434,23 @@ class EverOSMemoryProvider(MemoryProvider):
             async_mode=True,
             agent=False,
         )
-        if _as_bool(args.get("flush", True), True):
-            self._client.flush_memories(user_id=self._user_id, session_id=session_id, agent=False)
-        data = result.get("data", {}) if isinstance(result, dict) else {}
+        flush_result = None
+        flush_error = None
+        flush_requested = _as_bool(args.get("flush", True), True)
+        if flush_requested:
+            try:
+                flush_result = self._client.flush_memories(user_id=self._user_id, session_id=session_id, agent=False)
+            except EverOSTimeoutError as exc:
+                flush_error = exc
         return json.dumps(
-            {"saved": True, "status": data.get("status", ""), "task_id": data.get("task_id", ""), "user_id": self._user_id},
+            _save_result_payload(
+                result=result,
+                user_id=self._user_id,
+                session_id=session_id,
+                flush_requested=flush_requested,
+                flush_result=flush_result,
+                flush_error=flush_error,
+            ),
             ensure_ascii=False,
         )
 
@@ -420,11 +486,15 @@ class EverOSMemoryProvider(MemoryProvider):
         return pretty_json(response)
 
     def _tool_flush(self, args: dict[str, Any]) -> str:
-        response = self._client.flush_memories(
-            user_id=self._user_id,
-            session_id=str(args.get("session_id") or self._session_id or "") or None,
-            agent=False,
-        )
+        try:
+            response = self._client.flush_memories(
+                user_id=self._user_id,
+                session_id=str(args.get("session_id") or self._session_id or "") or None,
+                agent=False,
+                timeout=_float_or_none(args.get("timeout")),
+            )
+        except EverOSTimeoutError as exc:
+            return pretty_json(_timeout_payload("flush", exc))
         return pretty_json(response)
 
     def _tool_forget(self, args: dict[str, Any]) -> str:
@@ -516,6 +586,16 @@ def _int_between(value: Any, low: int, high: int, default: int) -> int:
         return max(low, min(high, int(value)))
     except Exception:
         return default
+
+
+def _float_or_none(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        parsed = float(value)
+    except Exception:
+        return None
+    return parsed if parsed > 0 else None
 
 
 def register(ctx: Any) -> None:

@@ -6,9 +6,9 @@ from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
 
-from .client import DEFAULT_BASE_URL, DEFAULT_MEMORY_TYPES, EverOSClient
+from .client import DEFAULT_BASE_URL, DEFAULT_MEMORY_TYPES, EverOSClient, EverOSError, EverOSTimeoutError
 from .env import get_env
-from .formatting import format_search_context, pretty_json
+from .formatting import format_search_context, pretty_json, strip_vectors
 
 mcp = FastMCP("everos_mcp")
 
@@ -50,6 +50,64 @@ def _render(response: dict[str, Any], response_format: str = "json") -> str:
     return pretty_json(response)
 
 
+def _flush_result_payload(response: dict[str, Any]) -> dict[str, Any]:
+    data = response.get("data", {}) if isinstance(response, dict) else {}
+    payload: dict[str, Any] = {"ok": True}
+    if isinstance(data, dict):
+        if data.get("status"):
+            payload["status"] = data.get("status")
+        if data.get("request_id"):
+            payload["request_id"] = data.get("request_id")
+        if data.get("task_id"):
+            payload["task_id"] = data.get("task_id")
+        if data.get("message"):
+            payload["message"] = data.get("message")
+    return payload
+
+
+def _timeout_payload(operation: str, exc: EverOSTimeoutError) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "operation": operation,
+        "error": str(exc),
+        "retryable": bool(getattr(exc, "retryable", True)),
+        "suggested_next_actions": list(getattr(exc, "suggested_next_actions", [])),
+    }
+
+
+def _save_result_payload(
+    *,
+    result: dict[str, Any],
+    user_id: str,
+    session_id: str | None,
+    flush_requested: bool,
+    flush_result: dict[str, Any] | None = None,
+    flush_error: EverOSTimeoutError | None = None,
+) -> dict[str, Any]:
+    data = result.get("data", {}) if isinstance(result, dict) else {}
+    status = data.get("status", "") if isinstance(data, dict) else ""
+    task_id = data.get("task_id", "") if isinstance(data, dict) else ""
+    payload: dict[str, Any] = {
+        "saved": True,
+        "message_queued": True,
+        "extraction_requested": bool(task_id or status in {"queued", "processing", "success"} or flush_requested),
+        "searchable": None,
+        "user_id": user_id,
+        "session_id": session_id,
+        "status": status,
+        "task_id": task_id,
+    }
+    if flush_result is not None:
+        payload["flush"] = _flush_result_payload(flush_result)
+    elif flush_error is not None:
+        payload["flush"] = _timeout_payload("flush", flush_error)
+    elif flush_requested:
+        payload["flush"] = {"ok": False, "error": "flush requested but no flush result was recorded"}
+    else:
+        payload["flush"] = {"ok": None, "status": "not_requested"}
+    return payload
+
+
 @mcp.tool(
     name="everos_save_memory",
     title="Save EverOS Memory",
@@ -61,12 +119,15 @@ async def everos_save_memory(
     session_id: str | None = None,
     flush: bool = True,
     async_mode: bool = True,
+    flush_timeout: float | None = None,
 ) -> str:
-    """Save one explicit text memory to EverOS.
+    """Queue one explicit text memory message for EverOS extraction.
 
     This is a convenience wrapper around POST /api/v1/memories. It stores the
     provided content as a user message for the target user_id, then optionally
-    calls /api/v1/memories/flush so the memory becomes searchable immediately.
+    calls /api/v1/memories/flush. `saved=true` means the message was accepted;
+    inspect `flush`, `task_id`, and follow-up search results before assuming a
+    structured profile/fact is already searchable.
     """
     uid = user_id or default_user_id()
     client = make_client()
@@ -77,10 +138,23 @@ async def everos_save_memory(
         async_mode=async_mode,
         agent=False,
     )
+    flush_result = None
+    flush_error = None
     if flush:
-        client.flush_memories(user_id=uid, session_id=session_id, agent=False)
-    data = result.get("data", {}) if isinstance(result, dict) else {}
-    return pretty_json({"saved": True, "user_id": uid, "session_id": session_id, "status": data.get("status", ""), "task_id": data.get("task_id", "")})
+        try:
+            flush_result = client.flush_memories(user_id=uid, session_id=session_id, agent=False, timeout=flush_timeout)
+        except EverOSTimeoutError as exc:
+            flush_error = exc
+    return pretty_json(
+        _save_result_payload(
+            result=result,
+            user_id=uid,
+            session_id=session_id,
+            flush_requested=flush,
+            flush_result=flush_result,
+            flush_error=flush_error,
+        )
+    )
 
 
 @mcp.tool(
@@ -95,6 +169,7 @@ async def everos_add_memories(
     async_mode: bool = True,
     agent: bool = False,
     flush: bool = False,
+    flush_timeout: float | None = None,
 ) -> str:
     """Add one or more personal or agent-trajectory messages to EverOS.
 
@@ -105,7 +180,11 @@ async def everos_add_memories(
     client = make_client()
     result = client.add_memories(user_id=uid, session_id=session_id, messages=messages, async_mode=async_mode, agent=agent)
     if flush:
-        client.flush_memories(user_id=uid, session_id=session_id, agent=agent)
+        try:
+            flush_result = client.flush_memories(user_id=uid, session_id=session_id, agent=agent, timeout=flush_timeout)
+            return pretty_json({"ok": True, "add": result, "flush": _flush_result_payload(flush_result)})
+        except EverOSTimeoutError as exc:
+            return pretty_json({"ok": True, "add": result, "flush": _timeout_payload("flush", exc)})
     return pretty_json(result)
 
 
@@ -114,10 +193,17 @@ async def everos_add_memories(
     title="Flush EverOS Memories",
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
 )
-async def everos_flush_memories(user_id: str | None = None, session_id: str | None = None, agent: bool = False) -> str:
-    """Trigger EverOS boundary detection and memory extraction immediately."""
+async def everos_flush_memories(user_id: str | None = None, session_id: str | None = None, agent: bool = False, timeout: float | None = None) -> str:
+    """Trigger EverOS boundary detection and memory extraction immediately.
+
+    If the client times out, the response is a retryable structured error;
+    search/status checks should be attempted before issuing another flush.
+    """
     uid = user_id or default_user_id()
-    return pretty_json(make_client().flush_memories(user_id=uid, session_id=session_id, agent=agent))
+    try:
+        return pretty_json(make_client().flush_memories(user_id=uid, session_id=session_id, agent=agent, timeout=timeout))
+    except EverOSTimeoutError as exc:
+        return pretty_json(_timeout_payload("flush", exc))
 
 
 @mcp.tool(
@@ -133,6 +219,7 @@ async def everos_search_memories(
     top_k: int = 5,
     memory_types: list[str] | None = None,
     include_original_data: bool = False,
+    include_vectors: bool = False,
     response_format: ResponseFormat = "json",
 ) -> str:
     """Search EverOS memory using keyword, vector, hybrid, or agentic retrieval.
@@ -150,7 +237,10 @@ async def everos_search_memories(
         memory_types=resolved_types,
         top_k=top_k,
         include_original_data=include_original_data,
+        include_vectors=include_vectors,
     )
+    if not include_vectors:
+        response = strip_vectors(response)
     return _render(response, response_format)
 
 

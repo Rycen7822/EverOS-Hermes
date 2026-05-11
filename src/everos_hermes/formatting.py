@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+VECTOR_KEYS = {"vector", "embedding", "embeddings"}
+
 
 def compact_json(data: Any) -> str:
     return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
@@ -10,6 +12,20 @@ def compact_json(data: Any) -> str:
 
 def pretty_json(data: Any) -> str:
     return json.dumps(data, ensure_ascii=False, indent=2)
+
+
+def strip_vectors(data: Any) -> Any:
+    """Return a deep copy with embedding/vector payloads removed.
+
+    EverOS debug/original-data responses can include large embedding vectors.
+    Those are rarely useful to an LLM and can dominate MCP context, so callers
+    should strip them unless a human explicitly requests vector debugging.
+    """
+    if isinstance(data, dict):
+        return {key: strip_vectors(value) for key, value in data.items() if key not in VECTOR_KEYS}
+    if isinstance(data, list):
+        return [strip_vectors(item) for item in data]
+    return data
 
 
 def format_search_context(response: dict[str, Any], *, max_items: int = 5) -> str:
