@@ -8,6 +8,17 @@ from typing import Any, Mapping
 
 from .env import get_env
 from .formatting import strip_vectors
+from .schemas import (
+    build_filters,
+    normalize_rank_order,
+    normalize_scope,
+    settings_diff,
+    validate_delete_request,
+    validate_get_params,
+    validate_messages,
+    validate_search_params,
+    validate_settings_update,
+)
 
 DEFAULT_BASE_URL = "https://api.evermind.ai"
 DEFAULT_TIMEOUT = 10.0
@@ -56,10 +67,14 @@ class EverOSClient:
         try:
             with urllib.request.urlopen(req, timeout=self.timeout if timeout is None else timeout) as resp:
                 raw = resp.read().decode("utf-8")
+                status_code = int(getattr(resp, "status", 0) or 0)
                 if not raw:
-                    return {}
+                    return {"ok": True, "status_code": status_code}
                 parsed = json.loads(raw)
-                return parsed if isinstance(parsed, dict) else {"data": parsed}
+                if isinstance(parsed, dict):
+                    parsed.setdefault("status_code", status_code)
+                    return parsed
+                return {"data": parsed, "status_code": status_code}
         except urllib.error.HTTPError as exc:
             raise _http_error_to_everos_error(exc) from exc
         except urllib.error.URLError as exc:
@@ -78,37 +93,32 @@ class EverOSClient:
         messages: list[dict[str, Any]],
         session_id: str | None = None,
         async_mode: bool = True,
-        agent: bool = False,
+        agent: bool | None = None,
+        scope: str | None = None,
     ) -> dict[str, Any]:
+        resolved_scope = normalize_scope(scope, agent)
+        validate_messages(messages, resolved_scope)
         body: dict[str, Any] = {
             "user_id": user_id,
             "session_id": session_id,
             "messages": messages,
             "async_mode": async_mode,
         }
-        path = "/api/v1/memories/agent" if agent else "/api/v1/memories"
+        path = "/api/v1/memories/agent" if resolved_scope == "agent" else "/api/v1/memories"
         return self.request_json("POST", path, body)
 
-    def add_group_memories(
+    def flush_memories(
         self,
         *,
-        group_id: str,
-        messages: list[dict[str, Any]],
-        group_meta: dict[str, Any] | None = None,
-        async_mode: bool = True,
+        user_id: str,
+        session_id: str | None = None,
+        agent: bool | None = None,
+        scope: str | None = None,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
-        return self.request_json(
-            "POST",
-            "/api/v1/memories/group",
-            {"group_id": group_id, "group_meta": group_meta, "messages": messages, "async_mode": async_mode},
-        )
-
-    def flush_memories(self, *, user_id: str, session_id: str | None = None, agent: bool = False, timeout: float | None = None) -> dict[str, Any]:
-        path = "/api/v1/memories/agent/flush" if agent else "/api/v1/memories/flush"
+        resolved_scope = normalize_scope(scope, agent)
+        path = "/api/v1/memories/agent/flush" if resolved_scope == "agent" else "/api/v1/memories/flush"
         return self.request_json("POST", path, {"user_id": user_id, "session_id": session_id}, timeout=timeout)
-
-    def flush_group_memories(self, *, group_id: str, timeout: float | None = None) -> dict[str, Any]:
-        return self.request_json("POST", "/api/v1/memories/group/flush", {"group_id": group_id}, timeout=timeout)
 
     def get_memories(
         self,
@@ -123,7 +133,11 @@ class EverOSClient:
         rank_by: str = "timestamp",
         rank_order: str = "desc",
     ) -> dict[str, Any]:
-        resolved_filters = _build_filters(user_id=user_id, group_id=group_id, session_id=session_id, filters=filters)
+        if group_id is not None:
+            raise ValueError("group memory is out of scope for this EverOS-Hermes release")
+        normalized_rank_order = normalize_rank_order(rank_order)
+        validate_get_params(memory_type, page, page_size, rank_by, normalized_rank_order)
+        resolved_filters = build_filters(user_id=user_id, session_id=session_id, filters=filters)
         return self.request_json(
             "POST",
             "/api/v1/memories/get",
@@ -133,7 +147,7 @@ class EverOSClient:
                 "page": page,
                 "page_size": page_size,
                 "rank_by": rank_by,
-                "rank_order": rank_order,
+                "rank_order": normalized_rank_order,
             },
         )
 
@@ -153,17 +167,23 @@ class EverOSClient:
         include_vectors: bool = False,
         timeout: float | None = None,
     ) -> dict[str, Any]:
-        resolved_filters = _build_filters(user_id=user_id, group_id=group_id, session_id=session_id, filters=filters)
+        if group_id is not None:
+            raise ValueError("group memory is out of scope for this EverOS-Hermes release")
+        resolved_memory_types = list(memory_types or DEFAULT_MEMORY_TYPES)
+        normalized_method = method.strip().lower()
+        validate_search_params(normalized_method, resolved_memory_types, top_k, radius)
+        resolved_filters = build_filters(user_id=user_id, session_id=session_id, filters=filters)
+        effective_timeout = 60.0 if normalized_method == "agentic" and timeout is None else timeout
         body = {
             "query": query,
             "filters": resolved_filters,
-            "method": method,
-            "memory_types": list(memory_types or DEFAULT_MEMORY_TYPES),
+            "method": normalized_method,
+            "memory_types": resolved_memory_types,
             "top_k": top_k,
             "radius": radius,
             "include_original_data": include_original_data,
         }
-        response = self.request_json("POST", "/api/v1/memories/search", body, timeout=timeout)
+        response = self.request_json("POST", "/api/v1/memories/search", body, timeout=effective_timeout)
         return response if include_vectors else strip_vectors(response)
 
     def delete_memories(
@@ -174,11 +194,19 @@ class EverOSClient:
         group_id: str | None = None,
         session_id: str | None = None,
     ) -> dict[str, Any]:
+        if group_id is not None:
+            raise ValueError("group memory is out of scope for this EverOS-Hermes release")
+        validate_delete_request(memory_id=memory_id, user_id=user_id, session_id=session_id)
         if memory_id:
             body = {"memory_id": memory_id}
+            mode = "single"
         else:
-            body = {"user_id": user_id, "group_id": group_id, "session_id": session_id}
-        return self.request_json("POST", "/api/v1/memories/delete", body)
+            body = {"user_id": user_id, "session_id": session_id}
+            mode = "batch"
+        response = self.request_json("POST", "/api/v1/memories/delete", body)
+        if response.get("status_code") == 204:
+            response.update({"deleted": True, "mode": mode})
+        return response
 
     def get_task_status(self, task_id: str) -> dict[str, Any]:
         quoted = urllib.parse.quote(task_id, safe="")
@@ -187,8 +215,15 @@ class EverOSClient:
     def get_settings(self) -> dict[str, Any]:
         return self.request_json("GET", "/api/v1/settings")
 
-    def update_settings(self, settings: dict[str, Any]) -> dict[str, Any]:
-        return self.request_json("PUT", "/api/v1/settings", settings)
+    def update_settings(self, settings: dict[str, Any], *, strict: bool = True, return_diff: bool = True) -> dict[str, Any]:
+        validated = validate_settings_update(settings, strict=strict)
+        before = self.get_settings() if return_diff else {}
+        response = self.request_json("PUT", "/api/v1/settings", validated)
+        after = self.get_settings() if return_diff else response
+        if return_diff:
+            response["diff"] = settings_diff(before, after, validated)
+            response["updated"] = after.get("data", after)
+        return response
 
 
 def _normalize_base_url(url: str) -> str:
@@ -205,25 +240,6 @@ def _normalize_path(path: str) -> str:
 
 def _drop_none(obj: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in obj.items() if v is not None}
-
-
-def _build_filters(
-    *,
-    user_id: str | None = None,
-    group_id: str | None = None,
-    session_id: str | None = None,
-    filters: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    resolved = dict(filters or {})
-    if user_id is not None:
-        resolved["user_id"] = user_id
-    if group_id is not None:
-        resolved["group_id"] = group_id
-    if session_id:
-        clauses = list(resolved.get("AND") or [])
-        clauses.append({"session_id": session_id})
-        resolved["AND"] = clauses
-    return resolved
 
 
 def _http_error_to_everos_error(exc: urllib.error.HTTPError) -> EverOSError:

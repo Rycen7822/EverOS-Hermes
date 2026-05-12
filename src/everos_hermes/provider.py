@@ -10,6 +10,7 @@ from typing import Any, Optional
 from .client import DEFAULT_BASE_URL, DEFAULT_MEMORY_TYPES, EverOSClient, EverOSError, EverOSTimeoutError
 from .env import get_env
 from .formatting import format_search_context, pretty_json
+from .schemas import normalize_scope
 
 try:
     from agent.memory_provider import MemoryProvider
@@ -74,6 +75,12 @@ _DEFAULT_CONFIG = {
     "top_k": 5,
     "memory_types": DEFAULT_MEMORY_TYPES,
     "capture_agent_memory": False,
+    "agent_capture_mode": "parallel",
+    "agent_recall": False,
+    "agent_memory_types": ["agent_memory"],
+    "agent_flush_after_turn": True,
+    "agentic_timeout": 60.0,
+    "max_context_items": 8,
     "timeout": 10.0,
 }
 
@@ -89,6 +96,8 @@ SAVE_SCHEMA = {
         "properties": {
             "content": {"type": "string", "description": "Memory content to store."},
             "session_id": {"type": "string", "description": "Optional EverOS/Hermes session id."},
+            "scope": {"type": "string", "enum": ["personal", "agent"], "description": "Memory scope. Default personal."},
+            "role": {"type": "string", "enum": ["user", "assistant", "tool", "system"], "description": "Message role. role=tool is only valid with scope=agent."},
             "flush": {"type": "boolean", "description": "Trigger EverOS extraction immediately. Default true."},
         },
         "required": ["content"],
@@ -102,10 +111,16 @@ SEARCH_SCHEMA = {
         "type": "object",
         "properties": {
             "query": {"type": "string", "description": "Search query."},
-            "limit": {"type": "integer", "description": "Maximum results, usually 5-10."},
+            "limit": {"type": "integer", "description": "Backward-compatible alias for top_k."},
+            "top_k": {"type": "integer", "description": "Cloud top_k; -1 requests all matching results."},
             "method": {"type": "string", "enum": ["keyword", "vector", "hybrid", "agentic"], "description": "Retrieval method. Default hybrid."},
             "session_id": {"type": "string", "description": "Optional session filter."},
-            "memory_types": {"type": "array", "items": {"type": "string"}, "description": "Optional EverOS memory types."},
+            "filters": {"type": "object", "description": "Optional Cloud v1 filters DSL. user_id is filled from provider config."},
+            "memory_types": {"type": "array", "items": {"type": "string", "enum": ["episodic_memory", "profile", "raw_message", "agent_memory"]}, "description": "Optional EverOS search memory types."},
+            "radius": {"type": "number", "description": "Optional vector radius for vector/hybrid/agentic retrieval."},
+            "include_original_data": {"type": "boolean", "description": "Include Cloud original_data. Vectors remain stripped by default."},
+            "include_vectors": {"type": "boolean", "description": "Keep embedding/vector fields for debugging only."},
+            "response_format": {"type": "string", "enum": ["json", "markdown"], "description": "Output format."},
         },
         "required": ["query"],
     },
@@ -121,6 +136,9 @@ GET_SCHEMA = {
             "page": {"type": "integer", "description": "Page number starting at 1."},
             "page_size": {"type": "integer", "description": "Items per page, 1-100."},
             "session_id": {"type": "string", "description": "Optional session filter."},
+            "filters": {"type": "object", "description": "Optional Cloud v1 filters DSL. user_id is filled from provider config."},
+            "rank_by": {"type": "string", "description": "Rank field. Default timestamp."},
+            "rank_order": {"type": "string", "enum": ["asc", "desc"], "description": "Rank order."},
         },
     },
 }
@@ -132,6 +150,7 @@ FLUSH_SCHEMA = {
         "type": "object",
         "properties": {
             "session_id": {"type": "string", "description": "Optional session id."},
+            "scope": {"type": "string", "enum": ["personal", "agent"], "description": "Memory scope to flush."},
             "timeout": {"type": "number", "description": "Optional per-call timeout in seconds."},
         },
     },
@@ -181,7 +200,7 @@ def _save_config(values: dict[str, Any], hermes_home: str) -> None:
 def _normalize_config(config: dict[str, Any]) -> dict[str, Any]:
     out = dict(_DEFAULT_CONFIG)
     out.update(config or {})
-    for key in ("auto_recall", "auto_capture", "flush_after_turn", "capture_agent_memory"):
+    for key in ("auto_recall", "auto_capture", "flush_after_turn", "capture_agent_memory", "agent_recall", "agent_flush_after_turn"):
         out[key] = _as_bool(out.get(key), bool(_DEFAULT_CONFIG[key]))
     try:
         out["top_k"] = max(1, min(20, int(out.get("top_k", 5))))
@@ -191,6 +210,14 @@ def _normalize_config(config: dict[str, Any]) -> dict[str, Any]:
         out["timeout"] = max(1.0, min(60.0, float(out.get("timeout", 10.0))))
     except Exception:
         out["timeout"] = 10.0
+    try:
+        out["agentic_timeout"] = max(1.0, min(120.0, float(out.get("agentic_timeout", 60.0))))
+    except Exception:
+        out["agentic_timeout"] = 60.0
+    try:
+        out["max_context_items"] = max(1, min(50, int(out.get("max_context_items", 8))))
+    except Exception:
+        out["max_context_items"] = 8
     method = str(out.get("search_method", "hybrid")).strip().lower()
     out["search_method"] = method if method in {"keyword", "vector", "hybrid", "agentic"} else "hybrid"
     memory_types = out.get("memory_types")
@@ -199,6 +226,14 @@ def _normalize_config(config: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(memory_types, list) or not memory_types:
         memory_types = DEFAULT_MEMORY_TYPES
     out["memory_types"] = [str(item) for item in memory_types]
+    agent_memory_types = out.get("agent_memory_types")
+    if isinstance(agent_memory_types, str):
+        agent_memory_types = [part.strip() for part in agent_memory_types.split(",") if part.strip()]
+    if not isinstance(agent_memory_types, list) or not agent_memory_types:
+        agent_memory_types = ["agent_memory"]
+    out["agent_memory_types"] = [str(item) for item in agent_memory_types]
+    mode = str(out.get("agent_capture_mode", "parallel")).strip().lower()
+    out["agent_capture_mode"] = mode if mode in {"parallel", "agent_only", "off"} else "parallel"
     out["base_url"] = str(out.get("base_url") or DEFAULT_BASE_URL).strip() or DEFAULT_BASE_URL
     out["user_id"] = str(out.get("user_id") or "").strip()
     return out
@@ -245,6 +280,7 @@ def _save_result_payload(
     result: dict[str, Any],
     user_id: str,
     session_id: str | None,
+    scope: str = "personal",
     flush_requested: bool,
     flush_result: dict[str, Any] | None = None,
     flush_error: EverOSTimeoutError | None = None,
@@ -257,6 +293,7 @@ def _save_result_payload(
         "message_queued": True,
         "extraction_requested": bool(task_id or status in {"queued", "processing", "success"} or flush_requested),
         "searchable": None,
+        "scope": scope,
         "user_id": user_id,
         "session_id": session_id,
         "status": status,
@@ -294,6 +331,10 @@ class EverOSMemoryProvider(MemoryProvider):
         self._write_enabled = True
         self._active = False
         self._threads: list[threading.Thread] = []
+        self._last_write_status: dict[str, Any] = {}
+        self._last_flush_status: dict[str, Any] = {}
+        self._last_agent_write_status: dict[str, Any] = {}
+        self._last_agent_flush_status: dict[str, Any] = {}
 
     @property
     def name(self) -> str:
@@ -378,9 +419,11 @@ class EverOSMemoryProvider(MemoryProvider):
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         if not self._active or not self._config["auto_recall"] or not self._client or not query.strip():
             return ""
+        query_text = query[:1000]
+        formatted_sections: list[str] = []
         try:
             response = self._client.search_memories(
-                query=query[:1000],
+                query=query_text,
                 user_id=self._user_id,
                 session_id=None,
                 method=self._config["search_method"],
@@ -389,12 +432,31 @@ class EverOSMemoryProvider(MemoryProvider):
                 include_original_data=False,
                 timeout=self._config["timeout"],
             )
-            formatted = format_search_context(response, max_items=self._config["top_k"])
-            if not formatted:
-                return ""
-            return f"<everos-context>\n{formatted}\n</everos-context>"
-        except Exception:
+            formatted = format_search_context(response, max_items=self._config["max_context_items"])
+            if formatted:
+                formatted_sections.append(formatted)
+        except Exception as exc:
+            self._record_status("prefetch.personal", False, exc)
+        if self._config.get("agent_recall"):
+            try:
+                agent_response = self._client.search_memories(
+                    query=query_text,
+                    user_id=self._user_id,
+                    session_id=None,
+                    method=self._config["search_method"],
+                    memory_types=self._config["agent_memory_types"],
+                    top_k=self._config["top_k"],
+                    include_original_data=False,
+                    timeout=self._config["agentic_timeout"],
+                )
+                formatted = format_search_context(agent_response, max_items=self._config["max_context_items"])
+                if formatted:
+                    formatted_sections.append(formatted)
+            except Exception as exc:
+                self._record_status("prefetch.agent", False, exc)
+        if not formatted_sections:
             return ""
+        return "<everos-context>\n" + "\n\n".join(formatted_sections) + "\n</everos-context>"
 
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
         return None
@@ -427,19 +489,21 @@ class EverOSMemoryProvider(MemoryProvider):
         if not content:
             return _tool_error("content is required")
         session_id = str(args.get("session_id") or self._session_id or "") or None
+        scope = normalize_scope(str(args.get("scope") or "personal"))
+        role = str(args.get("role") or ("tool" if scope == "agent" else "user")).strip() or "user"
         result = self._client.add_memories(
             user_id=self._user_id,
             session_id=session_id,
-            messages=[{"role": "user", "timestamp": _now_ms(), "content": content}],
+            messages=[{"role": role, "timestamp": _now_ms(), "content": content}],
             async_mode=True,
-            agent=False,
+            scope=scope,
         )
         flush_result = None
         flush_error = None
         flush_requested = _as_bool(args.get("flush", True), True)
         if flush_requested:
             try:
-                flush_result = self._client.flush_memories(user_id=self._user_id, session_id=session_id, agent=False)
+                flush_result = self._client.flush_memories(user_id=self._user_id, session_id=session_id, scope=scope)
             except EverOSTimeoutError as exc:
                 flush_error = exc
         return json.dumps(
@@ -447,6 +511,7 @@ class EverOSMemoryProvider(MemoryProvider):
                 result=result,
                 user_id=self._user_id,
                 session_id=session_id,
+                scope=scope,
                 flush_requested=flush_requested,
                 flush_result=flush_result,
                 flush_error=flush_error,
@@ -458,30 +523,40 @@ class EverOSMemoryProvider(MemoryProvider):
         query = str(args.get("query") or "").strip()
         if not query:
             return _tool_error("query is required")
-        limit = _int_between(args.get("limit", self._config["top_k"]), 1, 20, self._config["top_k"])
+        requested_top_k = args.get("top_k", args.get("limit", self._config["top_k"]))
+        limit = _top_k(requested_top_k, self._config["top_k"])
         method = str(args.get("method") or self._config["search_method"]).strip().lower()
         if method not in {"keyword", "vector", "hybrid", "agentic"}:
             method = self._config["search_method"]
         memory_types = args.get("memory_types") if isinstance(args.get("memory_types"), list) else self._config["memory_types"]
+        response_format = str(args.get("response_format") or "json")
         response = self._client.search_memories(
             query=query,
             user_id=self._user_id,
             session_id=str(args.get("session_id") or "") or None,
+            filters=args.get("filters") if isinstance(args.get("filters"), dict) else None,
             method=method,
             memory_types=[str(item) for item in memory_types],
             top_k=limit,
-            include_original_data=False,
+            radius=_float_or_none(args.get("radius")),
+            include_original_data=_as_bool(args.get("include_original_data", False), False),
+            include_vectors=_as_bool(args.get("include_vectors", False), False),
             timeout=60.0 if method == "agentic" else self._config["timeout"],
         )
+        if response_format == "markdown":
+            return format_search_context(response, max_items=self._config["max_context_items"]) or pretty_json(response)
         return pretty_json(response)
 
     def _tool_get(self, args: dict[str, Any]) -> str:
         response = self._client.get_memories(
             user_id=self._user_id,
             session_id=str(args.get("session_id") or "") or None,
+            filters=args.get("filters") if isinstance(args.get("filters"), dict) else None,
             memory_type=str(args.get("memory_type") or "episodic_memory"),
             page=_int_between(args.get("page", 1), 1, 10000, 1),
             page_size=_int_between(args.get("page_size", 20), 1, 100, 20),
+            rank_by=str(args.get("rank_by") or "timestamp"),
+            rank_order=str(args.get("rank_order") or "desc"),
         )
         return pretty_json(response)
 
@@ -490,7 +565,7 @@ class EverOSMemoryProvider(MemoryProvider):
             response = self._client.flush_memories(
                 user_id=self._user_id,
                 session_id=str(args.get("session_id") or self._session_id or "") or None,
-                agent=False,
+                scope=normalize_scope(str(args.get("scope") or "personal")),
                 timeout=_float_or_none(args.get("timeout")),
             )
         except EverOSTimeoutError as exc:
@@ -515,18 +590,34 @@ class EverOSMemoryProvider(MemoryProvider):
             return
         sid = session_id or self._session_id
         now = _now_ms()
-        messages = [
+        personal_messages = [
             {"role": "user", "timestamp": now, "content": clean_user},
             {"role": "assistant", "timestamp": now + 1, "content": clean_assistant},
         ]
+        agent_messages = _build_agent_trajectory_messages(clean_user, clean_assistant, now_ms=now + 2)
 
         def _run() -> None:
-            try:
-                self._client.add_memories(user_id=self._user_id, session_id=sid, messages=messages, async_mode=True, agent=False)
-                if self._config["flush_after_turn"]:
-                    self._client.flush_memories(user_id=self._user_id, session_id=sid, agent=False)
-            except Exception:
-                return None
+            mode = str(self._config.get("agent_capture_mode", "parallel"))
+            write_personal = mode != "agent_only"
+            write_agent = bool(self._config.get("capture_agent_memory")) and mode != "off"
+            if write_personal:
+                try:
+                    result = self._client.add_memories(user_id=self._user_id, session_id=sid, messages=personal_messages, async_mode=True, scope="personal")
+                    self._last_write_status = {"ok": True, "scope": "personal", "task_id": _task_id(result)}
+                    if self._config["flush_after_turn"]:
+                        flush = self._client.flush_memories(user_id=self._user_id, session_id=sid, scope="personal")
+                        self._last_flush_status = {"ok": True, "scope": "personal", "status": _status(flush)}
+                except Exception as exc:
+                    self._record_status("sync_turn.personal", False, exc)
+            if write_agent:
+                try:
+                    result = self._client.add_memories(user_id=self._user_id, session_id=sid, messages=agent_messages, async_mode=True, scope="agent")
+                    self._last_agent_write_status = {"ok": True, "scope": "agent", "task_id": _task_id(result)}
+                    if self._config.get("agent_flush_after_turn"):
+                        flush = self._client.flush_memories(user_id=self._user_id, session_id=sid, scope="agent")
+                        self._last_agent_flush_status = {"ok": True, "scope": "agent", "status": _status(flush)}
+                except Exception as exc:
+                    self._record_status("sync_turn.agent", False, exc, agent=True)
 
         self._start_thread(_run, "everos-sync-turn")
 
@@ -542,12 +633,13 @@ class EverOSMemoryProvider(MemoryProvider):
                     session_id=self._session_id,
                     messages=[{"role": "user", "timestamp": _now_ms(), "content": text}],
                     async_mode=True,
-                    agent=False,
+                    scope="personal",
                 )
                 if self._config["flush_after_turn"]:
-                    self._client.flush_memories(user_id=self._user_id, session_id=self._session_id, agent=False)
+                    self._client.flush_memories(user_id=self._user_id, session_id=self._session_id, scope="personal")
                 return result
-            except Exception:
+            except Exception as exc:
+                self._record_status("memory_write.personal", False, exc)
                 return None
 
         self._start_thread(_run, "everos-memory-write")
@@ -556,8 +648,11 @@ class EverOSMemoryProvider(MemoryProvider):
         if not self._active or not self._write_enabled or not self._client or not self._session_id:
             return
         try:
-            self._client.flush_memories(user_id=self._user_id, session_id=self._session_id, agent=False)
-        except Exception:
+            self._client.flush_memories(user_id=self._user_id, session_id=self._session_id, scope="personal")
+            if self._config.get("capture_agent_memory") and self._config.get("agent_flush_after_turn"):
+                self._client.flush_memories(user_id=self._user_id, session_id=self._session_id, scope="agent")
+        except Exception as exc:
+            self._record_status("session_end.flush", False, exc)
             return None
 
     def on_pre_compress(self, messages: list[dict[str, Any]]) -> str:
@@ -580,12 +675,44 @@ class EverOSMemoryProvider(MemoryProvider):
         self._threads.append(thread)
         thread.start()
 
+    def _record_status(self, operation: str, ok: bool, exc: Exception | None = None, *, agent: bool = False) -> None:
+        status = {"ok": ok, "operation": operation}
+        if exc is not None:
+            status["error"] = _redact_error(str(exc))
+        if agent:
+            self._last_agent_write_status = status
+        else:
+            self._last_write_status = status
+        self._write_debug_log(status)
+
+    def _write_debug_log(self, payload: dict[str, Any]) -> None:
+        if not self._hermes_home:
+            return
+        try:
+            path = Path(self._hermes_home) / "everos.log"
+            safe = {k: v for k, v in payload.items() if k in {"ok", "operation", "error", "scope", "status", "request_id", "task_id"}}
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(safe, ensure_ascii=False, sort_keys=True) + "\n")
+        except Exception:
+            return
+
 
 def _int_between(value: Any, low: int, high: int, default: int) -> int:
     try:
         return max(low, min(high, int(value)))
     except Exception:
         return default
+
+
+def _top_k(value: Any, default: int) -> int:
+    try:
+        parsed = int(value)
+    except Exception:
+        return default
+    if parsed == -1:
+        return -1
+    return max(0, min(100, parsed))
 
 
 def _float_or_none(value: Any) -> float | None:
@@ -596,6 +723,43 @@ def _float_or_none(value: Any) -> float | None:
     except Exception:
         return None
     return parsed if parsed > 0 else None
+
+
+def _task_id(response: dict[str, Any]) -> str:
+    data = response.get("data", {}) if isinstance(response, dict) else {}
+    return str(data.get("task_id") or "") if isinstance(data, dict) else ""
+
+
+def _status(response: dict[str, Any]) -> str:
+    data = response.get("data", {}) if isinstance(response, dict) else {}
+    return str(data.get("status") or "") if isinstance(data, dict) else ""
+
+
+def _build_agent_trajectory_messages(user_content: str, assistant_content: str, *, now_ms: int) -> list[dict[str, Any]]:
+    user_summary = _truncate_for_memory(user_content, 4000)
+    assistant_summary = _truncate_for_memory(assistant_content, 4000)
+    return [
+        {"role": "user", "timestamp": now_ms, "content": f"Task request: {user_summary}"},
+        {
+            "role": "assistant",
+            "timestamp": now_ms + 1,
+            "content": "Agent response summary: "
+            f"{assistant_summary}\nOutcome: completed_or_partial\nReusable lesson hint: capture approach, correction, and verification if useful.",
+        },
+    ]
+
+
+def _truncate_for_memory(text: str, limit: int) -> str:
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "…"
+
+
+def _redact_error(text: str) -> str:
+    text = re.sub(r"sk-[A-Za-z0-9_-]+", "sk-***", text or "")
+    text = re.sub(r"(?i)(api[_-]?key|authorization|token|secret)=\S+", r"\1=***", text)
+    return text[:500]
 
 
 def register(ctx: Any) -> None:

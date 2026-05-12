@@ -68,13 +68,13 @@ https://github.com/Rycen7822/EverOS-Hermes/releases/download/v<version>/everos-h
 Current Linux x86_64 asset:
 
 ```text
-everos-hermes-rust-0.1.1-x86_64-unknown-linux-gnu.tar.gz
+everos-hermes-rust-0.2.0-x86_64-unknown-linux-gnu.tar.gz
 ```
 
 Linux x86_64 install example:
 
 ```bash
-VERSION=0.1.1
+VERSION=0.2.0
 TARGET=x86_64-unknown-linux-gnu
 INSTALL_DIR="$HOME/.local/share/everos-hermes"
 ASSET="everos-hermes-rust-${VERSION}-${TARGET}.tar.gz"
@@ -180,14 +180,16 @@ Even when `include_original_data=true`, vector fields are stripped by default to
 | Tool | Purpose | Read-only? |
 | --- | --- | --- |
 | `everos_save_memory` | Queue one explicit text memory message, then optionally flush; response separates queue/extraction/searchability state. | No |
-| `everos_add_memories` | Add one or more user/assistant/tool messages. | No |
-| `everos_flush_memories` | Trigger extraction immediately; supports per-call `timeout` and retryable timeout responses. | No |
-| `everos_search_memories` | Search with keyword, vector, hybrid, or agentic retrieval; vector fields are stripped unless `include_vectors=true`. | Yes |
-| `everos_get_memories` | Retrieve structured memories by type and page. | Yes |
-| `everos_delete_memories` | Delete by memory id or confirmed user/session scope. | No, destructive |
+| `everos_add_memories` | Add one or more messages to personal or agent scope; legacy `agent` alias remains supported but conflicts with `scope`. | No |
+| `everos_flush_memories` | Trigger personal or agent extraction immediately; supports per-call `timeout` and retryable timeout responses. | No |
+| `everos_search_memories` | Search with keyword, vector, hybrid, or agentic retrieval; exposes `filters`, `radius`, `top_k=-1`, `timeout`, and agentic fallback; vector fields are stripped unless `include_vectors=true`. | Yes |
+| `everos_get_memories` | Retrieve structured memories with `filters`, pagination, `rank_by`, and `rank_order`. | Yes |
+| `everos_delete_memories` | Delete exactly one `memory_id` or a confirmed user/session batch; batch delete requires `confirm_scope_text`. | No, destructive |
 | `everos_get_task_status` | Check an async extraction task. | Yes |
 | `everos_get_settings` | Read EverOS memory-space settings. | Yes |
-| `everos_update_settings` | Update EverOS memory-space settings. | No |
+| `everos_update_settings` | Update whitelisted EverOS settings fields and return a before/after diff. | No |
+
+Rust parity follows the Cloud v1 contract in the repository root: personal and agent memory are supported, while group/sender/multimodal storage endpoints stay out of scope. Search memory types are `episodic_memory`, `profile`, `raw_message`, and `agent_memory`; get memory types are `episodic_memory`, `profile`, `agent_case`, and `agent_skill`.
 
 ## Use as Hermes memory provider
 
@@ -226,10 +228,10 @@ Restart Hermes CLI/WebUI/gateway after changing the provider. MCP tools and the 
 
 | Tool | Purpose |
 | --- | --- |
-| `everos_memory_save` | Queue an explicit memory message and optionally request extraction; `saved=true` does not guarantee immediate structured/profile recall. |
-| `everos_memory_search` | Search EverOS memory for the configured user. |
-| `everos_memory_get` | Retrieve structured memories by type and page. |
-| `everos_memory_flush` | Force EverOS extraction for the user/session; accepts per-call `timeout` and returns retryable timeout guidance. |
+| `everos_memory_save` | Queue an explicit personal or agent scoped memory message and optionally request extraction; `saved=true` does not guarantee immediate structured/profile recall. |
+| `everos_memory_search` | Search EverOS memory for the configured user with `filters`, `radius`, `top_k`, optional vector inclusion, and Markdown/JSON output. |
+| `everos_memory_get` | Retrieve structured memories by type, page, optional filters, and ranking. |
+| `everos_memory_flush` | Force personal or agent extraction for the user/session; accepts per-call `timeout` and returns retryable timeout guidance. |
 | `everos_memory_forget` | Delete a memory by id; requires `confirm=true`. |
 
 Advanced non-secret provider settings remain compatible with the Python version and live in `$HERMES_HOME/everos.json`.
@@ -276,5 +278,5 @@ The test suite includes:
 - No real EverOS API key is committed here.
 - `.env` and build artifacts are ignored.
 - The MCP server never logs to stdout; stdout is reserved for MCP protocol frames.
-- Destructive deletion requires explicit `confirm=true`.
+- Destructive deletion requires explicit `confirm=true`; batch delete in the MCP tool also requires exact `confirm_scope_text`.
 - The Python shim is intentionally thin; EverOS logic lives in Rust.

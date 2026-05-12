@@ -9,6 +9,7 @@ from mcp.server.fastmcp import FastMCP
 from .client import DEFAULT_BASE_URL, DEFAULT_MEMORY_TYPES, EverOSClient, EverOSError, EverOSTimeoutError
 from .env import get_env
 from .formatting import format_search_context, pretty_json, strip_vectors
+from .schemas import GetMemoryType, MemoryScope, SearchMemoryType, delete_confirm_text, normalize_scope
 
 mcp = FastMCP("everos_mcp")
 
@@ -80,6 +81,7 @@ def _save_result_payload(
     result: dict[str, Any],
     user_id: str,
     session_id: str | None,
+    scope: str = "personal",
     flush_requested: bool,
     flush_result: dict[str, Any] | None = None,
     flush_error: EverOSTimeoutError | None = None,
@@ -92,6 +94,7 @@ def _save_result_payload(
         "message_queued": True,
         "extraction_requested": bool(task_id or status in {"queued", "processing", "success"} or flush_requested),
         "searchable": None,
+        "scope": scope,
         "user_id": user_id,
         "session_id": session_id,
         "status": status,
@@ -117,6 +120,8 @@ async def everos_save_memory(
     content: str,
     user_id: str | None = None,
     session_id: str | None = None,
+    scope: MemoryScope = "personal",
+    role: Literal["user", "assistant", "tool", "system"] = "user",
     flush: bool = True,
     async_mode: bool = True,
     flush_timeout: float | None = None,
@@ -129,20 +134,21 @@ async def everos_save_memory(
     inspect `flush`, `task_id`, and follow-up search results before assuming a
     structured profile/fact is already searchable.
     """
+    resolved_scope = normalize_scope(scope)
     uid = user_id or default_user_id()
     client = make_client()
     result = client.add_memories(
         user_id=uid,
         session_id=session_id,
-        messages=[{"role": "user", "timestamp": now_ms(), "content": content}],
+        messages=[{"role": role, "timestamp": now_ms(), "content": content}],
         async_mode=async_mode,
-        agent=False,
+        scope=resolved_scope,
     )
     flush_result = None
     flush_error = None
     if flush:
         try:
-            flush_result = client.flush_memories(user_id=uid, session_id=session_id, agent=False, timeout=flush_timeout)
+            flush_result = client.flush_memories(user_id=uid, session_id=session_id, scope=resolved_scope, timeout=flush_timeout)
         except EverOSTimeoutError as exc:
             flush_error = exc
     return pretty_json(
@@ -150,6 +156,7 @@ async def everos_save_memory(
             result=result,
             user_id=uid,
             session_id=session_id,
+            scope=resolved_scope,
             flush_requested=flush,
             flush_result=flush_result,
             flush_error=flush_error,
@@ -166,8 +173,9 @@ async def everos_add_memories(
     messages: list[dict[str, Any]],
     user_id: str | None = None,
     session_id: str | None = None,
+    scope: MemoryScope = "personal",
     async_mode: bool = True,
-    agent: bool = False,
+    agent: bool | None = None,
     flush: bool = False,
     flush_timeout: float | None = None,
 ) -> str:
@@ -176,12 +184,13 @@ async def everos_add_memories(
     messages must follow EverOS v1 schema: role, timestamp (Unix ms), and content.
     For agent=True, EverOS /api/v1/memories/agent is used and role can also be tool.
     """
+    resolved_scope = normalize_scope(scope, agent)
     uid = user_id or default_user_id()
     client = make_client()
-    result = client.add_memories(user_id=uid, session_id=session_id, messages=messages, async_mode=async_mode, agent=agent)
+    result = client.add_memories(user_id=uid, session_id=session_id, messages=messages, async_mode=async_mode, scope=resolved_scope)
     if flush:
         try:
-            flush_result = client.flush_memories(user_id=uid, session_id=session_id, agent=agent, timeout=flush_timeout)
+            flush_result = client.flush_memories(user_id=uid, session_id=session_id, scope=resolved_scope, timeout=flush_timeout)
             return pretty_json({"ok": True, "add": result, "flush": _flush_result_payload(flush_result)})
         except EverOSTimeoutError as exc:
             return pretty_json({"ok": True, "add": result, "flush": _timeout_payload("flush", exc)})
@@ -193,15 +202,22 @@ async def everos_add_memories(
     title="Flush EverOS Memories",
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
 )
-async def everos_flush_memories(user_id: str | None = None, session_id: str | None = None, agent: bool = False, timeout: float | None = None) -> str:
+async def everos_flush_memories(
+    user_id: str | None = None,
+    session_id: str | None = None,
+    scope: MemoryScope = "personal",
+    agent: bool | None = None,
+    timeout: float | None = None,
+) -> str:
     """Trigger EverOS boundary detection and memory extraction immediately.
 
     If the client times out, the response is a retryable structured error;
     search/status checks should be attempted before issuing another flush.
     """
+    resolved_scope = normalize_scope(scope, agent)
     uid = user_id or default_user_id()
     try:
-        return pretty_json(make_client().flush_memories(user_id=uid, session_id=session_id, agent=agent, timeout=timeout))
+        return pretty_json(make_client().flush_memories(user_id=uid, session_id=session_id, scope=resolved_scope, timeout=timeout))
     except EverOSTimeoutError as exc:
         return pretty_json(_timeout_payload("flush", exc))
 
@@ -215,12 +231,16 @@ async def everos_search_memories(
     query: str,
     user_id: str | None = None,
     session_id: str | None = None,
+    filters: dict[str, Any] | None = None,
     method: RetrievalMethod = "hybrid",
     top_k: int = 5,
-    memory_types: list[str] | None = None,
+    memory_types: list[SearchMemoryType] | None = None,
+    radius: float | None = None,
     include_original_data: bool = False,
     include_vectors: bool = False,
     response_format: ResponseFormat = "json",
+    timeout: float | None = None,
+    fallback_to_hybrid: bool = True,
 ) -> str:
     """Search EverOS memory using keyword, vector, hybrid, or agentic retrieval.
 
@@ -229,18 +249,46 @@ async def everos_search_memories(
     """
     uid = user_id or default_user_id()
     resolved_types = list(memory_types or DEFAULT_MEMORY_TYPES)
-    response = make_client().search_memories(
-        query=query,
-        user_id=uid,
-        session_id=session_id,
-        method=method,
-        memory_types=resolved_types,
-        top_k=top_k,
-        include_original_data=include_original_data,
-        include_vectors=include_vectors,
-    )
+    client = make_client()
+    fallback_used = False
+    try:
+        response = client.search_memories(
+            query=query,
+            user_id=uid,
+            session_id=session_id,
+            filters=filters,
+            method=method,
+            memory_types=resolved_types,
+            top_k=top_k,
+            radius=radius,
+            include_original_data=include_original_data,
+            include_vectors=include_vectors,
+            timeout=timeout,
+        )
+    except EverOSTimeoutError as exc:
+        if method == "agentic" and fallback_to_hybrid:
+            response = client.search_memories(
+                query=query,
+                user_id=uid,
+                session_id=session_id,
+                filters=filters,
+                method="hybrid",
+                memory_types=resolved_types,
+                top_k=top_k,
+                radius=radius,
+                include_original_data=include_original_data,
+                include_vectors=include_vectors,
+                timeout=timeout,
+            )
+            response["fallback_used"] = True
+            response["fallback_reason"] = str(exc)
+            fallback_used = True
+        else:
+            return pretty_json(_timeout_payload("search", exc))
     if not include_vectors:
         response = strip_vectors(response)
+    if fallback_used and isinstance(response, dict):
+        response["fallback_used"] = True
     return _render(response, response_format)
 
 
@@ -252,14 +300,26 @@ async def everos_search_memories(
 async def everos_get_memories(
     user_id: str | None = None,
     session_id: str | None = None,
-    memory_type: Literal["episodic_memory", "profile", "agent_case", "agent_skill"] = "episodic_memory",
+    filters: dict[str, Any] | None = None,
+    memory_type: GetMemoryType = "episodic_memory",
     page: int = 1,
     page_size: int = 20,
+    rank_by: str = "timestamp",
+    rank_order: Literal["asc", "desc"] = "desc",
     response_format: ResponseFormat = "json",
 ) -> str:
     """Retrieve structured EverOS memories by memory_type with pagination."""
     uid = user_id or default_user_id()
-    response = make_client().get_memories(user_id=uid, session_id=session_id, memory_type=memory_type, page=page, page_size=page_size)
+    response = make_client().get_memories(
+        user_id=uid,
+        session_id=session_id,
+        filters=filters,
+        memory_type=memory_type,
+        page=page,
+        page_size=page_size,
+        rank_by=rank_by,
+        rank_order=rank_order,
+    )
     return _render(response, response_format)
 
 
@@ -273,14 +333,20 @@ async def everos_delete_memories(
     user_id: str | None = None,
     session_id: str | None = None,
     confirm: bool = False,
+    confirm_scope_text: str | None = None,
 ) -> str:
     """Delete EverOS memory by exact memory_id, or batch-delete by user/session when explicitly confirmed."""
     if not confirm:
         return pretty_json({"error": "confirm=true is required before deleting EverOS memories"})
-    if not memory_id and not (user_id or default_user_id()):
-        return pretty_json({"error": "memory_id or user_id is required"})
-    uid = user_id or (None if memory_id else default_user_id())
-    return pretty_json(make_client().delete_memories(memory_id=memory_id, user_id=uid, session_id=session_id))
+    if memory_id and (user_id or session_id):
+        return pretty_json({"error": "single delete by memory_id cannot include user_id or session_id"})
+    if not memory_id:
+        if not user_id:
+            return pretty_json({"error": "batch delete requires explicit user_id; default user_id is intentionally not used"})
+        expected = delete_confirm_text(user_id, session_id)
+        if confirm_scope_text != expected:
+            return pretty_json({"error": f"confirm_scope_text must exactly match {expected!r}"})
+    return pretty_json(make_client().delete_memories(memory_id=memory_id, user_id=user_id, session_id=session_id))
 
 
 @mcp.tool(
@@ -308,9 +374,9 @@ async def everos_get_settings() -> str:
     title="Update EverOS Settings",
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
 )
-async def everos_update_settings(settings: dict[str, Any]) -> str:
+async def everos_update_settings(settings: dict[str, Any], strict: bool = True, return_diff: bool = True) -> str:
     """Update EverOS memory-space settings. Only supplied fields are changed."""
-    return pretty_json(make_client().update_settings(settings))
+    return pretty_json(make_client().update_settings(settings, strict=strict, return_diff=return_diff))
 
 
 def main() -> None:

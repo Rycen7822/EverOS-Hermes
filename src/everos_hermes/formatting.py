@@ -35,10 +35,12 @@ def format_search_context(response: dict[str, Any], *, max_items: int = 5) -> st
         return ""
 
     lines: list[str] = []
+    agent_memory = data.get("agent_memory") if isinstance(data.get("agent_memory"), dict) else {}
     episode_lines = _format_episodes(_as_list(data.get("episodes") or data.get("results") or data.get("memories")), max_items=max_items)
     profile_lines = _format_profiles(_as_list(data.get("profiles") or data.get("profile")), max_items=max_items)
-    agent_case_lines = _format_agent_cases(_as_list(data.get("agent_cases")), max_items=max_items)
-    agent_skill_lines = _format_agent_skills(_as_list(data.get("agent_skills")), max_items=max_items)
+    raw_lines = _format_raw_messages(_as_list(data.get("raw_messages")), max_items=max_items)
+    agent_case_lines = _format_agent_cases(_as_list(data.get("agent_cases") or agent_memory.get("cases") or agent_memory.get("agent_cases")), max_items=max_items)
+    agent_skill_lines = _format_agent_skills(_as_list(data.get("agent_skills") or agent_memory.get("skills") or agent_memory.get("agent_skills")), max_items=max_items)
 
     if episode_lines:
         lines.append("## Episodes")
@@ -46,6 +48,9 @@ def format_search_context(response: dict[str, Any], *, max_items: int = 5) -> st
     if profile_lines:
         lines.append("## Profile")
         lines.extend(profile_lines)
+    if raw_lines:
+        lines.append("## Raw Messages")
+        lines.extend(raw_lines)
     if agent_case_lines:
         lines.append("## Agent Cases")
         lines.extend(agent_case_lines)
@@ -96,6 +101,21 @@ def _format_profiles(items: list[Any], *, max_items: int) -> list[str]:
                         return lines
         if not lines:
             lines.append(f"- {compact_json(item)[:700]}")
+    return lines
+
+
+def _format_raw_messages(items: list[Any], *, max_items: int) -> list[str]:
+    lines: list[str] = []
+    for item in items[:max_items]:
+        if not isinstance(item, dict):
+            text = str(item).strip()
+            if text:
+                lines.append(f"- {text[:500]}")
+            continue
+        role = _first_text(item, "role", "sender", "type")
+        content = _first_text(item, "content", "text", "message", "summary") or compact_json(item)
+        prefix = f"- {role}: " if role else "- "
+        lines.append(f"{prefix}{content[:700]}")
     return lines
 
 

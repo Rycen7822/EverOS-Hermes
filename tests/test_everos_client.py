@@ -5,7 +5,7 @@ import pytest
 
 
 class FakeHTTPResponse:
-    def __init__(self, payload: dict, status: int = 200):
+    def __init__(self, payload: dict | None, status: int = 200):
         self.payload = payload
         self.status = status
 
@@ -16,6 +16,8 @@ class FakeHTTPResponse:
         return False
 
     def read(self):
+        if self.payload is None:
+            return b""
         return json.dumps(self.payload).encode("utf-8")
 
 
@@ -211,8 +213,176 @@ def test_http_error_includes_everos_message(monkeypatch):
     client = EverOSClient(api_key="sk-test")
 
     with pytest.raises(EverOSError) as exc:
-        client.get_memories(user_id="", memory_type="profile")
+        client.get_memories(user_id="user_001", memory_type="profile")
 
     assert "422" in str(exc.value)
     assert "InvalidParameter" in str(exc.value)
     assert "user_id: Field required" in str(exc.value)
+
+
+
+def test_add_memories_supports_scope_agent_and_agent_alias(monkeypatch):
+    from everos_hermes.client import EverOSClient
+
+    paths = []
+
+    def fake_urlopen(req, timeout):
+        paths.append(req.full_url)
+        return FakeHTTPResponse({"data": {"status": "queued"}}, status=202)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    client = EverOSClient(api_key="sk-test")
+    message = {"role": "tool", "timestamp": 1711900000000, "content": "tool output"}
+
+    client.add_memories(user_id="user_001", messages=[message], scope="agent")
+    client.add_memories(user_id="user_001", messages=[message], agent=True)
+
+    assert paths == [
+        "https://api.evermind.ai/api/v1/memories/agent",
+        "https://api.evermind.ai/api/v1/memories/agent",
+    ]
+
+
+def test_add_memories_validates_messages_before_request(monkeypatch):
+    from everos_hermes.client import EverOSClient
+
+    called = False
+
+    def fake_urlopen(req, timeout):
+        nonlocal called
+        called = True
+        return FakeHTTPResponse({"data": {}}, status=202)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    client = EverOSClient(api_key="sk-test")
+
+    with pytest.raises(ValueError, match="1..500"):
+        client.add_memories(user_id="user_001", messages=[])
+    with pytest.raises(ValueError, match="role"):
+        client.add_memories(user_id="user_001", messages=[{"role": "tool", "timestamp": 1, "content": "x"}], scope="personal")
+    with pytest.raises(ValueError, match="scope"):
+        client.add_memories(user_id="user_001", messages=[{"role": "user", "timestamp": 1, "content": "x"}], scope="personal", agent=True)
+    assert called is False
+
+
+def test_search_memories_allows_top_k_minus_one_filters_radius_and_rejects_bad_type(monkeypatch):
+    from everos_hermes.client import EverOSClient
+
+    captured = {}
+
+    def fake_urlopen(req, timeout):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        captured["timeout"] = timeout
+        return FakeHTTPResponse({"data": {"episodes": []}})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    client = EverOSClient(api_key="sk-test", timeout=7)
+
+    client.search_memories(
+        query="all",
+        user_id="user_001",
+        filters={"AND": [{"timestamp": {"gte": 1700000000000}}]},
+        top_k=-1,
+        radius=0.5,
+        memory_types=["agent_memory"],
+        timeout=60,
+    )
+
+    assert captured["timeout"] == 60
+    assert captured["body"]["top_k"] == -1
+    assert captured["body"]["radius"] == 0.5
+    assert captured["body"]["memory_types"] == ["agent_memory"]
+    assert captured["body"]["filters"] == {
+        "user_id": "user_001",
+        "AND": [{"timestamp": {"gte": 1700000000000}}],
+    }
+    with pytest.raises(ValueError, match="memory_types"):
+        client.search_memories(query="bad", user_id="user_001", memory_types=["agent_case"])
+    with pytest.raises(ValueError, match="user_id"):
+        client.search_memories(query="bad")
+
+
+def test_flush_memories_supports_agent_scope(monkeypatch):
+    from everos_hermes.client import EverOSClient
+
+    captured = {}
+
+    def fake_urlopen(req, timeout):
+        captured["url"] = req.full_url
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return FakeHTTPResponse({"data": {"status": "extracted"}})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    client = EverOSClient(api_key="sk-test")
+
+    client.flush_memories(user_id="user_001", session_id="sess-1", scope="agent")
+
+    assert captured["url"] == "https://api.evermind.ai/api/v1/memories/agent/flush"
+    assert captured["body"] == {"user_id": "user_001", "session_id": "sess-1"}
+
+
+def test_get_memories_validates_type_pagination_and_rank(monkeypatch):
+    from everos_hermes.client import EverOSClient
+
+    captured = {}
+
+    def fake_urlopen(req, timeout):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return FakeHTTPResponse({"data": {"items": []}})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    client = EverOSClient(api_key="sk-test")
+
+    client.get_memories(user_id="user_001", memory_type="agent_case", rank_order="DESC")
+    assert captured["body"]["memory_type"] == "agent_case"
+    assert captured["body"]["rank_order"] == "desc"
+    with pytest.raises(ValueError, match="memory_type"):
+        client.get_memories(user_id="user_001", memory_type="agent_memory")
+    with pytest.raises(ValueError, match="page_size"):
+        client.get_memories(user_id="user_001", page_size=101)
+
+
+def test_delete_memories_strict_modes_and_204_payload(monkeypatch):
+    from everos_hermes.client import EverOSClient
+
+    captured = {}
+
+    def fake_urlopen(req, timeout):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return FakeHTTPResponse(None, status=204)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    client = EverOSClient(api_key="sk-test")
+
+    with pytest.raises(ValueError, match="single delete"):
+        client.delete_memories(memory_id="mem-1", user_id="user_001")
+    with pytest.raises(ValueError, match="explicit user_id"):
+        client.delete_memories(session_id="sess-1")
+
+    result = client.delete_memories(memory_id="mem-1")
+    assert result == {"ok": True, "status_code": 204, "deleted": True, "mode": "single"}
+    assert captured["body"] == {"memory_id": "mem-1"}
+
+
+def test_update_settings_validates_strict_schema_and_returns_diff(monkeypatch):
+    from everos_hermes.client import EverOSClient
+
+    calls = []
+
+    def fake_urlopen(req, timeout):
+        calls.append((req.get_method(), req.full_url, None if req.data is None else json.loads(req.data.decode("utf-8"))))
+        if req.get_method() == "GET" and len(calls) == 1:
+            return FakeHTTPResponse({"data": {"timezone": "UTC", "llm_custom_setting": {}}})
+        if req.get_method() == "PUT":
+            return FakeHTTPResponse({"data": {"timezone": "Asia/Tokyo", "llm_custom_setting": {}}})
+        return FakeHTTPResponse({"data": {"timezone": "Asia/Tokyo", "llm_custom_setting": {}}})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    client = EverOSClient(api_key="sk-test")
+
+    result = client.update_settings({"timezone": "Asia/Tokyo"})
+
+    assert calls[1] == ("PUT", "https://api.evermind.ai/api/v1/settings", {"timezone": "Asia/Tokyo"})
+    assert result["diff"]["timezone"] == {"before": "UTC", "after": "Asia/Tokyo"}
+    with pytest.raises(ValueError, match="Unknown settings"):
+        client.update_settings({"extraction_mode": "fast"})

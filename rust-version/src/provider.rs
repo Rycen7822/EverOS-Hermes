@@ -20,6 +20,12 @@ pub struct ProviderConfig {
     pub top_k: u64,
     pub memory_types: Vec<String>,
     pub capture_agent_memory: bool,
+    pub agent_capture_mode: String,
+    pub agent_recall: bool,
+    pub agent_memory_types: Vec<String>,
+    pub agent_flush_after_turn: bool,
+    pub agentic_timeout: f64,
+    pub max_context_items: u64,
     pub timeout: f64,
 }
 
@@ -38,6 +44,12 @@ impl Default for ProviderConfig {
                 .map(|item| item.to_string())
                 .collect(),
             capture_agent_memory: false,
+            agent_capture_mode: "parallel".to_string(),
+            agent_recall: false,
+            agent_memory_types: vec!["agent_memory".to_string()],
+            agent_flush_after_turn: true,
+            agentic_timeout: 60.0,
+            max_context_items: 8,
             timeout: 10.0,
         }
     }
@@ -145,7 +157,8 @@ impl EverOSProvider {
             return String::new();
         };
         let query: String = query.chars().take(1000).collect();
-        match client.search_memories(
+        let mut sections = Vec::new();
+        if let Ok(response) = client.search_memories(
             &query,
             Some(&self.user_id),
             None,
@@ -153,21 +166,48 @@ impl EverOSProvider {
             None,
             &self.config.search_method,
             Some(self.config.memory_types.clone()),
-            self.config.top_k,
+            self.config.top_k as i64,
             None,
             false,
             false,
             Some(self.config.timeout),
         ) {
-            Ok(response) => {
-                let formatted = format_search_context(&response, self.config.top_k as usize);
-                if formatted.is_empty() {
-                    String::new()
-                } else {
-                    format!("<everos-context>\n{formatted}\n</everos-context>")
-                }
+            let formatted =
+                format_search_context(&response, self.config.max_context_items as usize);
+            if !formatted.is_empty() {
+                sections.push(formatted);
             }
-            Err(_) => String::new(),
+        }
+        let agent_response = self.config.agent_recall.then(|| {
+            client.search_memories(
+                &query,
+                Some(&self.user_id),
+                None,
+                None,
+                None,
+                &self.config.search_method,
+                Some(self.config.agent_memory_types.clone()),
+                self.config.top_k as i64,
+                None,
+                false,
+                false,
+                Some(self.config.agentic_timeout),
+            )
+        });
+        if let Some(Ok(response)) = agent_response {
+            let formatted =
+                format_search_context(&response, self.config.max_context_items as usize);
+            if !formatted.is_empty() {
+                sections.push(formatted);
+            }
+        }
+        if sections.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "<everos-context>\n{}\n</everos-context>",
+                sections.join("\n\n")
+            )
         }
     }
 
@@ -212,14 +252,33 @@ impl EverOSProvider {
             .filter(|value| !value.trim().is_empty())
             .unwrap_or(&self.session_id);
         let now = now_ms();
-        let messages = vec![
+        let personal_messages = vec![
             json!({"role":"user","timestamp":now,"content":clean_user}),
             json!({"role":"assistant","timestamp":now + 1,"content":clean_assistant}),
         ];
+        let agent_messages =
+            build_agent_trajectory_messages(&clean_user, &clean_assistant, now + 2);
         let client = self.client.as_ref().expect("checked above");
-        client.add_memories(&self.user_id, Some(sid), messages, true, false)?;
-        if self.config.flush_after_turn {
-            client.flush_memories(&self.user_id, Some(sid), false, None)?;
+        let write_personal = self.config.agent_capture_mode != "agent_only";
+        let write_agent =
+            self.config.capture_agent_memory && self.config.agent_capture_mode != "off";
+        if write_personal {
+            client.add_memories_scoped(
+                &self.user_id,
+                Some(sid),
+                personal_messages,
+                true,
+                "personal",
+            )?;
+            if self.config.flush_after_turn {
+                client.flush_memories_scoped(&self.user_id, Some(sid), "personal", None)?;
+            }
+        }
+        if write_agent {
+            client.add_memories_scoped(&self.user_id, Some(sid), agent_messages, true, "agent")?;
+            if self.config.agent_flush_after_turn {
+                client.flush_memories_scoped(&self.user_id, Some(sid), "agent", None)?;
+            }
         }
         Ok(())
     }
@@ -265,7 +324,13 @@ impl EverOSProvider {
         self.client
             .as_ref()
             .expect("checked above")
-            .flush_memories(&self.user_id, Some(&self.session_id), false, None)?;
+            .flush_memories_scoped(&self.user_id, Some(&self.session_id), "personal", None)?;
+        if self.config.capture_agent_memory && self.config.agent_flush_after_turn {
+            self.client
+                .as_ref()
+                .expect("checked above")
+                .flush_memories_scoped(&self.user_id, Some(&self.session_id), "agent", None)?;
+        }
         Ok(())
     }
 
@@ -285,19 +350,24 @@ impl EverOSProvider {
         } else {
             Some(session_id)
         };
-        let result = self.client.as_ref().expect("active").add_memories(
+        let scope = normalize_scope_arg(&value_string(args, "scope"));
+        let role = non_empty_or(
+            &value_string(args, "role"),
+            if scope == "agent" { "tool" } else { "user" },
+        );
+        let result = self.client.as_ref().expect("active").add_memories_scoped(
             &self.user_id,
             session_id_opt,
-            vec![json!({"role":"user","timestamp":now_ms(),"content":content})],
+            vec![json!({"role":role,"timestamp":now_ms(),"content":content})],
             true,
-            false,
+            &scope,
         )?;
         let flush_requested = as_bool(args.get("flush"), true);
         let flush_payload = if flush_requested {
-            match self.client.as_ref().expect("active").flush_memories(
+            match self.client.as_ref().expect("active").flush_memories_scoped(
                 &self.user_id,
                 session_id_opt,
-                false,
+                &scope,
                 None,
             ) {
                 Ok(response) => Some(flush_result_payload(&response)),
@@ -311,6 +381,7 @@ impl EverOSProvider {
             &result,
             &self.user_id,
             session_id_opt,
+            &scope,
             flush_requested,
             flush_payload,
         ))
@@ -322,7 +393,11 @@ impl EverOSProvider {
         if query.is_empty() {
             return Ok(tool_error("query is required"));
         }
-        let limit = int_between(args.get("limit"), 1, 20, self.config.top_k) as u64;
+        let limit = if args.get("top_k").is_some() {
+            int_between(args.get("top_k"), -1, 100, self.config.top_k)
+        } else {
+            int_between(args.get("limit"), -1, 100, self.config.top_k)
+        };
         let mut method = value_string(args, "method").to_ascii_lowercase();
         if method.is_empty() {
             method = self.config.search_method.clone();
@@ -352,19 +427,26 @@ impl EverOSProvider {
             } else {
                 Some(session_id.as_str())
             },
-            None,
+            args.get("filters").cloned(),
             &method,
             Some(memory_types),
             limit,
-            None,
-            false,
-            false,
+            float_or_none(args.get("radius")),
+            as_bool(args.get("include_original_data"), false),
+            as_bool(args.get("include_vectors"), false),
             Some(if method == "agentic" {
                 60.0
             } else {
                 self.config.timeout
             }),
         )?;
+        if value_string(args, "response_format") == "markdown" {
+            let formatted =
+                format_search_context(&response, self.config.max_context_items as usize);
+            if !formatted.is_empty() {
+                return Ok(formatted);
+            }
+        }
         Ok(pretty_json(&response))
     }
 
@@ -379,12 +461,12 @@ impl EverOSProvider {
             } else {
                 Some(session_id.as_str())
             },
-            None,
+            args.get("filters").cloned(),
             &memory_type,
             int_between(args.get("page"), 1, 10000, 1) as u64,
             int_between(args.get("page_size"), 1, 100, 20) as u64,
-            "timestamp",
-            "desc",
+            &non_empty_or(&value_string(args, "rank_by"), "timestamp"),
+            &non_empty_or(&value_string(args, "rank_order"), "desc"),
         )?;
         Ok(pretty_json(&response))
     }
@@ -396,10 +478,11 @@ impl EverOSProvider {
         } else {
             session_id.as_str()
         };
-        let response = match self.client.as_ref().expect("active").flush_memories(
+        let scope = normalize_scope_arg(&value_string(args, "scope"));
+        let response = match self.client.as_ref().expect("active").flush_memories_scoped(
             &self.user_id,
             if sid.is_empty() { None } else { Some(sid) },
-            false,
+            &scope,
             float_or_none(args.get("timeout")),
         ) {
             Ok(response) => response,
@@ -433,10 +516,10 @@ impl EverOSProvider {
 
 pub fn provider_tool_schemas() -> Vec<Value> {
     vec![
-        json!({"name":"everos_memory_save","description":"Queue an explicit long-term memory message in EverOS and optionally request extraction; saved=true does not guarantee a structured memory is immediately searchable.","parameters":{"type":"object","properties":{"content":{"type":"string","description":"Memory content to store."},"session_id":{"type":"string","description":"Optional EverOS/Hermes session id."},"flush":{"type":"boolean","description":"Trigger EverOS extraction immediately. Default true."}},"required":["content"]}}),
-        json!({"name":"everos_memory_search","description":"Search EverOS long-term memory using keyword, vector, hybrid, or agentic retrieval.","parameters":{"type":"object","properties":{"query":{"type":"string","description":"Search query."},"limit":{"type":"integer","description":"Maximum results, usually 5-10."},"method":{"type":"string","enum":["keyword","vector","hybrid","agentic"],"description":"Retrieval method. Default hybrid."},"session_id":{"type":"string","description":"Optional session filter."},"memory_types":{"type":"array","items":{"type":"string"},"description":"Optional EverOS memory types."}},"required":["query"]}}),
-        json!({"name":"everos_memory_get","description":"Get structured EverOS memories by type for the configured user.","parameters":{"type":"object","properties":{"memory_type":{"type":"string","enum":["episodic_memory","profile","agent_case","agent_skill"],"description":"Memory type to retrieve."},"page":{"type":"integer","description":"Page number starting at 1."},"page_size":{"type":"integer","description":"Items per page, 1-100."},"session_id":{"type":"string","description":"Optional session filter."}}}}),
-        json!({"name":"everos_memory_flush","description":"Force EverOS memory extraction for the configured user/session. Timeout errors are retryable; search/status checks should happen before retrying.","parameters":{"type":"object","properties":{"session_id":{"type":"string","description":"Optional session id."},"timeout":{"type":"number","description":"Optional per-call timeout in seconds."}}}}),
+        json!({"name":"everos_memory_save","description":"Queue an explicit long-term memory message in EverOS and optionally request extraction; saved=true does not guarantee a structured memory is immediately searchable.","parameters":{"type":"object","properties":{"content":{"type":"string","description":"Memory content to store."},"session_id":{"type":"string","description":"Optional EverOS/Hermes session id."},"scope":{"type":"string","enum":["personal","agent"],"description":"Memory scope. Default personal."},"role":{"type":"string","enum":["user","assistant","tool","system"],"description":"Message role. role=tool is only valid with scope=agent."},"flush":{"type":"boolean","description":"Trigger EverOS extraction immediately. Default true."}},"required":["content"]}}),
+        json!({"name":"everos_memory_search","description":"Search EverOS long-term memory using keyword, vector, hybrid, or agentic retrieval.","parameters":{"type":"object","properties":{"query":{"type":"string","description":"Search query."},"limit":{"type":"integer","description":"Backward-compatible alias for top_k."},"top_k":{"type":"integer","description":"Cloud top_k; -1 requests all matching results."},"method":{"type":"string","enum":["keyword","vector","hybrid","agentic"],"description":"Retrieval method. Default hybrid."},"session_id":{"type":"string","description":"Optional session filter."},"filters":{"type":"object","description":"Optional Cloud v1 filters DSL."},"memory_types":{"type":"array","items":{"type":"string","enum":["episodic_memory","profile","raw_message","agent_memory"]},"description":"Optional EverOS search memory types."},"radius":{"type":"number","description":"Optional vector radius for vector/hybrid/agentic retrieval."},"include_original_data":{"type":"boolean","description":"Include Cloud original_data. Vectors remain stripped by default."},"include_vectors":{"type":"boolean","description":"Keep embedding/vector fields for debugging only."},"response_format":{"type":"string","enum":["json","markdown"],"description":"Output format."}},"required":["query"]}}),
+        json!({"name":"everos_memory_get","description":"Get structured EverOS memories by type for the configured user.","parameters":{"type":"object","properties":{"memory_type":{"type":"string","enum":["episodic_memory","profile","agent_case","agent_skill"],"description":"Memory type to retrieve."},"page":{"type":"integer","description":"Page number starting at 1."},"page_size":{"type":"integer","description":"Items per page, 1-100."},"session_id":{"type":"string","description":"Optional session filter."},"filters":{"type":"object","description":"Optional Cloud v1 filters DSL."},"rank_by":{"type":"string","description":"Rank field. Default timestamp."},"rank_order":{"type":"string","enum":["asc","desc"],"description":"Rank order."}}}}),
+        json!({"name":"everos_memory_flush","description":"Force EverOS memory extraction for the configured user/session. Timeout errors are retryable; search/status checks should happen before retrying.","parameters":{"type":"object","properties":{"session_id":{"type":"string","description":"Optional session id."},"scope":{"type":"string","enum":["personal","agent"],"description":"Memory scope to flush."},"timeout":{"type":"number","description":"Optional per-call timeout in seconds."}}}}),
         json!({"name":"everos_memory_forget","description":"Delete an EverOS memory by id. Requires confirm=true because this is destructive.","parameters":{"type":"object","properties":{"memory_id":{"type":"string","description":"Exact EverOS memory id to delete."},"confirm":{"type":"boolean","description":"Must be true to delete."}},"required":["memory_id","confirm"]}}),
     ]
 }
@@ -491,6 +574,8 @@ fn normalize_config_from_value(config: &mut ProviderConfig, value: &Value) {
         ("auto_capture", &mut config.auto_capture),
         ("flush_after_turn", &mut config.flush_after_turn),
         ("capture_agent_memory", &mut config.capture_agent_memory),
+        ("agent_recall", &mut config.agent_recall),
+        ("agent_flush_after_turn", &mut config.agent_flush_after_turn),
     ] {
         if let Some(value) = map.get(key) {
             *slot = as_bool(Some(value), *slot);
@@ -499,8 +584,20 @@ fn normalize_config_from_value(config: &mut ProviderConfig, value: &Value) {
     if let Some(value) = map.get("top_k").and_then(Value::as_u64) {
         config.top_k = value.clamp(1, 20);
     }
+    if let Some(value) = map.get("max_context_items").and_then(Value::as_u64) {
+        config.max_context_items = value.clamp(1, 50);
+    }
     if let Some(value) = map.get("timeout").and_then(Value::as_f64) {
         config.timeout = value.clamp(1.0, 60.0);
+    }
+    if let Some(value) = map.get("agentic_timeout").and_then(Value::as_f64) {
+        config.agentic_timeout = value.clamp(1.0, 120.0);
+    }
+    if let Some(mode) = map.get("agent_capture_mode").and_then(Value::as_str) {
+        let mode = mode.trim().to_ascii_lowercase();
+        if matches!(mode.as_str(), "parallel" | "agent_only" | "off") {
+            config.agent_capture_mode = mode;
+        }
     }
     if let Some(method) = map.get("search_method").and_then(Value::as_str) {
         let method = method.trim().to_ascii_lowercase();
@@ -526,6 +623,12 @@ fn normalize_config_from_value(config: &mut ProviderConfig, value: &Value) {
         };
         if !parsed.is_empty() {
             config.memory_types = parsed;
+        }
+    }
+    if let Some(types) = map.get("agent_memory_types") {
+        let parsed = parse_string_list(types);
+        if !parsed.is_empty() {
+            config.agent_memory_types = parsed;
         }
     }
 }
@@ -649,6 +752,7 @@ fn save_result_payload(
     result: &Value,
     user_id: &str,
     session_id: Option<&str>,
+    scope: &str,
     flush_requested: bool,
     flush: Option<Value>,
 ) -> Value {
@@ -668,6 +772,7 @@ fn save_result_payload(
         "message_queued": true,
         "extraction_requested": extraction_requested,
         "searchable": Value::Null,
+        "scope": scope,
         "user_id": user_id,
         "session_id": session_id,
         "status": status,
@@ -730,4 +835,54 @@ fn float_or_none(value: Option<&Value>) -> Option<f64> {
                 .or_else(|| value.as_str().and_then(|text| text.parse::<f64>().ok()))
         })
         .filter(|value| value.is_finite() && *value > 0.0)
+}
+
+fn normalize_scope_arg(scope: &str) -> String {
+    match scope.trim().to_ascii_lowercase().as_str() {
+        "agent" => "agent".to_string(),
+        _ => "personal".to_string(),
+    }
+}
+
+fn parse_string_list(value: &Value) -> Vec<String> {
+    if let Some(text) = value.as_str() {
+        text.split(',')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(ToString::to_string)
+            .collect()
+    } else if let Some(items) = value.as_array() {
+        items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(ToString::to_string)
+            .collect()
+    } else {
+        Vec::new()
+    }
+}
+
+fn build_agent_trajectory_messages(
+    user_content: &str,
+    assistant_content: &str,
+    now_ms: u128,
+) -> Vec<Value> {
+    let user_summary = truncate_for_memory(user_content, 4000);
+    let assistant_summary = truncate_for_memory(assistant_content, 4000);
+    vec![
+        json!({"role":"user","timestamp":now_ms,"content":format!("Task request: {user_summary}")}),
+        json!({"role":"assistant","timestamp":now_ms + 1,"content":format!("Agent response summary: {assistant_summary}\nOutcome: completed_or_partial\nReusable lesson hint: capture approach, correction, and verification if useful.")}),
+    ]
+}
+
+fn truncate_for_memory(text: &str, limit: usize) -> String {
+    let text = text.trim();
+    if text.chars().count() <= limit {
+        return text.to_string();
+    }
+    let mut truncated = text.chars().take(limit).collect::<String>();
+    truncated.push('…');
+    truncated
 }

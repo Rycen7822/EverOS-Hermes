@@ -73,6 +73,55 @@ fn one_request_server(response: Value) -> (String, thread::JoinHandle<String>) {
     (format!("http://{addr}"), handle)
 }
 
+fn n_request_server(response: Value, count: usize) -> (String, thread::JoinHandle<Vec<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = thread::spawn(move || {
+        let mut requests = Vec::new();
+        for _ in 0..count {
+            let (mut stream, _) = listener.accept().unwrap();
+            let raw = read_http_request(&mut stream);
+            let body = response.to_string();
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(reply.as_bytes()).unwrap();
+            requests.push(raw);
+        }
+        requests
+    });
+    (format!("http://{addr}"), handle)
+}
+
+fn read_http_request(stream: &mut impl Read) -> String {
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 4096];
+    loop {
+        let n = stream.read(&mut tmp).unwrap();
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&tmp[..n]);
+        if let Some(header_end) = find_bytes(&buf, b"\r\n\r\n") {
+            let headers = String::from_utf8_lossy(&buf[..header_end]).to_string();
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    line.strip_prefix("content-length: ")
+                        .or_else(|| line.strip_prefix("Content-Length: "))
+                })
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            if buf.len() >= header_end + 4 + content_length {
+                break;
+            }
+        }
+    }
+    String::from_utf8_lossy(&buf).to_string()
+}
+
 fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
@@ -427,6 +476,313 @@ fn mcp_tool_name_constant_matches_expected_nine_tools() {
         ]
     );
     assert_eq!(DEFAULT_BASE_URL, "https://api.evermind.ai");
+}
+
+#[test]
+fn client_accepts_top_k_minus_one_and_radius_filters() {
+    let (base_url, handle) = one_request_server(json!({"data":{"episodes":[]}}));
+    let client = EverOSClient::new("test-key", &base_url, 10.0).unwrap();
+    client
+        .search_memories(
+            "debug timeout",
+            Some("user_001"),
+            None,
+            Some("session_001"),
+            Some(json!({"AND":[{"timestamp":{"gte":1}}]})),
+            "hybrid",
+            Some(vec!["agent_memory".to_string()]),
+            -1,
+            Some(0.5),
+            false,
+            false,
+            None,
+        )
+        .unwrap();
+    let body = parse_http_body(&handle.join().unwrap());
+    assert_eq!(body["top_k"], -1);
+    assert_eq!(body["radius"], 0.5);
+    assert_eq!(body["memory_types"], json!(["agent_memory"]));
+    assert_eq!(body["filters"]["user_id"], "user_001");
+    assert_eq!(body["filters"]["AND"][0]["timestamp"]["gte"], 1);
+    assert_eq!(body["filters"]["AND"][1]["session_id"], "session_001");
+}
+
+#[test]
+fn client_rejects_invalid_search_get_delete_contracts_before_request() {
+    let client = EverOSClient::new("test-key", "http://127.0.0.1:9", 0.05).unwrap();
+    assert!(
+        client
+            .search_memories(
+                "q",
+                Some("u"),
+                None,
+                None,
+                None,
+                "hybrid",
+                Some(vec!["agent_case".to_string()]),
+                5,
+                None,
+                false,
+                false,
+                None
+            )
+            .is_err()
+    );
+    assert!(
+        client
+            .search_memories(
+                "q",
+                Some("u"),
+                None,
+                None,
+                None,
+                "hybrid",
+                None,
+                -2,
+                None,
+                false,
+                false,
+                None
+            )
+            .is_err()
+    );
+    assert!(
+        client
+            .search_memories(
+                "q",
+                Some("u"),
+                None,
+                None,
+                None,
+                "hybrid",
+                None,
+                5,
+                Some(1.1),
+                false,
+                false,
+                None
+            )
+            .is_err()
+    );
+    assert!(
+        client
+            .get_memories(
+                Some("u"),
+                None,
+                None,
+                None,
+                "agent_memory",
+                1,
+                20,
+                "timestamp",
+                "desc"
+            )
+            .is_err()
+    );
+    assert!(
+        client
+            .delete_memories(Some("mem-1"), Some("u"), None, None)
+            .is_err()
+    );
+    assert!(
+        client
+            .delete_memories(None, None, None, Some("sess"))
+            .is_err()
+    );
+}
+
+#[test]
+fn formatter_renders_nested_agent_memory_and_raw_messages() {
+    let context = format_search_context(
+        &json!({"data":{"raw_messages":[{"role":"user","content":"raw request"}],"agent_memory":{"cases":[{"task_intent":"debug timeout","approach":"check task status before retry"}],"skills":[{"name":"timeout recovery","description":"poll task status"}]}}}),
+        5,
+    );
+    assert!(context.contains("## Raw Messages"));
+    assert!(context.contains("raw request"));
+    assert!(context.contains("## Agent Cases"));
+    assert!(context.contains("check task status before retry"));
+    assert!(context.contains("## Agent Skills"));
+    assert!(context.contains("timeout recovery"));
+}
+
+#[test]
+fn mcp_and_provider_schemas_expose_cloud_v1_parameters() {
+    let tools = everos_hermes_rust::mcp::tool_definitions();
+    let search = tools
+        .iter()
+        .find(|tool| tool["name"] == "everos_search_memories")
+        .unwrap();
+    for key in ["filters", "radius", "timeout", "fallback_to_hybrid"] {
+        assert!(
+            search["inputSchema"]["properties"].get(key).is_some(),
+            "missing mcp search {key}"
+        );
+    }
+    let get = tools
+        .iter()
+        .find(|tool| tool["name"] == "everos_get_memories")
+        .unwrap();
+    for key in ["filters", "rank_by", "rank_order"] {
+        assert!(
+            get["inputSchema"]["properties"].get(key).is_some(),
+            "missing mcp get {key}"
+        );
+    }
+    let save = tools
+        .iter()
+        .find(|tool| tool["name"] == "everos_save_memory")
+        .unwrap();
+    assert_eq!(
+        save["inputSchema"]["properties"]["scope"]["enum"],
+        json!(["personal", "agent"])
+    );
+    let delete = tools
+        .iter()
+        .find(|tool| tool["name"] == "everos_delete_memories")
+        .unwrap();
+    assert!(
+        delete["inputSchema"]["properties"]
+            .get("confirm_scope_text")
+            .is_some()
+    );
+
+    let schemas = everos_hermes_rust::provider::provider_tool_schemas();
+    let provider_save = schemas
+        .iter()
+        .find(|tool| tool["name"] == "everos_memory_save")
+        .unwrap();
+    assert_eq!(
+        provider_save["parameters"]["properties"]["scope"]["enum"],
+        json!(["personal", "agent"])
+    );
+    let provider_search = schemas
+        .iter()
+        .find(|tool| tool["name"] == "everos_memory_search")
+        .unwrap();
+    for key in ["filters", "radius", "top_k", "response_format"] {
+        assert!(
+            provider_search["parameters"]["properties"]
+                .get(key)
+                .is_some(),
+            "missing provider search {key}"
+        );
+    }
+}
+
+#[test]
+fn mcp_delete_batch_requires_explicit_user_and_confirmation_text() {
+    let raw = everos_hermes_rust::mcp::call_tool(
+        "everos_delete_memories",
+        json!({"session_id":"sess-1","confirm":true,"confirm_scope_text":"delete user_id=u1 session_id=sess-1"}),
+    )
+    .unwrap();
+    assert!(raw.contains("explicit user_id"));
+
+    let raw = everos_hermes_rust::mcp::call_tool(
+        "everos_delete_memories",
+        json!({"user_id":"u1","session_id":"sess-1","confirm":true,"confirm_scope_text":"wrong"}),
+    )
+    .unwrap();
+    assert!(raw.contains("confirm_scope_text"));
+}
+
+#[test]
+fn provider_save_tool_scope_agent_posts_agent_endpoint() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let home = temp_home("provider_agent_save");
+    let (base_url, handle) =
+        one_request_server(json!({"data":{"status":"queued","task_id":"task-agent"}}));
+    fs::write(
+        home.join(".env"),
+        format!("EVEROS_API_KEY=test-key\nEVEROS_USER_ID=u1\nEVEROS_BASE_URL={base_url}\n"),
+    )
+    .unwrap();
+    remove_env("EVEROS_API_KEY");
+    remove_env("EVEROS_USER_ID");
+    remove_env("EVEROS_BASE_URL");
+    set_env("HERMES_HOME", home.to_str().unwrap());
+
+    let provider = EverOSProvider::initialize(ProviderInit::for_test("sess-1", &home)).unwrap();
+    let raw = provider
+        .handle_tool_call(
+            "everos_memory_save",
+            json!({"content":"retry with timeout","scope":"agent","flush":false}),
+        )
+        .unwrap();
+    let request = handle.join().unwrap();
+    let response: Value = serde_json::from_str(&raw).unwrap();
+    assert!(request.starts_with("POST /api/v1/memories/agent HTTP/1.1"));
+    assert_eq!(response["scope"], "agent");
+
+    remove_env("HERMES_HOME");
+}
+
+#[test]
+fn provider_sync_turn_capture_agent_memory_posts_personal_and_agent_endpoints() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let home = temp_home("provider_agent_sync");
+    let (base_url, handle) =
+        n_request_server(json!({"data":{"status":"queued","task_id":"task-sync"}}), 2);
+    fs::write(
+        home.join(".env"),
+        format!("EVEROS_API_KEY=test-key\nEVEROS_USER_ID=u1\nEVEROS_BASE_URL={base_url}\n"),
+    )
+    .unwrap();
+    fs::write(
+        home.join("everos.json"),
+        json!({
+            "auto_capture": true,
+            "flush_after_turn": false,
+            "capture_agent_memory": true,
+            "agent_capture_mode": "parallel",
+            "agent_flush_after_turn": false
+        })
+        .to_string(),
+    )
+    .unwrap();
+    remove_env("EVEROS_API_KEY");
+    remove_env("EVEROS_USER_ID");
+    remove_env("EVEROS_BASE_URL");
+    set_env("HERMES_HOME", home.to_str().unwrap());
+
+    let provider = EverOSProvider::initialize(ProviderInit::for_test("sess-1", &home)).unwrap();
+    provider
+        .sync_turn(
+            "please debug the timeout regression",
+            "checked task status before retrying and fixed it",
+            Some("sess-2"),
+        )
+        .unwrap();
+    let requests = handle.join().unwrap();
+    let paths: Vec<&str> = requests
+        .iter()
+        .map(|raw| raw.lines().next().unwrap_or(""))
+        .collect();
+    assert!(
+        paths
+            .iter()
+            .any(|line| line.starts_with("POST /api/v1/memories "))
+    );
+    assert!(
+        paths
+            .iter()
+            .any(|line| line.starts_with("POST /api/v1/memories/agent "))
+    );
+    let agent_body = requests
+        .iter()
+        .find(|raw| raw.starts_with("POST /api/v1/memories/agent "))
+        .map(|raw| parse_http_body(raw))
+        .unwrap();
+    assert_eq!(agent_body["user_id"], "u1");
+    assert_eq!(agent_body["session_id"], "sess-2");
+    assert!(
+        agent_body["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("Task request:")
+    );
+
+    remove_env("HERMES_HOME");
 }
 
 #[test]

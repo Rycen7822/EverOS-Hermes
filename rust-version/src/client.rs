@@ -118,7 +118,7 @@ impl EverOSClient {
             ));
         }
         if text.trim().is_empty() {
-            return Ok(json!({}));
+            return Ok(json!({"ok": true, "status_code": status.as_u16()}));
         }
         let parsed: Value = serde_json::from_str(&text)
             .map_err(|source| EverOSError::InvalidJson { url, source })?;
@@ -137,7 +137,25 @@ impl EverOSClient {
         async_mode: bool,
         agent: bool,
     ) -> Result<Value> {
-        let path = if agent {
+        self.add_memories_scoped(
+            user_id,
+            session_id,
+            messages,
+            async_mode,
+            if agent { "agent" } else { "personal" },
+        )
+    }
+
+    pub fn add_memories_scoped(
+        &self,
+        user_id: &str,
+        session_id: Option<&str>,
+        messages: Vec<Value>,
+        async_mode: bool,
+        scope: &str,
+    ) -> Result<Value> {
+        validate_messages(&messages, scope)?;
+        let path = if normalize_scope(scope)? == "agent" {
             "/api/v1/memories/agent"
         } else {
             "/api/v1/memories"
@@ -177,7 +195,22 @@ impl EverOSClient {
         agent: bool,
         timeout: Option<f64>,
     ) -> Result<Value> {
-        let path = if agent {
+        self.flush_memories_scoped(
+            user_id,
+            session_id,
+            if agent { "agent" } else { "personal" },
+            timeout,
+        )
+    }
+
+    pub fn flush_memories_scoped(
+        &self,
+        user_id: &str,
+        session_id: Option<&str>,
+        scope: &str,
+        timeout: Option<f64>,
+    ) -> Result<Value> {
+        let path = if normalize_scope(scope)? == "agent" {
             "/api/v1/memories/agent/flush"
         } else {
             "/api/v1/memories/flush"
@@ -212,7 +245,8 @@ impl EverOSClient {
         rank_by: &str,
         rank_order: &str,
     ) -> Result<Value> {
-        let resolved_filters = build_filters(user_id, group_id, session_id, filters);
+        validate_get_params(memory_type, page, page_size, rank_by, rank_order)?;
+        let resolved_filters = build_filters(user_id, group_id, session_id, filters)?;
         self.request_json(
             "POST",
             "/api/v1/memories/get",
@@ -238,13 +272,14 @@ impl EverOSClient {
         filters: Option<Value>,
         method: &str,
         memory_types: Option<Vec<String>>,
-        top_k: u64,
+        top_k: i64,
         radius: Option<f64>,
         include_original_data: bool,
         include_vectors: bool,
         timeout: Option<f64>,
     ) -> Result<Value> {
-        let resolved_filters = build_filters(user_id, group_id, session_id, filters);
+        validate_search_params(method, memory_types.as_deref(), top_k, radius)?;
+        let resolved_filters = build_filters(user_id, group_id, session_id, filters)?;
         let memory_types = memory_types.unwrap_or_else(|| {
             DEFAULT_MEMORY_TYPES
                 .iter()
@@ -279,6 +314,7 @@ impl EverOSClient {
         group_id: Option<&str>,
         session_id: Option<&str>,
     ) -> Result<Value> {
+        validate_delete_request(memory_id, user_id, group_id, session_id)?;
         let body = if let Some(memory_id) = memory_id.filter(|value| !value.trim().is_empty()) {
             json!({"memory_id": memory_id})
         } else {
@@ -347,26 +383,305 @@ pub fn build_filters(
     group_id: Option<&str>,
     session_id: Option<&str>,
     filters: Option<Value>,
-) -> Value {
+) -> Result<Value> {
+    if group_id.filter(|value| !value.trim().is_empty()).is_some() {
+        return Err(EverOSError::Api(
+            "group memory is out of scope for this EverOS-Hermes release".to_string(),
+        ));
+    }
     let mut map = match filters {
         Some(Value::Object(map)) => map,
-        _ => Map::new(),
+        Some(_) => return Err(EverOSError::Api("filters must be an object".to_string())),
+        None => Map::new(),
     };
-    if let Some(user_id) = user_id {
-        map.insert("user_id".into(), Value::String(user_id.to_string()));
+    validate_filter_map(&map)?;
+    if let Some(user_id) = user_id.filter(|value| !value.trim().is_empty()) {
+        if let Some(existing) = map.get("user_id").and_then(Value::as_str) {
+            if existing != user_id {
+                return Err(EverOSError::Api(
+                    "conflicting user_id between top-level parameter and filters".to_string(),
+                ));
+            }
+        } else {
+            map.insert("user_id".into(), Value::String(user_id.to_string()));
+        }
     }
-    if let Some(group_id) = group_id {
-        map.insert("group_id".into(), Value::String(group_id.to_string()));
+    if !map.contains_key("user_id") {
+        return Err(EverOSError::Api("filters must include user_id".to_string()));
     }
     if let Some(session_id) = session_id.filter(|value| !value.trim().is_empty()) {
-        let mut clauses = match map.remove("AND") {
-            Some(Value::Array(items)) => items,
-            _ => Vec::new(),
-        };
-        clauses.push(json!({"session_id": session_id}));
-        map.insert("AND".into(), Value::Array(clauses));
+        if filter_has_session_conflict(&Value::Object(map.clone()), session_id) {
+            return Err(EverOSError::Api(
+                "conflicting session_id between top-level parameter and filters".to_string(),
+            ));
+        }
+        if !filter_has_session(&Value::Object(map.clone())) {
+            let mut clauses = match map.remove("AND") {
+                Some(Value::Array(items)) => items,
+                _ => Vec::new(),
+            };
+            clauses.push(json!({"session_id": session_id}));
+            map.insert("AND".into(), Value::Array(clauses));
+        }
     }
-    Value::Object(map)
+    Ok(Value::Object(map))
+}
+
+fn normalize_scope(scope: &str) -> Result<&'static str> {
+    match scope.trim().to_ascii_lowercase().as_str() {
+        "" | "personal" => Ok("personal"),
+        "agent" => Ok("agent"),
+        other => Err(EverOSError::Api(format!(
+            "scope must be personal or agent, got {other}"
+        ))),
+    }
+}
+
+fn validate_messages(messages: &[Value], scope: &str) -> Result<()> {
+    let scope = normalize_scope(scope)?;
+    if messages.is_empty() || messages.len() > 500 {
+        return Err(EverOSError::Api(
+            "messages length must be 1..=500".to_string(),
+        ));
+    }
+    for message in messages {
+        let Some(map) = message.as_object() else {
+            return Err(EverOSError::Api(
+                "each message must be an object".to_string(),
+            ));
+        };
+        let role = map.get("role").and_then(Value::as_str).unwrap_or("");
+        let allowed = if scope == "agent" {
+            matches!(role, "user" | "assistant" | "tool" | "system")
+        } else {
+            matches!(role, "user" | "assistant" | "system")
+        };
+        if !allowed {
+            return Err(EverOSError::Api(format!(
+                "invalid role {role:?} for {scope} memory"
+            )));
+        }
+        if !map
+            .get("timestamp")
+            .is_some_and(|value| value.as_i64().is_some() || value.as_u64().is_some())
+        {
+            return Err(EverOSError::Api(
+                "each message timestamp must be epoch milliseconds".to_string(),
+            ));
+        }
+        if map
+            .get("content")
+            .and_then(Value::as_str)
+            .is_none_or(|value| value.trim().is_empty())
+        {
+            return Err(EverOSError::Api(
+                "each message content is required".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_search_params(
+    method: &str,
+    memory_types: Option<&[String]>,
+    top_k: i64,
+    radius: Option<f64>,
+) -> Result<()> {
+    if !matches!(method, "keyword" | "vector" | "hybrid" | "agentic") {
+        return Err(EverOSError::Api(
+            "method must be keyword, vector, hybrid, or agentic".to_string(),
+        ));
+    }
+    if !(-1..=100).contains(&top_k) {
+        return Err(EverOSError::Api(
+            "top_k must be between -1 and 100".to_string(),
+        ));
+    }
+    if let Some(radius) = radius {
+        if !(0.0..=1.0).contains(&radius) {
+            return Err(EverOSError::Api(
+                "radius must be between 0 and 1".to_string(),
+            ));
+        }
+        if method == "keyword" {
+            return Err(EverOSError::Api(
+                "radius is only valid for vector, hybrid, or agentic search".to_string(),
+            ));
+        }
+    }
+    if let Some(types) = memory_types {
+        for ty in types {
+            if !matches!(
+                ty.as_str(),
+                "episodic_memory" | "profile" | "raw_message" | "agent_memory"
+            ) {
+                return Err(EverOSError::Api(format!("invalid search memory_type {ty}")));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_get_params(
+    memory_type: &str,
+    page: u64,
+    page_size: u64,
+    rank_by: &str,
+    rank_order: &str,
+) -> Result<()> {
+    if !matches!(
+        memory_type,
+        "episodic_memory" | "profile" | "agent_case" | "agent_skill"
+    ) {
+        return Err(EverOSError::Api(format!(
+            "invalid get memory_type {memory_type}"
+        )));
+    }
+    if page == 0 || page_size == 0 || page_size > 100 {
+        return Err(EverOSError::Api(
+            "page must be >= 1 and page_size must be 1..=100".to_string(),
+        ));
+    }
+    if !matches!(rank_by, "timestamp" | "created_at" | "updated_at") {
+        return Err(EverOSError::Api(
+            "rank_by must be timestamp, created_at, or updated_at".to_string(),
+        ));
+    }
+    if !matches!(rank_order, "asc" | "desc") {
+        return Err(EverOSError::Api(
+            "rank_order must be asc or desc".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_delete_request(
+    memory_id: Option<&str>,
+    user_id: Option<&str>,
+    group_id: Option<&str>,
+    session_id: Option<&str>,
+) -> Result<()> {
+    if group_id.filter(|value| !value.trim().is_empty()).is_some() {
+        return Err(EverOSError::Api(
+            "group delete is out of scope for this EverOS-Hermes release".to_string(),
+        ));
+    }
+    let has_memory_id = memory_id.is_some_and(|value| !value.trim().is_empty());
+    if has_memory_id && (user_id.is_some() || session_id.is_some()) {
+        return Err(EverOSError::Api(
+            "single delete by memory_id cannot include user_id or session_id".to_string(),
+        ));
+    }
+    if !has_memory_id && user_id.filter(|value| !value.trim().is_empty()).is_none() {
+        return Err(EverOSError::Api(
+            "batch delete requires explicit user_id".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_filter_map(map: &Map<String, Value>) -> Result<()> {
+    for (key, value) in map {
+        match key.as_str() {
+            "user_id" => {
+                if value.as_str().is_none_or(|text| text.trim().is_empty()) {
+                    return Err(EverOSError::Api(
+                        "filters.user_id must be a non-empty string".to_string(),
+                    ));
+                }
+            }
+            "session_id" => validate_string_or_operator("session_id", value)?,
+            "timestamp" => validate_timestamp_filter(value)?,
+            "AND" | "OR" => {
+                let Some(items) = value.as_array() else {
+                    return Err(EverOSError::Api(format!("filters.{key} must be an array")));
+                };
+                for item in items {
+                    let Some(child) = item.as_object() else {
+                        return Err(EverOSError::Api(format!(
+                            "filters.{key} entries must be objects"
+                        )));
+                    };
+                    validate_filter_map(child)?;
+                }
+            }
+            other => {
+                return Err(EverOSError::Api(format!(
+                    "unsupported filter field {other}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_string_or_operator(name: &str, value: &Value) -> Result<()> {
+    if value.as_str().is_some() {
+        return Ok(());
+    }
+    let Some(map) = value.as_object() else {
+        return Err(EverOSError::Api(format!(
+            "filters.{name} must be a string or operator object"
+        )));
+    };
+    for op in map.keys() {
+        if !matches!(op.as_str(), "eq") {
+            return Err(EverOSError::Api(format!(
+                "unsupported {name} operator {op}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_timestamp_filter(value: &Value) -> Result<()> {
+    if value.is_number() {
+        return Ok(());
+    }
+    let Some(map) = value.as_object() else {
+        return Err(EverOSError::Api(
+            "filters.timestamp must be a number or operator object".to_string(),
+        ));
+    };
+    for op in map.keys() {
+        if !matches!(op.as_str(), "eq" | "gt" | "gte" | "lt" | "lte") {
+            return Err(EverOSError::Api(format!(
+                "unsupported timestamp operator {op}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn filter_has_session(value: &Value) -> bool {
+    match value {
+        Value::Object(map) => map
+            .iter()
+            .any(|(key, value)| key == "session_id" || filter_has_session(value)),
+        Value::Array(items) => items.iter().any(filter_has_session),
+        _ => false,
+    }
+}
+
+fn filter_has_session_conflict(value: &Value, expected: &str) -> bool {
+    match value {
+        Value::Object(map) => map.iter().any(|(key, value)| {
+            if key == "session_id" {
+                if let Some(text) = value.as_str() {
+                    return text != expected;
+                }
+                if let Some(eq) = value.get("eq").and_then(Value::as_str) {
+                    return eq != expected;
+                }
+            }
+            filter_has_session_conflict(value, expected)
+        }),
+        Value::Array(items) => items
+            .iter()
+            .any(|item| filter_has_session_conflict(item, expected)),
+        _ => false,
+    }
 }
 
 fn http_error_to_everos_error(status: u16, raw: &str, reason: &str) -> EverOSError {

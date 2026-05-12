@@ -45,6 +45,7 @@ Secrets stay in the normal Hermes secret file, so users can edit `~/.hermes/.env
 - **Nine explicit MCP tools**: save, add, flush, search, get, delete, task status, get settings, and update settings.
 - **Dotenv fallback**: credential lookup is `process env` -> `$HERMES_HOME/.env` -> `~/.hermes/.env`.
 - **Two runtimes**: Python/FastMCP source implementation plus a Rust binary with a prebuilt Linux x86_64 package.
+- **Cloud v1 contract**: personal and agent memory are supported; group, sender, and multimodal object storage endpoints are explicitly out of scope. See [`docs/everos_cloud_v1_contract.md`](docs/everos_cloud_v1_contract.md).
 - **Configurable provider loop**: `auto_recall`, `auto_capture`, and `flush_after_turn` can be tuned in `$HERMES_HOME/everos.json`.
 - **Safe secret hygiene**: examples use placeholders only; `.env` and local reference checkouts are ignored.
 
@@ -106,13 +107,13 @@ https://github.com/Rycen7822/EverOS-Hermes/releases/download/v<version>/everos-h
 Current Linux x86_64 asset:
 
 ```text
-everos-hermes-rust-0.1.1-x86_64-unknown-linux-gnu.tar.gz
+everos-hermes-rust-0.2.0-x86_64-unknown-linux-gnu.tar.gz
 ```
 
 Install flow:
 
 ```bash
-VERSION=0.1.1
+VERSION=0.2.0
 TARGET=x86_64-unknown-linux-gnu
 INSTALL_DIR="$HOME/.local/share/everos-hermes"
 ASSET="everos-hermes-rust-${VERSION}-${TARGET}.tar.gz"
@@ -284,6 +285,9 @@ Advanced non-secret provider settings live in `$HERMES_HOME/everos.json`:
   "top_k": 5,
   "memory_types": ["episodic_memory", "profile"],
   "capture_agent_memory": false,
+  "agent_recall": false,
+  "agent_flush_after_turn": false,
+  "agent_memory_types": ["agent_memory"],
   "timeout": 10.0
 }
 ```
@@ -336,14 +340,14 @@ The MCP server exposes nine tools:
 | Tool | Purpose | Read-only? |
 | --- | --- | --- |
 | `everos_save_memory` | Queue one explicit text memory message, then optionally flush; response separates queue/extraction/searchability state. | No |
-| `everos_add_memories` | Add one or more user/assistant/tool messages. | No |
-| `everos_flush_memories` | Trigger extraction immediately; supports per-call `timeout` and retryable timeout responses. | No |
-| `everos_search_memories` | Search with keyword, vector, hybrid, or agentic retrieval; vector fields are stripped unless `include_vectors=true`. | Yes |
-| `everos_get_memories` | Retrieve structured memories with pagination. | Yes |
-| `everos_delete_memories` | Delete by memory id or confirmed user/session scope. | No, destructive |
+| `everos_add_memories` | Add one or more messages to personal or agent scope; legacy `agent` alias remains supported but conflicts with `scope`. | No |
+| `everos_flush_memories` | Trigger personal or agent extraction immediately; supports per-call `timeout` and retryable timeout responses. | No |
+| `everos_search_memories` | Search with keyword, vector, hybrid, or agentic retrieval; exposes `filters`, `radius`, `top_k=-1`, `timeout`, and agentic fallback; vector fields are stripped unless `include_vectors=true`. | Yes |
+| `everos_get_memories` | Retrieve structured memories with `filters`, pagination, `rank_by`, and `rank_order`. | Yes |
+| `everos_delete_memories` | Delete exactly one `memory_id` or a confirmed user/session batch; batch delete requires `confirm_scope_text`. | No, destructive |
 | `everos_get_task_status` | Check an asynchronous extraction task. | Yes |
 | `everos_get_settings` | Read EverOS memory-space settings. | Yes |
-| `everos_update_settings` | Update supplied EverOS settings fields. | No |
+| `everos_update_settings` | Update whitelisted EverOS settings fields and return a before/after diff. | No |
 
 Common search call shape:
 
@@ -353,13 +357,23 @@ Common search call shape:
   "method": "hybrid",
   "top_k": 5,
   "memory_types": ["episodic_memory", "profile"],
+  "filters": {"user_id": "hermes_default", "AND": [{"session_id": "optional-session"}]},
+  "radius": 0.5,
   "include_original_data": false,
   "include_vectors": false,
+  "timeout": 10,
+  "fallback_to_hybrid": true,
   "response_format": "markdown"
 }
 ```
 
 Use `method="agentic"` only for complex multi-part retrieval because it is slower and more expensive than `hybrid`. Even when `include_original_data=true`, embedding/vector fields are removed by default to avoid flooding context; set `include_vectors=true` only for debugging.
+
+Search/get type mapping is intentionally split: `search` accepts `episodic_memory`, `profile`, `raw_message`, and `agent_memory`; `get` accepts `episodic_memory`, `profile`, `agent_case`, and `agent_skill`. `top_k=-1` is allowed for Cloud search, but Markdown rendering still caps prompt context separately.
+
+Delete safety is stricter than raw CRUD: single delete uses `memory_id` only, while batch delete requires an explicit `user_id`, `confirm=true`, and `confirm_scope_text` exactly matching `delete user_id=<id>` or `delete user_id=<id> session_id=<session>`.
+
+Settings updates are restricted to the documented settings whitelist and return a diff. Unknown keys are rejected before the request is sent.
 
 ## Runtime Modes
 

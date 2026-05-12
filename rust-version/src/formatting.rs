@@ -34,17 +34,26 @@ pub fn format_search_context(response: &Value, max_items: usize) -> String {
     };
 
     let mut lines = Vec::new();
+    let agent_memory = data.get("agent_memory").and_then(Value::as_object);
     let episodes = as_list(
         data.get("episodes")
             .or_else(|| data.get("results"))
             .or_else(|| data.get("memories")),
     );
     let profiles = as_list(data.get("profiles").or_else(|| data.get("profile")));
-    let agent_cases = as_list(data.get("agent_cases"));
-    let agent_skills = as_list(data.get("agent_skills"));
+    let raw_messages = as_list(data.get("raw_messages").or_else(|| data.get("messages")));
+    let agent_cases = as_list(
+        data.get("agent_cases")
+            .or_else(|| agent_memory.and_then(|agent| agent.get("cases"))),
+    );
+    let agent_skills = as_list(
+        data.get("agent_skills")
+            .or_else(|| agent_memory.and_then(|agent| agent.get("skills"))),
+    );
 
     let episode_lines = format_episodes(&episodes, max_items);
     let profile_lines = format_profiles(&profiles, max_items);
+    let raw_message_lines = format_raw_messages(&raw_messages, max_items);
     let agent_case_lines = format_agent_cases(&agent_cases, max_items);
     let agent_skill_lines = format_agent_skills(&agent_skills, max_items);
 
@@ -55,6 +64,10 @@ pub fn format_search_context(response: &Value, max_items: usize) -> String {
     if !profile_lines.is_empty() {
         lines.push("## Profile".to_string());
         lines.extend(profile_lines);
+    }
+    if !raw_message_lines.is_empty() {
+        lines.push("## Raw Messages".to_string());
+        lines.extend(raw_message_lines);
     }
     if !agent_case_lines.is_empty() {
         lines.push("## Agent Cases".to_string());
@@ -144,6 +157,29 @@ fn format_profiles(items: &[Value], max_items: usize) -> Vec<String> {
             }
             if lines.is_empty() {
                 lines.push(format!("- {}", truncate(&compact_json(item), 700)));
+            }
+        } else if let Some(text) = scalar_text(item).filter(|text| !text.trim().is_empty()) {
+            lines.push(format!("- {}", truncate(&text, 500)));
+        }
+    }
+    lines
+}
+
+fn format_raw_messages(items: &[Value], max_items: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    for item in items.iter().take(max_items) {
+        if item.as_object().is_some() {
+            let role = first_text(item, &["role", "sender", "type"]);
+            let content = first_text(item, &["content", "text", "message", "summary"]);
+            let content = if content.is_empty() {
+                compact_json(item)
+            } else {
+                content
+            };
+            if role.is_empty() {
+                lines.push(format!("- {}", truncate(&content, 500)));
+            } else {
+                lines.push(format!("- {role}: {}", truncate(&content, 500)));
             }
         } else if let Some(text) = scalar_text(item).filter(|text| !text.trim().is_empty()) {
             lines.push(format!("- {}", truncate(&text, 500)));

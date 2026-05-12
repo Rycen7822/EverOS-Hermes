@@ -1,5 +1,5 @@
 name: everos
-version: 0.1.1
+version: 0.2.0
 runtime: rust
 entrypoint: integrations/hermes/__init__.py
 description: "Rust EverOS Cloud long-term memory provider for Hermes Agent with MCP tools."
