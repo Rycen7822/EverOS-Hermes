@@ -75,7 +75,7 @@ def test_prefetch_formats_episode_and_profile_context(monkeypatch, tmp_path):
 
     context = provider.prefetch("coffee")
 
-    assert "# EverOS Memory" in context
+    assert context.startswith('<everos-context version="2" source="prefetch">')
     assert "coffee preference" in context
     assert "strong black Americano" in context
     assert "User likes black coffee" in context

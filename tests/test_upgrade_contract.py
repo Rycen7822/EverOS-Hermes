@@ -1,0 +1,82 @@
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_python_source_mcp_tool_count_is_13():
+    from everos_hermes import mcp_server
+
+    tools = mcp_server.mcp._tool_manager._tools
+    assert len(mcp_server.TOOL_NAMES) == 13
+    assert len(tools) == 13
+    assert set(tools) == set(mcp_server.TOOL_NAMES)
+
+
+def test_provider_explicit_tool_schema_count_is_8(monkeypatch, tmp_path):
+    from everos_hermes.provider import EverOSMemoryProvider
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    provider = EverOSMemoryProvider()
+
+    schemas = provider.get_tool_schemas()
+    assert len(schemas) == 8
+    assert all(schema["name"].startswith("everos_memory_") for schema in schemas)
+
+
+def test_readme_uses_current_mcp_13_badge_and_no_stale_mcp_9_wording():
+    text = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    stale_patterns = [
+        r"MCP-9\b",
+        r"MCP-9%20tools",
+        r"MCP:\s*nine tools",
+        r"alt=\"MCP: nine tools\"",
+    ]
+    for pattern in stale_patterns:
+        assert not re.search(pattern, text, flags=re.IGNORECASE), pattern
+    assert "MCP-13%20tools" in text or "MCP-13 tools" in text
+
+
+def test_readme_documents_python_context_engine_upgrade_and_rust_boundary():
+    text = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    for required in [
+        "structured agent trajectory",
+        "context assembler",
+        "include_recent_raw",
+        "agent_trajectory_on_session_end",
+        "prefetch_cache_enabled",
+        "Python context-engine upgrade is not yet Rust parity",
+    ]:
+        assert required in text
+
+
+def test_cloud_contract_keeps_out_of_scope_endpoint_blacklist():
+    text = (ROOT / "docs" / "everos_cloud_v1_contract.md").read_text(encoding="utf-8")
+
+    for forbidden in [
+        "/api/v1/memories/group",
+        "/api/v1/groups",
+        "/api/v1/senders",
+        "/api/v1/object/sign",
+    ]:
+        assert forbidden in text
+    assert "out of scope" in text.lower()
+
+
+def test_cloud_contract_documents_message_id_and_structured_agent_trajectory():
+    text = (ROOT / "docs" / "everos_cloud_v1_contract.md").read_text(encoding="utf-8")
+
+    for required in [
+        "message_id",
+        "optional idempotency key",
+        "structured agent trajectory",
+        "tool_calls",
+        "tool_call_id",
+        "source",
+    ]:
+        assert required in text

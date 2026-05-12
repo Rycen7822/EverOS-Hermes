@@ -63,6 +63,9 @@ def validate_messages(messages: list[dict[str, Any]], scope: str) -> None:
         tool_call_id = message.get("tool_call_id")
         if role == "tool" and (not isinstance(tool_call_id, str) or not tool_call_id.strip()):
             raise ValueError(f"messages[{index}].tool_call_id is required when role='tool'")
+        message_id = message.get("message_id")
+        if message_id is not None and (not isinstance(message_id, str) or not message_id.strip()):
+            raise ValueError(f"messages[{index}].message_id must be a non-empty string when provided")
         content = message.get("content")
         if not isinstance(content, str) or not content.strip():
             raise ValueError(f"messages[{index}].content must be a non-empty string")

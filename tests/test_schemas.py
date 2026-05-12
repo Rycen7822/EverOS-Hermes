@@ -60,13 +60,17 @@ def test_filters_require_user_and_reject_unknown_or_conflicting_fields():
 def test_message_scope_and_delete_validators():
     from everos_hermes.schemas import validate_delete_request, validate_messages
 
-    validate_messages([{"role": "user", "timestamp": 1711900000000, "content": "hello"}], "personal")
+    validate_messages([{"role": "user", "timestamp": 1711900000000, "content": "hello", "message_id": "msg-1"}], "personal")
     validate_messages(
         [{"role": "tool", "timestamp": 1711900000000, "content": "tool output", "tool_call_id": "tool-call-1"}],
         "agent",
     )
     with pytest.raises(ValueError, match="tool_call_id"):
         validate_messages([{"role": "tool", "timestamp": 1711900000000, "content": "tool output"}], "agent")
+    with pytest.raises(ValueError, match="message_id"):
+        validate_messages([{"role": "user", "timestamp": 1711900000000, "content": "hello", "message_id": ""}], "personal")
+    with pytest.raises(ValueError, match="message_id"):
+        validate_messages([{"role": "user", "timestamp": 1711900000000, "content": "hello", "message_id": 123}], "personal")
     with pytest.raises(ValueError, match="role"):
         validate_messages([{"role": "tool", "timestamp": 1, "content": "no"}], "personal")
     with pytest.raises(ValueError, match="1..500"):

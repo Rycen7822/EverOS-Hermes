@@ -22,5 +22,11 @@ venv/
 agentmemory-main/
 agentmemory-main
 
+# External reference source snapshots; do not vendor into this repo
+everos-openclaw-plugin/
+
+# Local scratch planning/evaluation directories
+.tmp_*/
+
 # Local problem notes / scratch issue inventory
 problems.md

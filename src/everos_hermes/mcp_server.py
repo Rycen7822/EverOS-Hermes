@@ -199,7 +199,8 @@ async def everos_add_memories(
 ) -> str:
     """Add one or more personal or agent-trajectory messages to EverOS.
 
-    messages must follow EverOS v1 schema: role, timestamp (Unix ms), and content.
+    Messages must follow EverOS v1 schema: role, timestamp (Unix ms), and content.
+    Optional message_id is preserved when provided for idempotent retries.
     For agent=True, EverOS /api/v1/memories/agent is used and role can also be tool.
     """
     resolved_scope = normalize_scope(scope, agent)

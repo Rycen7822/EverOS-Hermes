@@ -13,7 +13,7 @@ Use EverOS either as explicit MCP tools, or as an optional Hermes memory provide
 <p align="center">
   <a href="README.md"><img src="https://img.shields.io/badge/Docs-README-f5c542?style=for-the-badge" alt="Documentation"></a>
   <a href="https://github.com/Rycen7822/EverOS-Hermes"><img src="https://img.shields.io/badge/GitHub-EverOS--Hermes-0969da?style=for-the-badge" alt="GitHub repository"></a>
-  <a href="src/everos_hermes/mcp_server.py"><img src="https://img.shields.io/badge/MCP-9%20tools-2ea44f?style=for-the-badge" alt="MCP: nine tools"></a>
+  <a href="src/everos_hermes/mcp_server.py"><img src="https://img.shields.io/badge/MCP-13%20tools-2ea44f?style=for-the-badge" alt="MCP: thirteen tools"></a>
   <a href="integrations/hermes"><img src="https://img.shields.io/badge/Hermes-memory%20provider-5865F2?style=for-the-badge" alt="Hermes memory provider"></a>
   <a href="rust-version/README.md"><img src="https://img.shields.io/badge/Runtime-Python%20%7C%20Rust-blue?style=for-the-badge" alt="Runtime: Python and Rust"></a>
   <a href="https://github.com/Rycen7822/EverOS-Hermes/releases"><img src="https://img.shields.io/badge/Rust%20Prebuilt-available-0969da?style=for-the-badge" alt="Rust prebuilt package available"></a>
@@ -43,15 +43,18 @@ Secrets stay in the normal Hermes secret file, so users can edit `~/.hermes/.env
 
 - **Optional Hermes memory provider**: set `memory.provider: everos` when you want automatic recall/capture hooks.
 - **Thirteen explicit MCP tools**: the nine Cloud v1 primitives plus batch/import/verify workflow helpers for safer migration and searchability checks.
+- **Python context engine**: the Python provider includes structured agent trajectory capture, a budgeted context assembler, deterministic message ids, prefetch caching, and opt-in session-scoped recent raw recall.
 - **Dotenv fallback**: credential lookup is `process env` -> `$HERMES_HOME/.env` -> `~/.hermes/.env`.
 - **Two runtimes**: Python/FastMCP source implementation plus a Rust binary with a prebuilt Linux x86_64 package.
 - **Cloud v1 contract**: personal and agent memory are supported; group, sender, and multimodal object storage endpoints are explicitly out of scope. See [`docs/everos_cloud_v1_contract.md`](docs/everos_cloud_v1_contract.md).
-- **Configurable provider loop**: `auto_recall`, `auto_capture`, and `flush_after_turn` can be tuned in `$HERMES_HOME/everos.json`.
+- **Configurable provider loop**: `auto_recall`, `auto_capture`, `flush_after_turn`, `agent_recall`, and `include_recent_raw` can be tuned in `$HERMES_HOME/everos.json`.
 - **Safe secret hygiene**: examples use placeholders only; `.env` and local reference checkouts are ignored.
 
 ## Rust version
 
-A feature-parity Rust port is available under [`rust-version/`](rust-version/). It keeps this Python version intact while adding a native `everos-hermes-rust` binary for the stdio MCP server plus a thin Hermes Python shim that delegates provider behavior to Rust.
+A Rust port is available under [`rust-version/`](rust-version/). It keeps this Python version intact while adding a native `everos-hermes-rust` binary for the stdio MCP server plus a thin Hermes Python shim that delegates provider behavior to Rust.
+
+Important boundary: this Python context-engine upgrade is not yet Rust parity. The new structured agent trajectory capture, budgeted context assembler, prefetch cache, and opt-in recent raw recall described below apply to the Python runtime unless the Rust README explicitly says otherwise.
 
 Quick build:
 
@@ -173,6 +176,25 @@ python -m pytest tests -q
 
 If Hermes runs under a different Python environment than your shell, install the package with that interpreter instead.
 
+Python-only provider context-engine knobs can be placed in `$HERMES_HOME/everos.json` during development/debugging:
+
+```json
+{
+  "max_context_chars": 12000,
+  "prefetch_cache_enabled": true,
+  "prefetch_cache_ttl_seconds": 120,
+  "include_recent_raw": false,
+  "recent_raw_top_k": 4,
+  "agent_summary_after_turn": false,
+  "agent_trajectory_on_session_end": true,
+  "agent_trajectory_on_pre_compress": true,
+  "agent_trajectory_on_delegation": true,
+  "agent_max_chars": 16000
+}
+```
+
+`include_recent_raw=true` is intentionally opt-in and session-scoped; without a session id, recent raw recall is skipped instead of running a global raw-message search.
+
 Fallback MCP registration:
 
 ```yaml
@@ -257,10 +279,12 @@ This section applies only when `memory.provider: everos` is enabled. It is separ
 
 | Hook | EverOS action |
 | --- | --- |
-| `prefetch(query)` | If `auto_recall=true`, searches EverOS before a turn and injects compact results when any are found. |
-| `sync_turn(user, assistant)` | If `auto_capture=true`, saves the completed user/assistant turn; `flush_after_turn=true` makes extraction run immediately. |
+| `prefetch(query)` | If `auto_recall=true`, searches EverOS before a turn, uses the budgeted context assembler, and can consume a lock-protected prefetch cache. Optional recent raw recall is session-scoped and off by default. |
+| `sync_turn(user, assistant)` | If `auto_capture=true`, saves the completed user/assistant turn with deterministic `message_id` values; `flush_after_turn=true` makes extraction run immediately. Optional lightweight agent summaries require `agent_summary_after_turn=true`. |
 | `on_memory_write()` | Mirrors explicit Hermes memory writes to EverOS. |
-| `on_session_end()` | Flushes the active EverOS session. |
+| `on_session_end()` | Can write structured agent trajectory first, then flush the active EverOS session; personal flush still runs even if agent trajectory write fails. |
+| `on_pre_compress()` | Can save capped structured agent trajectory before context compression without flushing. |
+| `on_delegation()` | Can save a task/result pair to agent scope with a `[delegation child_session_id=...]` prefix. |
 
 Hermes provider tools exposed to the agent:
 
@@ -287,10 +311,26 @@ Advanced non-secret provider settings live in `$HERMES_HOME/everos.json`:
   "search_method": "hybrid",
   "top_k": 5,
   "memory_types": ["episodic_memory", "profile"],
+  "max_context_chars": 12000,
+  "profile_max_items": 3,
+  "skills_max_items": 4,
+  "cases_max_items": 4,
+  "episodic_max_items": 6,
+  "include_recent_raw": false,
+  "recent_raw_top_k": 4,
+  "prefetch_cache_enabled": true,
+  "prefetch_cache_ttl_seconds": 120,
   "capture_agent_memory": false,
   "agent_recall": false,
+  "agent_summary_after_turn": false,
+  "agent_trajectory_on_session_end": true,
+  "agent_trajectory_on_pre_compress": true,
+  "agent_trajectory_on_delegation": true,
   "agent_flush_after_turn": false,
   "agent_memory_types": ["agent_memory"],
+  "agent_max_chars": 16000,
+  "agent_dedupe_entries": 128,
+  "agent_dedupe_ttl_seconds": 86400,
   "timeout": 10.0
 }
 ```
@@ -343,7 +383,7 @@ The MCP server exposes thirteen tools:
 | Tool | Purpose | Read-only? |
 | --- | --- | --- |
 | `everos_save_memory` | Queue one explicit text memory message, then optionally flush; response separates queue/extraction/searchability state. For agent scope, `role=tool` requires `tool_call_id`; default agent role is non-tool. | No |
-| `everos_add_memories` | Add one or more messages to personal or agent scope; legacy `agent` alias remains supported but conflicts with `scope`. | No |
+| `everos_add_memories` | Add one or more messages to personal or agent scope; optional `message_id` is preserved for idempotent retries; legacy `agent` alias remains supported but conflicts with `scope`. | No |
 | `everos_flush_memories` | Trigger personal or agent extraction immediately; supports per-call `timeout` and retryable timeout responses. | No |
 | `everos_search_memories` | Search with keyword, vector, hybrid, or agentic retrieval; exposes `filters`, `radius`, `top_k=-1`, `timeout`, and agentic fallback; vector fields are stripped unless `include_vectors=true`. | Yes |
 | `everos_get_memories` | Retrieve structured memories with `filters`, pagination, `rank_by`, and `rank_order`. | Yes |
@@ -398,7 +438,10 @@ For lower latency or stricter control, keep `auto_capture=true` but set `auto_re
 | --- | --- |
 | `src/everos_hermes/client.py` | Stdlib EverOS v1 REST client and API error handling. |
 | `src/everos_hermes/env.py` | Hermes dotenv lookup helpers for secrets and endpoint overrides. |
-| `src/everos_hermes/formatting.py` | EverOS response to compact prompt/Markdown formatting. |
+| `src/everos_hermes/formatting.py` | EverOS response to compact prompt/Markdown formatting for MCP/tool output. |
+| `src/everos_hermes/context_assembler.py` | Python provider context assembler for profile/skills/cases/episodes/recent raw sections under a global budget. |
+| `src/everos_hermes/policy.py` | Lightweight recall/capture skip policy and stable prefetch cache key helpers. |
+| `src/everos_hermes/trajectory.py` | Structured agent trajectory conversion, redaction/capping, tool-call linkage, and stable message ids. |
 | `src/everos_hermes/mcp_server.py` | FastMCP stdio server and thirteen MCP tools. |
 | `src/everos_hermes/workflows.py` | Shared batch/import/save-and-verify workflow helpers used by MCP and provider tools. |
 | `src/everos_hermes/provider.py` | Hermes `MemoryProvider` implementation. |
@@ -419,7 +462,7 @@ MCP smoke-test pattern:
 
 ```bash
 python -m everos_hermes.mcp_server
-# from an MCP client: initialize, then tools/list; expect the nine EverOS tools above
+# from an MCP client: initialize, then tools/list; expect the thirteen EverOS tools above
 ```
 
 Repository hygiene before commits:

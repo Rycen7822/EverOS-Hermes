@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Optional
 
 from .client import DEFAULT_BASE_URL, DEFAULT_MEMORY_TYPES, EverOSClient, EverOSError, EverOSTimeoutError
+from .context_assembler import assemble_everos_context
 from .env import get_env
 from .formatting import format_search_context, pretty_json
+from .policy import should_skip_capture, should_skip_recall, stable_query_key
 from .schemas import normalize_scope
+from .trajectory import TrajectoryBuildResult, TrajectorySource, build_agent_trajectory_messages
 from .workflows import import_and_verify, save_and_verify, verify_session_ingest
 
 try:
@@ -83,10 +88,29 @@ _DEFAULT_CONFIG = {
     "agentic_timeout": 60.0,
     "max_context_items": 8,
     "timeout": 10.0,
+    "max_context_chars": 12000,
+    "include_recent_raw": False,
+    "recent_raw_top_k": 4,
+    "profile_max_items": 3,
+    "agent_skills_max_items": 4,
+    "agent_cases_max_items": 4,
+    "episodic_max_items": 6,
+    "min_score": 0.0,
+    "min_recall_query_chars": 8,
+    "prefetch_cache_enabled": True,
+    "prefetch_cache_ttl_seconds": 90,
+    "agent_trajectory_on_session_end": True,
+    "agent_trajectory_on_pre_compress": True,
+    "agent_trajectory_on_delegation": True,
+    "agent_summary_after_turn": True,
+    "agent_max_messages": 80,
+    "agent_max_message_chars": 8000,
+    "agent_max_tool_result_chars": 6000,
+    "agent_max_payload_chars": 60000,
+    "agent_dedupe_entries": 256,
 }
 
 _CONTEXT_STRIP_RE = re.compile(r"<memory-context>[\s\S]*?</memory-context>|<everos-context>[\s\S]*?</everos-context>", re.I)
-_TRIVIAL_RE = re.compile(r"^(ok|okay|thanks|thank you|got it|sure|yes|no|yep|nope|k|ty|thx|np)\.?$", re.I)
 
 
 SAVE_SCHEMA = {
@@ -257,7 +281,20 @@ def _save_config(values: dict[str, Any], hermes_home: str) -> None:
 def _normalize_config(config: dict[str, Any]) -> dict[str, Any]:
     out = dict(_DEFAULT_CONFIG)
     out.update(config or {})
-    for key in ("auto_recall", "auto_capture", "flush_after_turn", "capture_agent_memory", "agent_recall", "agent_flush_after_turn"):
+    for key in (
+        "auto_recall",
+        "auto_capture",
+        "flush_after_turn",
+        "capture_agent_memory",
+        "agent_recall",
+        "agent_flush_after_turn",
+        "include_recent_raw",
+        "prefetch_cache_enabled",
+        "agent_trajectory_on_session_end",
+        "agent_trajectory_on_pre_compress",
+        "agent_trajectory_on_delegation",
+        "agent_summary_after_turn",
+    ):
         out[key] = _as_bool(out.get(key), bool(_DEFAULT_CONFIG[key]))
     try:
         out["top_k"] = max(1, min(20, int(out.get("top_k", 5))))
@@ -275,6 +312,29 @@ def _normalize_config(config: dict[str, Any]) -> dict[str, Any]:
         out["max_context_items"] = max(1, min(50, int(out.get("max_context_items", 8))))
     except Exception:
         out["max_context_items"] = 8
+    for key, low, high in (
+        ("max_context_chars", 1000, 50000),
+        ("recent_raw_top_k", 0, 20),
+        ("profile_max_items", 0, 20),
+        ("agent_skills_max_items", 0, 20),
+        ("agent_cases_max_items", 0, 20),
+        ("episodic_max_items", 0, 20),
+        ("min_recall_query_chars", 0, 200),
+        ("prefetch_cache_ttl_seconds", 1, 600),
+        ("agent_max_messages", 1, 200),
+        ("agent_max_message_chars", 100, 20000),
+        ("agent_max_tool_result_chars", 100, 20000),
+        ("agent_max_payload_chars", 1000, 200000),
+        ("agent_dedupe_entries", 16, 4096),
+    ):
+        try:
+            out[key] = max(low, min(high, int(out.get(key, _DEFAULT_CONFIG[key]))))
+        except Exception:
+            out[key] = _DEFAULT_CONFIG[key]
+    try:
+        out["min_score"] = max(0.0, min(1.0, float(out.get("min_score", 0.0))))
+    except Exception:
+        out["min_score"] = 0.0
     method = str(out.get("search_method", "hybrid")).strip().lower()
     out["search_method"] = method if method in {"keyword", "vector", "hybrid", "agentic"} else "hybrid"
     memory_types = out.get("memory_types")
@@ -392,6 +452,12 @@ class EverOSMemoryProvider(MemoryProvider):
         self._last_flush_status: dict[str, Any] = {}
         self._last_agent_write_status: dict[str, Any] = {}
         self._last_agent_flush_status: dict[str, Any] = {}
+        self._last_recall_status: dict[str, Any] = {}
+        self._last_agent_trajectory_status: dict[str, Any] = {}
+        self._prefetch_cache: dict[str, dict[str, Any]] = {}
+        self._prefetch_inflight: set[str] = set()
+        self._prefetch_lock = threading.Lock()
+        self._agent_saved_fingerprints: OrderedDict[str, float] = OrderedDict()
 
     @property
     def name(self) -> str:
@@ -441,6 +507,11 @@ class EverOSMemoryProvider(MemoryProvider):
         self._write_enabled = agent_context not in ("cron", "flush", "subagent")
         self._active = bool(self._api_key)
         self._client = None
+        with self._prefetch_lock:
+            self._prefetch_cache.clear()
+            self._prefetch_inflight.clear()
+        self._last_recall_status = {}
+        self._agent_saved_fingerprints.clear()
         if self._active:
             self._client = EverOSClient(api_key=self._api_key, base_url=self._base_url, timeout=self._config["timeout"])
 
@@ -474,25 +545,111 @@ class EverOSMemoryProvider(MemoryProvider):
         )
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
-        if not self._active or not self._config["auto_recall"] or not self._client or not query.strip():
+        if not self._active or not self._config["auto_recall"] or not self._client:
+            return ""
+        sid = session_id or self._session_id
+        skip, reason = should_skip_recall(query, session_id=sid, config=self._config)
+        if skip:
+            self._last_recall_status = {"ok": True, "skipped": True, "reason": reason, "cached": False}
             return ""
         query_text = query[:1000]
-        formatted_sections: list[str] = []
+        cache_key = stable_query_key(query_text, session_id=sid, config=self._config)
+        if self._config.get("prefetch_cache_enabled"):
+            cached = self._get_prefetch_cache(cache_key)
+            if cached is not None:
+                self._last_recall_status = {**cached.get("status", {}), "ok": True, "cached": True}
+                return str(cached.get("text") or "")
+        text, status = self._search_prefetch_context(query_text, sid)
+        if self._config.get("prefetch_cache_enabled"):
+            self._set_prefetch_cache(cache_key, text, status)
+        return text
+
+    def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
+        if not self._active or not self._config["auto_recall"] or not self._client:
+            return
+        sid = session_id or self._session_id
+        skip, reason = should_skip_recall(query, session_id=sid, config=self._config)
+        if skip:
+            self._last_recall_status = {"ok": True, "skipped": True, "reason": reason, "cached": False}
+            return
+        query_text = query[:1000]
+        cache_key = stable_query_key(query_text, session_id=sid, config=self._config)
+        with self._prefetch_lock:
+            if cache_key in self._prefetch_inflight:
+                return
+            cached = self._prefetch_cache.get(cache_key)
+            if cached and float(cached.get("expires_at", 0)) > time.monotonic():
+                return
+            self._prefetch_inflight.add(cache_key)
+
+        def _run() -> None:
+            try:
+                text, status = self._search_prefetch_context(query_text, sid)
+                if self._config.get("prefetch_cache_enabled"):
+                    self._set_prefetch_cache(cache_key, text, status)
+            finally:
+                with self._prefetch_lock:
+                    self._prefetch_inflight.discard(cache_key)
+
+        self._start_thread(_run, "everos-prefetch")
+
+    def _get_prefetch_cache(self, cache_key: str) -> dict[str, Any] | None:
+        with self._prefetch_lock:
+            cached = self._prefetch_cache.get(cache_key)
+            if not cached:
+                return None
+            if float(cached.get("expires_at", 0)) <= time.monotonic():
+                self._prefetch_cache.pop(cache_key, None)
+                return None
+            return dict(cached)
+
+    def _set_prefetch_cache(self, cache_key: str, text: str, status: dict[str, Any]) -> None:
+        ttl = float(self._config.get("prefetch_cache_ttl_seconds", 90))
+        with self._prefetch_lock:
+            self._prefetch_cache[cache_key] = {"text": text, "status": dict(status), "expires_at": time.monotonic() + ttl}
+
+    def _search_prefetch_context(self, query_text: str, session_id: str) -> tuple[str, dict[str, Any]]:
+        main_response, raw_response, warnings, errors, ok_count = self._search_for_context(query_text, session_id)
+        result = self._assemble_context(query_text, session_id, main_response, raw_response)
+        warnings.extend(result.warnings)
+        status = {
+            "ok": ok_count > 0 or not errors,
+            "cached": False,
+            "hit_counts": result.hit_counts,
+            "included_counts": result.included_counts,
+            "dropped_counts": result.dropped_counts,
+            "estimated_chars": result.estimated_chars,
+            "warnings": warnings,
+        }
+        if errors and ok_count == 0:
+            status["ok"] = False
+            status["errors"] = errors
+        self._last_recall_status = status
+        return result.text, status
+
+    def _search_for_context(
+        self, query_text: str, session_id: str
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, list[str], list[str], int]:
+        main_response: dict[str, Any] | None = None
+        raw_response: dict[str, Any] | None = None
+        warnings: list[str] = []
+        errors: list[str] = []
+        ok_count = 0
+        personal_types = [str(item) for item in self._config["memory_types"] if str(item) != "agent_memory"] or ["episodic_memory", "profile"]
         try:
-            response = self._client.search_memories(
+            main_response = self._client.search_memories(
                 query=query_text,
                 user_id=self._user_id,
                 session_id=None,
                 method=self._config["search_method"],
-                memory_types=self._config["memory_types"],
+                memory_types=personal_types,
                 top_k=self._config["top_k"],
                 include_original_data=False,
                 timeout=self._config["timeout"],
             )
-            formatted = format_search_context(response, max_items=self._config["max_context_items"])
-            if formatted:
-                formatted_sections.append(formatted)
+            ok_count += 1
         except Exception as exc:
+            errors.append(f"personal:{_redact_error(str(exc))}")
             self._record_status("prefetch.personal", False, exc)
         if self._config.get("agent_recall"):
             try:
@@ -506,17 +663,46 @@ class EverOSMemoryProvider(MemoryProvider):
                     include_original_data=False,
                     timeout=self._config["agentic_timeout"],
                 )
-                formatted = format_search_context(agent_response, max_items=self._config["max_context_items"])
-                if formatted:
-                    formatted_sections.append(formatted)
+                main_response = _merge_agent_response(main_response, agent_response)
+                ok_count += 1
             except Exception as exc:
-                self._record_status("prefetch.agent", False, exc)
-        if not formatted_sections:
-            return ""
-        return "<everos-context>\n" + "\n\n".join(formatted_sections) + "\n</everos-context>"
+                errors.append(f"agent:{_redact_error(str(exc))}")
+                self._record_status("prefetch.agent", False, exc, agent=True)
+        if self._config.get("include_recent_raw"):
+            if session_id:
+                try:
+                    raw_response = self._client.search_memories(
+                        query=query_text,
+                        user_id=self._user_id,
+                        session_id=session_id,
+                        method=self._config["search_method"],
+                        memory_types=["raw_message"],
+                        top_k=self._config["recent_raw_top_k"],
+                        include_original_data=False,
+                        timeout=self._config["timeout"],
+                    )
+                    ok_count += 1
+                except Exception as exc:
+                    errors.append(f"raw:{_redact_error(str(exc))}")
+                    self._record_status("prefetch.raw", False, exc)
+            else:
+                warnings.append("raw_recall_skipped_missing_session")
+        return main_response, raw_response, warnings, errors, ok_count
 
-    def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
-        return None
+    def _assemble_context(
+        self,
+        query_text: str,
+        session_id: str,
+        main_response: dict[str, Any] | None,
+        raw_response: dict[str, Any] | None,
+    ) -> Any:
+        return assemble_everos_context(
+            main_response=main_response,
+            raw_response=raw_response,
+            query=query_text,
+            config=self._config,
+            source="prefetch",
+        )
 
     def get_tool_schemas(self) -> list[dict[str, Any]]:
         return [
@@ -718,20 +904,18 @@ class EverOSMemoryProvider(MemoryProvider):
             return
         clean_user = _clean_content(user_content)
         clean_assistant = _clean_content(assistant_content)
-        if not clean_user or not clean_assistant or _TRIVIAL_RE.match(clean_user):
-            return
         sid = session_id or self._session_id
+        skip, _reason = should_skip_capture(clean_user, clean_assistant, session_id=sid, config=self._config)
+        if skip:
+            return
         now = _now_ms()
-        personal_messages = [
-            {"role": "user", "timestamp": now, "content": clean_user},
-            {"role": "assistant", "timestamp": now + 1, "content": clean_assistant},
-        ]
-        agent_messages = _build_agent_trajectory_messages(clean_user, clean_assistant, now_ms=now + 2)
+        personal_messages = _build_personal_turn_messages(clean_user, clean_assistant, session_id=sid, now_ms=now)
+        agent_result = self._build_agent_summary_result(clean_user, clean_assistant, session_id=sid, now_ms=now + 2)
 
         def _run() -> None:
             mode = str(self._config.get("agent_capture_mode", "parallel"))
             write_personal = mode != "agent_only"
-            write_agent = bool(self._config.get("capture_agent_memory")) and mode != "off"
+            write_agent = bool(self._config.get("capture_agent_memory")) and bool(self._config.get("agent_summary_after_turn")) and mode != "off"
             if write_personal:
                 try:
                     result = self._client.add_memories(user_id=self._user_id, session_id=sid, messages=personal_messages, async_mode=True, scope="personal")
@@ -742,16 +926,67 @@ class EverOSMemoryProvider(MemoryProvider):
                 except Exception as exc:
                     self._record_status("sync_turn.personal", False, exc)
             if write_agent:
-                try:
-                    result = self._client.add_memories(user_id=self._user_id, session_id=sid, messages=agent_messages, async_mode=True, scope="agent")
-                    self._last_agent_write_status = {"ok": True, "scope": "agent", "task_id": _task_id(result)}
-                    if self._config.get("agent_flush_after_turn"):
-                        flush = self._client.flush_memories(user_id=self._user_id, session_id=sid, scope="agent")
-                        self._last_agent_flush_status = {"ok": True, "scope": "agent", "status": _status(flush)}
-                except Exception as exc:
-                    self._record_status("sync_turn.agent", False, exc, agent=True)
+                self._write_agent_trajectory(agent_result, session_id=sid, flush_allowed=True, operation="sync_turn.agent")
 
         self._start_thread(_run, "everos-sync-turn")
+
+    def _build_agent_summary_result(self, user_content: str, assistant_content: str, *, session_id: str, now_ms: int) -> TrajectoryBuildResult:
+        messages = [
+            {"role": "user", "timestamp": now_ms, "content": f"Task request: {_truncate_for_memory(user_content, 4000)}"},
+            {
+                "role": "assistant",
+                "timestamp": now_ms + 1,
+                "content": "Agent response summary: "
+                f"{_truncate_for_memory(assistant_content, 4000)}\nOutcome: completed_or_partial\nReusable lesson hint: capture approach, correction, and verification if useful.",
+            },
+        ]
+        return build_agent_trajectory_messages(
+            messages,
+            session_id=session_id,
+            source="sync_turn",
+            now_ms=now_ms,
+            max_messages=2,
+            max_message_chars=self._config["agent_max_message_chars"],
+            max_tool_result_chars=self._config["agent_max_tool_result_chars"],
+            max_payload_chars=self._config["agent_max_payload_chars"],
+        )
+
+    def _write_agent_trajectory(self, result: TrajectoryBuildResult, *, session_id: str, flush_allowed: bool, operation: str) -> bool:
+        if not result.messages or not self._client:
+            return False
+        if not self._remember_agent_fingerprint(result.fingerprint):
+            self._last_agent_trajectory_status = {"ok": True, "scope": "agent", "deduped": True, "operation": operation}
+            self._last_agent_write_status = dict(self._last_agent_trajectory_status)
+            return False
+        try:
+            add = self._client.add_memories(user_id=self._user_id, session_id=session_id, messages=result.messages, async_mode=True, scope="agent")
+            self._last_agent_write_status = {
+                "ok": True,
+                "scope": "agent",
+                "task_id": _task_id(add),
+                "operation": operation,
+                "output_count": result.output_count,
+                "warnings": result.warnings,
+            }
+            self._last_agent_trajectory_status = dict(self._last_agent_write_status)
+            if flush_allowed and self._config.get("agent_flush_after_turn"):
+                flush = self._client.flush_memories(user_id=self._user_id, session_id=session_id, scope="agent")
+                self._last_agent_flush_status = {"ok": True, "scope": "agent", "status": _status(flush), "operation": operation}
+            return True
+        except Exception as exc:
+            self._agent_saved_fingerprints.pop(result.fingerprint, None)
+            self._record_status(operation, False, exc, agent=True)
+            return False
+
+    def _remember_agent_fingerprint(self, fingerprint: str) -> bool:
+        if fingerprint in self._agent_saved_fingerprints:
+            self._agent_saved_fingerprints.move_to_end(fingerprint)
+            return False
+        self._agent_saved_fingerprints[fingerprint] = time.monotonic()
+        max_entries = int(self._config.get("agent_dedupe_entries", 256))
+        while len(self._agent_saved_fingerprints) > max_entries:
+            self._agent_saved_fingerprints.popitem(last=False)
+        return True
 
     def on_memory_write(self, action: str, target: str, content: str, metadata: dict[str, Any] | None = None) -> None:
         if action not in ("add", "replace", "update") or not content or not self._active or not self._write_enabled or not self._client:
@@ -779,16 +1014,65 @@ class EverOSMemoryProvider(MemoryProvider):
     def on_session_end(self, messages: list[dict[str, Any]]) -> None:
         if not self._active or not self._write_enabled or not self._client or not self._session_id:
             return
+        if self._config.get("capture_agent_memory") and self._config.get("agent_trajectory_on_session_end"):
+            result = self._build_agent_trajectory_result(messages, source="session_end")
+            self._write_agent_trajectory(result, session_id=self._session_id, flush_allowed=True, operation="session_end.agent")
         try:
             self._client.flush_memories(user_id=self._user_id, session_id=self._session_id, scope="personal")
-            if self._config.get("capture_agent_memory") and self._config.get("agent_flush_after_turn"):
-                self._client.flush_memories(user_id=self._user_id, session_id=self._session_id, scope="agent")
         except Exception as exc:
             self._record_status("session_end.flush", False, exc)
             return None
 
     def on_pre_compress(self, messages: list[dict[str, Any]]) -> str:
-        return ""
+        if not self._active or not self._write_enabled or not self._client or not self._session_id:
+            return ""
+        if not self._config.get("capture_agent_memory") or not self._config.get("agent_trajectory_on_pre_compress"):
+            return ""
+        result = self._build_agent_trajectory_result(messages, source="pre_compress")
+        wrote = self._write_agent_trajectory(result, session_id=self._session_id, flush_allowed=False, operation="pre_compress.agent")
+        if not wrote:
+            return ""
+        return f"EverOS captured {result.output_count} agent trajectory messages for session {self._session_id}; preserve task outcome and reusable tool lessons."
+
+    def on_delegation(self, task: str, result: str, *, child_session_id: str = "", **kwargs: Any) -> None:
+        if not self._active or not self._write_enabled or not self._client or not self._session_id:
+            return
+        if not self._config.get("capture_agent_memory") or not self._config.get("agent_trajectory_on_delegation"):
+            return
+        child = str(child_session_id or kwargs.get("session_id") or "").strip()
+        prefix = f"[delegation child_session_id={child}] " if child else "[delegation] "
+        now = _now_ms()
+        messages = [
+            {"role": "user", "timestamp": now, "content": str(task or "").strip()},
+            {"role": "assistant", "timestamp": now + 1, "content": prefix + str(result or "").strip()},
+        ]
+        built = build_agent_trajectory_messages(
+            messages,
+            session_id=self._session_id,
+            source="delegation",
+            now_ms=now,
+            max_messages=self._config["agent_max_messages"],
+            max_message_chars=self._config["agent_max_message_chars"],
+            max_tool_result_chars=self._config["agent_max_tool_result_chars"],
+            max_payload_chars=self._config["agent_max_payload_chars"],
+        )
+        if child:
+            for message in built.messages:
+                if message.get("role") == "assistant":
+                    message["child_session_id"] = child
+        self._write_agent_trajectory(built, session_id=self._session_id, flush_allowed=True, operation="delegation.agent")
+
+    def _build_agent_trajectory_result(self, messages: list[dict[str, Any]], *, source: TrajectorySource) -> TrajectoryBuildResult:
+        return build_agent_trajectory_messages(
+            messages,
+            session_id=self._session_id,
+            source=source,
+            now_ms=_now_ms(),
+            max_messages=self._config["agent_max_messages"],
+            max_message_chars=self._config["agent_max_message_chars"],
+            max_tool_result_chars=self._config["agent_max_tool_result_chars"],
+            max_payload_chars=self._config["agent_max_payload_chars"],
+        )
 
     def on_session_switch(self, new_session_id: str, *, parent_session_id: str = "", reset: bool = False, **kwargs: Any) -> None:
         if new_session_id:
@@ -813,6 +1097,7 @@ class EverOSMemoryProvider(MemoryProvider):
             status["error"] = _redact_error(str(exc))
         if agent:
             self._last_agent_write_status = status
+            self._last_agent_trajectory_status = dict(status)
         else:
             self._last_write_status = status
         self._write_debug_log(status)
@@ -867,18 +1152,67 @@ def _status(response: dict[str, Any]) -> str:
     return str(data.get("status") or "") if isinstance(data, dict) else ""
 
 
-def _build_agent_trajectory_messages(user_content: str, assistant_content: str, *, now_ms: int) -> list[dict[str, Any]]:
-    user_summary = _truncate_for_memory(user_content, 4000)
-    assistant_summary = _truncate_for_memory(assistant_content, 4000)
-    return [
-        {"role": "user", "timestamp": now_ms, "content": f"Task request: {user_summary}"},
-        {
-            "role": "assistant",
-            "timestamp": now_ms + 1,
-            "content": "Agent response summary: "
-            f"{assistant_summary}\nOutcome: completed_or_partial\nReusable lesson hint: capture approach, correction, and verification if useful.",
-        },
+def _build_personal_turn_messages(user_content: str, assistant_content: str, *, session_id: str, now_ms: int) -> list[dict[str, Any]]:
+    messages = [
+        {"role": "user", "timestamp": now_ms, "content": user_content},
+        {"role": "assistant", "timestamp": now_ms + 1, "content": assistant_content},
     ]
+    for index, message in enumerate(messages):
+        message["message_id"] = _personal_message_id(
+            session_id=session_id,
+            role=str(message["role"]),
+            index=index,
+            timestamp=message["timestamp"],
+            content=str(message["content"]),
+        )
+    return messages
+
+
+def _personal_message_id(*, session_id: str, role: str, index: int, timestamp: int, content: str) -> str:
+    payload = json.dumps(
+        {
+            "session_id": session_id,
+            "role": role,
+            "index": index,
+            "timestamp": timestamp,
+            "content": content,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return "eh_" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+
+
+def _merge_agent_response(main_response: dict[str, Any] | None, agent_response: dict[str, Any] | None) -> dict[str, Any]:
+    merged = {"data": dict(_response_data(main_response))}
+    agent_data = _response_data(agent_response)
+    for key in ("agent_skills", "agent_cases"):
+        if agent_data.get(key):
+            merged["data"][key] = _as_list_copy(merged["data"].get(key)) + _as_list_copy(agent_data.get(key))
+    if agent_data.get("agent_memory"):
+        merged["data"]["agent_memory"] = _as_list_copy(merged["data"].get("agent_memory")) + _as_list_copy(agent_data.get("agent_memory"))
+    elif agent_data.get("results") or agent_data.get("memories") or agent_data.get("episodes"):
+        merged["data"]["agent_memory"] = _as_list_copy(merged["data"].get("agent_memory")) + _as_list_copy(
+            agent_data.get("results") or agent_data.get("memories") or agent_data.get("episodes")
+        )
+    return merged
+
+
+def _response_data(response: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(response, dict):
+        return {}
+    data = response.get("data", response)
+    return data if isinstance(data, dict) else {}
+
+
+def _as_list_copy(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return list(value)
+    return [value]
+
 
 
 def _truncate_for_memory(text: str, limit: int) -> str:

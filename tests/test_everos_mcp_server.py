@@ -1,6 +1,8 @@
 import asyncio
 import json
 
+import pytest
+
 
 def test_mcp_search_tool_calls_client_with_defaults(monkeypatch):
     from everos_hermes import mcp_server
@@ -290,6 +292,40 @@ def test_mcp_save_memory_agent_scope_defaults_to_non_tool_role(monkeypatch):
     assert captured["messages"][0]["role"] == "assistant"
 
 
+def test_mcp_add_memories_preserves_message_id_and_rejects_tool_role_without_call_id(monkeypatch):
+    from everos_hermes import mcp_server
+    from everos_hermes.client import EverOSClient
+
+    captured = {}
+
+    def fake_request_json(self, method, path, body=None, *, timeout=None):
+        captured.update({"method": method, "path": path, "body": body, "timeout": timeout})
+        return {"data": {"status": "queued"}}
+
+    monkeypatch.setenv("EVEROS_API_KEY", "sk-test")
+    monkeypatch.setenv("EVEROS_USER_ID", "u1")
+    monkeypatch.setattr(EverOSClient, "request_json", fake_request_json)
+
+    asyncio.run(mcp_server.everos_add_memories(
+        messages=[
+            {"role": "assistant", "timestamp": 1711900000000, "content": "diagnosed retry path", "message_id": "msg-agent-1"},
+            {"role": "tool", "timestamp": 1711900000001, "content": "tool output", "tool_call_id": "call-1", "message_id": "msg-tool-1"},
+        ],
+        scope="agent",
+        session_id="sess-agent",
+    ))
+
+    assert captured["path"] == "/api/v1/memories/agent"
+    assert [message["message_id"] for message in captured["body"]["messages"]] == ["msg-agent-1", "msg-tool-1"]
+
+    with pytest.raises(ValueError, match="tool_call_id"):
+        asyncio.run(mcp_server.everos_add_memories(
+            messages=[{"role": "tool", "timestamp": 1711900000002, "content": "missing id", "message_id": "msg-bad"}],
+            scope="agent",
+            session_id="sess-agent",
+        ))
+
+
 def test_mcp_search_passes_filters_radius_timeout_and_fallback(monkeypatch):
     from everos_hermes import mcp_server
     from everos_hermes.client import EverOSTimeoutError
@@ -523,7 +559,7 @@ def test_mcp_batch_ingest_batches_flushes_and_verifies(monkeypatch):
 
     result = asyncio.run(mcp_server.everos_batch_ingest(
         messages=[
-            {"role": "user", "content": "Alpha", "timestamp": 1},
+            {"role": "user", "content": "Alpha", "timestamp": 1, "message_id": "msg-alpha"},
             {"role": "assistant", "content": "Beta", "timestamp": 2},
             {"role": "user", "content": "Gamma", "timestamp": 3},
         ],
@@ -541,6 +577,7 @@ def test_mcp_batch_ingest_batches_flushes_and_verifies(monkeypatch):
     assert len(result["batches"]) == 2
     assert [call[0] for call in calls] == ["add", "add", "flush", "search"]
     assert calls[0][1]["messages"][0]["content"] == "Alpha"
+    assert calls[0][1]["messages"][0]["message_id"] == "msg-alpha"
     assert calls[1][1]["messages"][0]["content"] == "Gamma"
 
 

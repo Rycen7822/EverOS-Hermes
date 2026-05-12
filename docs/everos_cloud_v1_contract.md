@@ -5,7 +5,7 @@ EverOS-Hermes targets EverOS Cloud v1 personal and agent memory workflows for He
 ## Base URL and auth
 
 - Base URL: `https://api.evermind.ai`
-- Auth: `Authorization: Bearer <api-key>`
+- Auth: `Authorization: Bearer ***`
 - All supported Cloud endpoints are under `/api/v1`.
 - v0 endpoints are deprecated and must not be used by this integration.
 
@@ -31,10 +31,16 @@ Request body:
 {
   "user_id": "user_123",
   "session_id": "session_123",
-  "messages": [{"role": "user", "timestamp": 1711900000000, "content": "..."}],
+  "messages": [{"role": "user", "timestamp": 1711900000000, "content": "...", "message_id": "msg_123"}],
   "async_mode": true
 }
 ```
+
+Message fields:
+
+- `role`, `timestamp`, and non-empty `content` are required.
+- `message_id` is an optional idempotency key. EverOS-Hermes preserves caller-provided `message_id` values and validates that they are non-empty strings when present; provider lifecycle writes generate deterministic ids for retry-safe personal and agent writes.
+- In agent scope, `role="tool"` additionally requires a non-empty `tool_call_id`.
 
 Response notes:
 
@@ -47,6 +53,36 @@ Response notes:
 Scope: agent memory / agent trajectory.
 
 Request body is the same shape as personal add, but roles may include `tool` for summarized tool results, corrections, and reusable agent lessons. EverOS Cloud requires `tool_call_id` whenever `role="tool"`; Hermes MCP/provider wrappers default agent single-message saves to a non-tool role and reject missing `tool_call_id` before HTTP when the caller explicitly asks for `role="tool"`.
+
+A structured agent trajectory write can preserve assistant tool calls and tool-result linkage while staying under provider caps. Example message list:
+
+```json
+[
+  {
+    "role": "user",
+    "timestamp": 1711900000000,
+    "content": "Debug the timeout regression.",
+    "message_id": "eh_user_1",
+    "source": "session_end"
+  },
+  {
+    "role": "assistant",
+    "timestamp": 1711900001000,
+    "content": "I will inspect the failing test and rerun it.",
+    "message_id": "eh_assistant_1",
+    "source": "session_end",
+    "tool_calls": [{"id": "call_1", "function": {"name": "terminal", "arguments": "{\"command\":\"pytest tests/test_timeout.py -q\"}"}}]
+  },
+  {
+    "role": "tool",
+    "timestamp": 1711900002000,
+    "content": "1 failed; timeout branch reproduced.",
+    "message_id": "eh_tool_1",
+    "source": "session_end",
+    "tool_call_id": "call_1"
+  }
+]
+```
 
 Response notes are the same as personal add.
 
