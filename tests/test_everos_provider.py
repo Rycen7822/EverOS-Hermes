@@ -189,6 +189,7 @@ def test_provider_tool_schemas_expose_cloud_v1_parameters(monkeypatch, tmp_path)
     schemas = {schema["name"]: schema for schema in provider.get_tool_schemas()}
 
     assert schemas["everos_memory_save"]["parameters"]["properties"]["scope"]["enum"] == ["personal", "agent"]
+    assert "tool_call_id" in schemas["everos_memory_save"]["parameters"]["properties"]
     assert "scope" in schemas["everos_memory_flush"]["parameters"]["properties"]
     search_props = schemas["everos_memory_search"]["parameters"]["properties"]
     for name in ["filters", "radius", "top_k", "response_format"]:
@@ -345,6 +346,7 @@ def test_provider_tools_pass_scope_filters_rank_and_timeout(monkeypatch, tmp_pat
 
     assert save["scope"] == "agent"
     assert calls[0][1]["scope"] == "agent"
+    assert calls[0][1]["messages"][0]["role"] == "assistant"
     assert calls[1][1]["scope"] == "agent"
     assert calls[2][1]["top_k"] == -1
     assert calls[2][1]["filters"] == {"AND": [{"timestamp": {"gte": 1}}]}

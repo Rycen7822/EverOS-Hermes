@@ -45,7 +45,7 @@ pub fn run_stdio() -> anyhow::Result<()> {
 
 pub fn tool_definitions() -> Vec<Value> {
     vec![
-        json!({"name":"everos_save_memory","title":"Save EverOS Memory","description":"Queue one explicit text memory message for EverOS extraction. saved=true means accepted, not immediately searchable.","inputSchema":{"type":"object","properties":{"content":{"type":"string"},"user_id":{"type":"string"},"session_id":{"type":"string"},"scope":{"type":"string","enum":["personal","agent"],"default":"personal"},"role":{"type":"string","enum":["user","assistant","tool","system"],"default":"user"},"flush":{"type":"boolean","default":true},"async_mode":{"type":"boolean","default":true},"flush_timeout":{"type":"number"}},"required":["content"]},"annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":true}}),
+        json!({"name":"everos_save_memory","title":"Save EverOS Memory","description":"Queue one explicit text memory message for EverOS extraction. saved=true means accepted, not immediately searchable.","inputSchema":{"type":"object","properties":{"content":{"type":"string"},"user_id":{"type":"string"},"session_id":{"type":"string"},"scope":{"type":"string","enum":["personal","agent"],"default":"personal"},"role":{"type":"string","enum":["user","assistant","tool","system"]},"tool_call_id":{"type":"string","description":"Required when role=tool for agent memory."},"flush":{"type":"boolean","default":true},"async_mode":{"type":"boolean","default":true},"flush_timeout":{"type":"number"}},"required":["content"]},"annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":true}}),
         json!({"name":"everos_add_memories","title":"Add EverOS Memory Messages","description":"Add one or more personal or agent-trajectory messages to EverOS. Prefer scope over deprecated agent alias.","inputSchema":{"type":"object","properties":{"messages":{"type":"array","items":{"type":"object"}},"user_id":{"type":"string"},"session_id":{"type":"string"},"scope":{"type":"string","enum":["personal","agent"],"default":"personal"},"async_mode":{"type":"boolean","default":true},"agent":{"type":"boolean"},"flush":{"type":"boolean","default":false},"flush_timeout":{"type":"number"}},"required":["messages"]},"annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":true}}),
         json!({"name":"everos_flush_memories","title":"Flush EverOS Memories","description":"Trigger EverOS boundary detection and memory extraction immediately. Timeout errors are retryable; search/status checks should happen before retrying.","inputSchema":{"type":"object","properties":{"user_id":{"type":"string"},"session_id":{"type":"string"},"scope":{"type":"string","enum":["personal","agent"],"default":"personal"},"agent":{"type":"boolean"},"timeout":{"type":"number"}}},"annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}}),
         json!({"name":"everos_search_memories","title":"Search EverOS Memories","description":"Search EverOS memory using keyword, vector, hybrid, or agentic retrieval. Vector fields are stripped by default even when include_original_data=true; set include_vectors=true only for debugging.","inputSchema":{"type":"object","properties":{"query":{"type":"string"},"user_id":{"type":"string"},"session_id":{"type":"string"},"filters":{"type":"object"},"method":{"type":"string","enum":["keyword","vector","hybrid","agentic"],"default":"hybrid"},"top_k":{"type":"integer","default":5,"minimum":-1,"maximum":100},"memory_types":{"type":"array","items":{"type":"string","enum":["episodic_memory","profile","raw_message","agent_memory"]}},"radius":{"type":"number","minimum":0,"maximum":1},"include_original_data":{"type":"boolean","default":false},"include_vectors":{"type":"boolean","default":false},"response_format":{"type":"string","enum":["json","markdown"],"default":"json"},"timeout":{"type":"number"},"fallback_to_hybrid":{"type":"boolean","default":true}},"required":["query"]},"annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}}),
@@ -112,16 +112,23 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
             let scope = scope_from_args(&value)?;
             let role = optional_string(&value, "role").unwrap_or_else(|| {
                 if scope == "agent" {
-                    "tool".to_string()
+                    "assistant".to_string()
                 } else {
                     "user".to_string()
                 }
             });
+            let mut message = json!({"role":role,"timestamp":now_ms(),"content":content});
+            if let (Some(tool_call_id), Some(map)) = (
+                optional_string(&value, "tool_call_id"),
+                message.as_object_mut(),
+            ) {
+                map.insert("tool_call_id".to_string(), Value::String(tool_call_id));
+            }
             let client = make_client()?;
             let result = client.add_memories_scoped(
                 &uid,
                 session_id.as_deref(),
-                vec![json!({"role":role,"timestamp":now_ms(),"content":content})],
+                vec![message],
                 async_mode,
                 &scope,
             )?;
@@ -206,7 +213,7 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
             let uid = optional_string(&value, "user_id").unwrap_or_else(default_user_id);
             let session_id = optional_string(&value, "session_id");
             let method = optional_string(&value, "method").unwrap_or_else(|| "hybrid".to_string());
-            let top_k = int_arg(&value, "top_k", 5, -1, 100);
+            let top_k = int_arg(&value, "top_k", 5)?;
             let filters = value.get("filters").cloned();
             let radius = float_arg(&value, "radius");
             let timeout = float_arg(&value, "timeout").or(if method == "agentic" {
@@ -284,8 +291,8 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
             let session_id = optional_string(&value, "session_id");
             let memory_type = optional_string(&value, "memory_type")
                 .unwrap_or_else(|| "episodic_memory".to_string());
-            let page = int_arg(&value, "page", 1, 1, 10000) as u64;
-            let page_size = int_arg(&value, "page_size", 20, 1, 100) as u64;
+            let page = uint_arg(&value, "page", 1)?;
+            let page_size = uint_arg(&value, "page_size", 20)?;
             let filters = value.get("filters").cloned();
             let rank_by =
                 optional_string(&value, "rank_by").unwrap_or_else(|| "timestamp".to_string());
@@ -350,10 +357,15 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
             &make_client()?.get_task_status(&required_string(&value, "task_id")?)?,
         )),
         "everos_get_settings" => Ok(pretty_json(&make_client()?.get_settings()?)),
-        "everos_update_settings" => Ok(pretty_json(
-            &make_client()?
-                .update_settings(value.get("settings").cloned().unwrap_or_else(|| json!({})))?,
-        )),
+        "everos_update_settings" => {
+            let strict = bool_arg(&value, "strict", true);
+            let return_diff = bool_arg(&value, "return_diff", true);
+            Ok(pretty_json(&make_client()?.update_settings(
+                value.get("settings").cloned().unwrap_or_else(|| json!({})),
+                strict,
+                return_diff,
+            )?))
+        }
         _ => anyhow::bail!("Unknown EverOS MCP tool: {name}"),
     }
 }
@@ -524,16 +536,27 @@ fn bool_arg(value: &Value, key: &str, default: bool) -> bool {
     }
 }
 
-fn int_arg(value: &Value, key: &str, default: i64, low: i64, high: i64) -> i64 {
-    value
-        .get(key)
-        .and_then(|value| {
-            value
-                .as_i64()
-                .or_else(|| value.as_str().and_then(|text| text.parse::<i64>().ok()))
-        })
-        .unwrap_or(default)
-        .clamp(low, high)
+fn int_arg(value: &Value, key: &str, default: i64) -> anyhow::Result<i64> {
+    match value.get(key) {
+        None | Some(Value::Null) => Ok(default),
+        Some(Value::Number(number)) => number
+            .as_i64()
+            .ok_or_else(|| anyhow::anyhow!("{key} must be an integer")),
+        Some(Value::String(text)) if text.trim().is_empty() => Ok(default),
+        Some(Value::String(text)) => text
+            .trim()
+            .parse::<i64>()
+            .map_err(|_| anyhow::anyhow!("{key} must be an integer")),
+        Some(_) => anyhow::bail!("{key} must be an integer"),
+    }
+}
+
+fn uint_arg(value: &Value, key: &str, default: u64) -> anyhow::Result<u64> {
+    let parsed = int_arg(value, key, default as i64)?;
+    if parsed < 0 {
+        anyhow::bail!("{key} must be a non-negative integer");
+    }
+    Ok(parsed as u64)
 }
 
 fn float_arg(value: &Value, key: &str) -> Option<f64> {
@@ -544,7 +567,7 @@ fn float_arg(value: &Value, key: &str) -> Option<f64> {
                 .as_f64()
                 .or_else(|| value.as_str().and_then(|text| text.parse::<f64>().ok()))
         })
-        .filter(|value| value.is_finite() && *value > 0.0)
+        .filter(|value| value.is_finite())
 }
 
 fn scope_from_args(value: &Value) -> anyhow::Result<String> {

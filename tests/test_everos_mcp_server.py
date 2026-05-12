@@ -216,6 +216,7 @@ def test_mcp_tool_schemas_expose_cloud_v1_parameters():
     tools = mcp_server.mcp._tool_manager._tools
     assert len(tools) == 9
     assert "scope" in _mcp_tool_properties("everos_save_memory")
+    assert "tool_call_id" in _mcp_tool_properties("everos_save_memory")
     assert "scope" in _mcp_tool_properties("everos_add_memories")
     assert "scope" in _mcp_tool_properties("everos_flush_memories")
     search_props = _mcp_tool_properties("everos_search_memories")
@@ -250,6 +251,7 @@ def test_mcp_save_memory_supports_agent_scope_and_tool_role(monkeypatch):
         content="Tool failed once, then retry with timeout=60 succeeded.",
         scope="agent",
         role="tool",
+        tool_call_id="tool-call-1",
         session_id="sess-1",
         flush=True,
     ))
@@ -259,7 +261,33 @@ def test_mcp_save_memory_supports_agent_scope_and_tool_role(monkeypatch):
     assert result["flush"]["status"] == "success"
     assert calls[0][1]["scope"] == "agent"
     assert calls[0][1]["messages"][0]["role"] == "tool"
+    assert calls[0][1]["messages"][0]["tool_call_id"] == "tool-call-1"
     assert calls[1][1] == {"user_id": "u1", "session_id": "sess-1", "scope": "agent", "timeout": None}
+
+
+def test_mcp_save_memory_agent_scope_defaults_to_non_tool_role(monkeypatch):
+    from everos_hermes import mcp_server
+
+    captured = {}
+
+    class FakeClient:
+        def add_memories(self, **kwargs):
+            captured.update(kwargs)
+            return {"data": {"status": "queued", "task_id": "task-1"}}
+
+    monkeypatch.setenv("EVEROS_API_KEY", "sk-test")
+    monkeypatch.setenv("EVEROS_USER_ID", "u1")
+    monkeypatch.setattr(mcp_server, "make_client", lambda: FakeClient())
+
+    asyncio.run(mcp_server.everos_save_memory(
+        content="Agent trajectory summary",
+        scope="agent",
+        session_id="sess-1",
+        flush=False,
+    ))
+
+    assert captured["scope"] == "agent"
+    assert captured["messages"][0]["role"] == "assistant"
 
 
 def test_mcp_search_passes_filters_radius_timeout_and_fallback(monkeypatch):

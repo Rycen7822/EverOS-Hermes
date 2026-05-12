@@ -97,7 +97,8 @@ SAVE_SCHEMA = {
             "content": {"type": "string", "description": "Memory content to store."},
             "session_id": {"type": "string", "description": "Optional EverOS/Hermes session id."},
             "scope": {"type": "string", "enum": ["personal", "agent"], "description": "Memory scope. Default personal."},
-            "role": {"type": "string", "enum": ["user", "assistant", "tool", "system"], "description": "Message role. role=tool is only valid with scope=agent."},
+            "role": {"type": "string", "enum": ["user", "assistant", "tool", "system"], "description": "Message role. role=tool is only valid with scope=agent and requires tool_call_id."},
+            "tool_call_id": {"type": "string", "description": "Required when role=tool for agent memory."},
             "flush": {"type": "boolean", "description": "Trigger EverOS extraction immediately. Default true."},
         },
         "required": ["content"],
@@ -490,11 +491,14 @@ class EverOSMemoryProvider(MemoryProvider):
             return _tool_error("content is required")
         session_id = str(args.get("session_id") or self._session_id or "") or None
         scope = normalize_scope(str(args.get("scope") or "personal"))
-        role = str(args.get("role") or ("tool" if scope == "agent" else "user")).strip() or "user"
+        role = str(args.get("role") or ("assistant" if scope == "agent" else "user")).strip() or "user"
+        message = {"role": role, "timestamp": _now_ms(), "content": content}
+        if args.get("tool_call_id"):
+            message["tool_call_id"] = str(args.get("tool_call_id"))
         result = self._client.add_memories(
             user_id=self._user_id,
             session_id=session_id,
-            messages=[{"role": role, "timestamp": _now_ms(), "content": content}],
+            messages=[message],
             async_mode=True,
             scope=scope,
         )

@@ -232,7 +232,7 @@ def test_add_memories_supports_scope_agent_and_agent_alias(monkeypatch):
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
     client = EverOSClient(api_key="sk-test")
-    message = {"role": "tool", "timestamp": 1711900000000, "content": "tool output"}
+    message = {"role": "tool", "timestamp": 1711900000000, "content": "tool output", "tool_call_id": "tool-call-1"}
 
     client.add_memories(user_id="user_001", messages=[message], scope="agent")
     client.add_memories(user_id="user_001", messages=[message], agent=True)

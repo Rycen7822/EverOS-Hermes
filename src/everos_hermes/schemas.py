@@ -60,6 +60,9 @@ def validate_messages(messages: list[dict[str, Any]], scope: str) -> None:
         role = message.get("role")
         if role not in allowed_roles:
             raise ValueError(f"messages[{index}].role must be one of {sorted(allowed_roles)} for {scope} scope")
+        tool_call_id = message.get("tool_call_id")
+        if role == "tool" and (not isinstance(tool_call_id, str) or not tool_call_id.strip()):
+            raise ValueError(f"messages[{index}].tool_call_id is required when role='tool'")
         content = message.get("content")
         if not isinstance(content, str) or not content.strip():
             raise ValueError(f"messages[{index}].content must be a non-empty string")

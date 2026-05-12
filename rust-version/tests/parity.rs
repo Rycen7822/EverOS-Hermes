@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -89,6 +89,42 @@ fn n_request_server(response: Value, count: usize) -> (String, thread::JoinHandl
             );
             stream.write_all(reply.as_bytes()).unwrap();
             requests.push(raw);
+        }
+        requests
+    });
+    (format!("http://{addr}"), handle)
+}
+
+fn sequenced_request_server(
+    responses: Vec<Value>,
+    idle_timeout_ms: u64,
+) -> (String, thread::JoinHandle<Vec<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = thread::spawn(move || {
+        let mut requests = Vec::new();
+        let idle_timeout = Duration::from_millis(idle_timeout_ms);
+        let mut deadline = Instant::now() + idle_timeout;
+        while requests.len() < responses.len() && Instant::now() < deadline {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let raw = read_http_request(&mut stream);
+                    let body = responses[requests.len()].to_string();
+                    let reply = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    stream.write_all(reply.as_bytes()).unwrap();
+                    requests.push(raw);
+                    deadline = Instant::now() + idle_timeout;
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(err) => panic!("test server accept failed: {err}"),
+            }
         }
         requests
     });
@@ -636,6 +672,12 @@ fn mcp_and_provider_schemas_expose_cloud_v1_parameters() {
         save["inputSchema"]["properties"]["scope"]["enum"],
         json!(["personal", "agent"])
     );
+    assert!(
+        save["inputSchema"]["properties"]
+            .get("tool_call_id")
+            .is_some(),
+        "missing mcp save tool_call_id"
+    );
     let delete = tools
         .iter()
         .find(|tool| tool["name"] == "everos_delete_memories")
@@ -655,6 +697,12 @@ fn mcp_and_provider_schemas_expose_cloud_v1_parameters() {
         provider_save["parameters"]["properties"]["scope"]["enum"],
         json!(["personal", "agent"])
     );
+    assert!(
+        provider_save["parameters"]["properties"]
+            .get("tool_call_id")
+            .is_some(),
+        "missing provider save tool_call_id"
+    );
     let provider_search = schemas
         .iter()
         .find(|tool| tool["name"] == "everos_memory_search")
@@ -667,6 +715,220 @@ fn mcp_and_provider_schemas_expose_cloud_v1_parameters() {
             "missing provider search {key}"
         );
     }
+}
+
+#[test]
+fn mcp_update_settings_rejects_unknown_strict_fields_before_http() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let (base_url, handle) =
+        sequenced_request_server(vec![json!({"data":{"timezone":"UTC"}})], 150);
+    set_env("EVEROS_API_KEY", "test-key");
+    set_env("EVEROS_BASE_URL", &base_url);
+
+    let result = everos_hermes_rust::mcp::call_tool(
+        "everos_update_settings",
+        json!({"settings":{"unknown_field":"should_not_send"},"strict":true}),
+    );
+    let requests = handle.join().unwrap();
+
+    assert!(
+        result.is_err(),
+        "strict unknown setting should fail locally"
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("Unknown settings fields"),
+        "unexpected error: {err}"
+    );
+    assert!(
+        requests.is_empty(),
+        "strict validation must reject unknown fields before HTTP, got {requests:?}"
+    );
+
+    remove_env("EVEROS_API_KEY");
+    remove_env("EVEROS_BASE_URL");
+}
+
+#[test]
+fn mcp_update_settings_return_diff_gets_before_puts_and_gets_after() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let (base_url, handle) = sequenced_request_server(
+        vec![
+            json!({"data":{"timezone":"UTC","llm_custom_setting":{"temperature":0.2}}}),
+            json!({"data":{"status":"updated"}}),
+            json!({"data":{"timezone":"Asia/Shanghai","llm_custom_setting":{"temperature":0.2}}}),
+        ],
+        500,
+    );
+    set_env("EVEROS_API_KEY", "test-key");
+    set_env("EVEROS_BASE_URL", &base_url);
+
+    let raw = everos_hermes_rust::mcp::call_tool(
+        "everos_update_settings",
+        json!({"settings":{"timezone":"Asia/Shanghai"},"strict":true,"return_diff":true}),
+    )
+    .unwrap();
+    let response: Value = serde_json::from_str(&raw).unwrap();
+    let requests = handle.join().unwrap();
+    let paths: Vec<&str> = requests
+        .iter()
+        .map(|raw| raw.lines().next().unwrap_or(""))
+        .collect();
+
+    assert_eq!(
+        paths,
+        vec![
+            "GET /api/v1/settings HTTP/1.1",
+            "PUT /api/v1/settings HTTP/1.1",
+            "GET /api/v1/settings HTTP/1.1",
+        ]
+    );
+    assert_eq!(
+        parse_http_body(&requests[1]),
+        json!({"timezone":"Asia/Shanghai"})
+    );
+    assert_eq!(response["diff"]["timezone"]["before"], "UTC");
+    assert_eq!(response["diff"]["timezone"]["after"], "Asia/Shanghai");
+    assert_eq!(response["updated"]["timezone"], "Asia/Shanghai");
+
+    remove_env("EVEROS_API_KEY");
+    remove_env("EVEROS_BASE_URL");
+}
+
+#[test]
+fn mcp_save_memory_tool_role_requires_tool_call_id_before_http() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let (base_url, handle) =
+        sequenced_request_server(vec![json!({"data":{"status":"queued"}})], 150);
+    set_env("EVEROS_API_KEY", "test-key");
+    set_env("EVEROS_USER_ID", "u1");
+    set_env("EVEROS_BASE_URL", &base_url);
+
+    let result = everos_hermes_rust::mcp::call_tool(
+        "everos_save_memory",
+        json!({"content":"tool output","scope":"agent","role":"tool","flush":false}),
+    );
+    let requests = handle.join().unwrap();
+
+    assert!(
+        result.is_err(),
+        "role=tool without tool_call_id must fail locally"
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("tool_call_id"), "unexpected error: {err}");
+    assert!(
+        requests.is_empty(),
+        "tool_call_id validation must happen before HTTP, got {requests:?}"
+    );
+
+    remove_env("EVEROS_API_KEY");
+    remove_env("EVEROS_USER_ID");
+    remove_env("EVEROS_BASE_URL");
+}
+
+#[test]
+fn mcp_save_memory_agent_default_role_and_explicit_tool_call_id_body() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let (base_url, handle) = n_request_server(
+        json!({"data":{"status":"queued","task_id":"task-agent"}}),
+        2,
+    );
+    set_env("EVEROS_API_KEY", "test-key");
+    set_env("EVEROS_USER_ID", "u1");
+    set_env("EVEROS_BASE_URL", &base_url);
+
+    everos_hermes_rust::mcp::call_tool(
+        "everos_save_memory",
+        json!({"content":"agent summary","scope":"agent","session_id":"sess-1","flush":false}),
+    )
+    .unwrap();
+    everos_hermes_rust::mcp::call_tool(
+        "everos_save_memory",
+        json!({"content":"tool output","scope":"agent","role":"tool","tool_call_id":"tool-call-1","session_id":"sess-1","flush":false}),
+    )
+    .unwrap();
+    let requests = handle.join().unwrap();
+    let default_body = parse_http_body(&requests[0]);
+    let tool_body = parse_http_body(&requests[1]);
+
+    assert!(requests[0].starts_with("POST /api/v1/memories/agent HTTP/1.1"));
+    assert_eq!(default_body["messages"][0]["role"], "assistant");
+    assert_eq!(tool_body["messages"][0]["role"], "tool");
+    assert_eq!(tool_body["messages"][0]["tool_call_id"], "tool-call-1");
+
+    remove_env("EVEROS_API_KEY");
+    remove_env("EVEROS_USER_ID");
+    remove_env("EVEROS_BASE_URL");
+}
+
+#[test]
+fn mcp_numeric_boundaries_reject_invalid_args_before_http() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let (base_url, handle) = sequenced_request_server(
+        vec![
+            json!({"data":{"episodes":[]}}),
+            json!({"data":{"items":[]}}),
+            json!({"data":{"episodes":[]}}),
+        ],
+        150,
+    );
+    set_env("EVEROS_API_KEY", "test-key");
+    set_env("EVEROS_USER_ID", "u1");
+    set_env("EVEROS_BASE_URL", &base_url);
+
+    let bad_top_k = everos_hermes_rust::mcp::call_tool(
+        "everos_search_memories",
+        json!({"query":"q","top_k":101}),
+    );
+    let bad_page = everos_hermes_rust::mcp::call_tool(
+        "everos_get_memories",
+        json!({"page":0,"page_size":101}),
+    );
+    let bad_radius = everos_hermes_rust::mcp::call_tool(
+        "everos_search_memories",
+        json!({"query":"q","radius":1.1}),
+    );
+    let requests = handle.join().unwrap();
+
+    for (label, result) in [
+        ("top_k", bad_top_k),
+        ("page/page_size", bad_page),
+        ("radius", bad_radius),
+    ] {
+        assert!(result.is_err(), "{label} should be rejected locally");
+    }
+    assert!(
+        requests.is_empty(),
+        "invalid numeric arguments must not send HTTP, got {requests:?}"
+    );
+
+    remove_env("EVEROS_API_KEY");
+    remove_env("EVEROS_USER_ID");
+    remove_env("EVEROS_BASE_URL");
+}
+
+#[test]
+fn mcp_search_preserves_radius_zero() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let (base_url, handle) = one_request_server(json!({"data":{"episodes":[]}}));
+    set_env("EVEROS_API_KEY", "test-key");
+    set_env("EVEROS_USER_ID", "u1");
+    set_env("EVEROS_BASE_URL", &base_url);
+
+    everos_hermes_rust::mcp::call_tool(
+        "everos_search_memories",
+        json!({"query":"q","method":"hybrid","radius":0,"top_k":1}),
+    )
+    .unwrap();
+    let raw = handle.join().unwrap();
+    let body = parse_http_body(&raw);
+
+    assert_eq!(body["radius"], json!(0.0));
+    assert_eq!(body["top_k"], 1);
+
+    remove_env("EVEROS_API_KEY");
+    remove_env("EVEROS_USER_ID");
+    remove_env("EVEROS_BASE_URL");
 }
 
 #[test]

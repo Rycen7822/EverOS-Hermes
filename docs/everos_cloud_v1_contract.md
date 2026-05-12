@@ -36,7 +36,7 @@ Response notes:
 
 Scope: agent memory / agent trajectory.
 
-Request body is the same shape as personal add, but roles may include `tool` for summarized tool results, corrections, and reusable agent lessons.
+Request body is the same shape as personal add, but roles may include `tool` for summarized tool results, corrections, and reusable agent lessons. EverOS Cloud requires `tool_call_id` whenever `role="tool"`; Hermes MCP/provider wrappers default agent single-message saves to a non-tool role and reject missing `tool_call_id` before HTTP when the caller explicitly asks for `role="tool"`.
 
 Response notes are the same as personal add.
 
@@ -87,8 +87,8 @@ Request body:
 
 Status and lifecycle notes:
 
-- `top_k=-1` asks Cloud for all matching results; prompt injection must still cap context separately.
-- `radius` is only valid for vector/hybrid/agentic retrieval.
+- `top_k=-1` asks Cloud for all matching results; prompt injection must still cap context separately. Out-of-range `top_k` values must be rejected before HTTP rather than silently coerced.
+- `radius` is only valid for vector/hybrid/agentic retrieval; `0.0` is schema-valid and must be preserved instead of treated as absent.
 - Vectors are stripped before returning data to Hermes unless `include_vectors=true` is explicitly requested for debugging.
 
 ### POST /api/v1/memories/get
@@ -110,8 +110,8 @@ Request body:
 
 Response notes:
 
-- `page` is 1-based.
-- `page_size` is limited to 1..100 in this integration.
+- `page` is 1-based; invalid values must be rejected before HTTP rather than silently coerced.
+- `page_size` is limited to 1..100 in this integration; invalid values must be rejected before HTTP rather than silently coerced.
 - Get memory types differ from search memory types; see mapping below.
 
 ### POST /api/v1/memories/delete

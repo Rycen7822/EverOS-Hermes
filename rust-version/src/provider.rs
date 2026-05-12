@@ -353,12 +353,29 @@ impl EverOSProvider {
         let scope = normalize_scope_arg(&value_string(args, "scope"));
         let role = non_empty_or(
             &value_string(args, "role"),
-            if scope == "agent" { "tool" } else { "user" },
+            if scope == "agent" {
+                "assistant"
+            } else {
+                "user"
+            },
         );
+        let mut message = json!({"role":role,"timestamp":now_ms(),"content":content});
+        if let (Some(tool_call_id), Some(map)) = (
+            args.get("tool_call_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+            message.as_object_mut(),
+        ) {
+            map.insert(
+                "tool_call_id".to_string(),
+                Value::String(tool_call_id.to_string()),
+            );
+        }
         let result = self.client.as_ref().expect("active").add_memories_scoped(
             &self.user_id,
             session_id_opt,
-            vec![json!({"role":role,"timestamp":now_ms(),"content":content})],
+            vec![message],
             true,
             &scope,
         )?;
@@ -516,7 +533,7 @@ impl EverOSProvider {
 
 pub fn provider_tool_schemas() -> Vec<Value> {
     vec![
-        json!({"name":"everos_memory_save","description":"Queue an explicit long-term memory message in EverOS and optionally request extraction; saved=true does not guarantee a structured memory is immediately searchable.","parameters":{"type":"object","properties":{"content":{"type":"string","description":"Memory content to store."},"session_id":{"type":"string","description":"Optional EverOS/Hermes session id."},"scope":{"type":"string","enum":["personal","agent"],"description":"Memory scope. Default personal."},"role":{"type":"string","enum":["user","assistant","tool","system"],"description":"Message role. role=tool is only valid with scope=agent."},"flush":{"type":"boolean","description":"Trigger EverOS extraction immediately. Default true."}},"required":["content"]}}),
+        json!({"name":"everos_memory_save","description":"Queue an explicit long-term memory message in EverOS and optionally request extraction; saved=true does not guarantee a structured memory is immediately searchable.","parameters":{"type":"object","properties":{"content":{"type":"string","description":"Memory content to store."},"session_id":{"type":"string","description":"Optional EverOS/Hermes session id."},"scope":{"type":"string","enum":["personal","agent"],"description":"Memory scope. Default personal."},"role":{"type":"string","enum":["user","assistant","tool","system"],"description":"Message role. role=tool is only valid with scope=agent and requires tool_call_id."},"tool_call_id":{"type":"string","description":"Required when role=tool for agent memory."},"flush":{"type":"boolean","description":"Trigger EverOS extraction immediately. Default true."}},"required":["content"]}}),
         json!({"name":"everos_memory_search","description":"Search EverOS long-term memory using keyword, vector, hybrid, or agentic retrieval.","parameters":{"type":"object","properties":{"query":{"type":"string","description":"Search query."},"limit":{"type":"integer","description":"Backward-compatible alias for top_k."},"top_k":{"type":"integer","description":"Cloud top_k; -1 requests all matching results."},"method":{"type":"string","enum":["keyword","vector","hybrid","agentic"],"description":"Retrieval method. Default hybrid."},"session_id":{"type":"string","description":"Optional session filter."},"filters":{"type":"object","description":"Optional Cloud v1 filters DSL."},"memory_types":{"type":"array","items":{"type":"string","enum":["episodic_memory","profile","raw_message","agent_memory"]},"description":"Optional EverOS search memory types."},"radius":{"type":"number","description":"Optional vector radius for vector/hybrid/agentic retrieval."},"include_original_data":{"type":"boolean","description":"Include Cloud original_data. Vectors remain stripped by default."},"include_vectors":{"type":"boolean","description":"Keep embedding/vector fields for debugging only."},"response_format":{"type":"string","enum":["json","markdown"],"description":"Output format."}},"required":["query"]}}),
         json!({"name":"everos_memory_get","description":"Get structured EverOS memories by type for the configured user.","parameters":{"type":"object","properties":{"memory_type":{"type":"string","enum":["episodic_memory","profile","agent_case","agent_skill"],"description":"Memory type to retrieve."},"page":{"type":"integer","description":"Page number starting at 1."},"page_size":{"type":"integer","description":"Items per page, 1-100."},"session_id":{"type":"string","description":"Optional session filter."},"filters":{"type":"object","description":"Optional Cloud v1 filters DSL."},"rank_by":{"type":"string","description":"Rank field. Default timestamp."},"rank_order":{"type":"string","enum":["asc","desc"],"description":"Rank order."}}}}),
         json!({"name":"everos_memory_flush","description":"Force EverOS memory extraction for the configured user/session. Timeout errors are retryable; search/status checks should happen before retrying.","parameters":{"type":"object","properties":{"session_id":{"type":"string","description":"Optional session id."},"scope":{"type":"string","enum":["personal","agent"],"description":"Memory scope to flush."},"timeout":{"type":"number","description":"Optional per-call timeout in seconds."}}}}),

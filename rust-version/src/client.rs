@@ -332,8 +332,32 @@ impl EverOSClient {
         self.request_json("GET", "/api/v1/settings", None, None)
     }
 
-    pub fn update_settings(&self, settings: Value) -> Result<Value> {
-        self.request_json("PUT", "/api/v1/settings", Some(settings), None)
+    pub fn update_settings(
+        &self,
+        settings: Value,
+        strict: bool,
+        return_diff: bool,
+    ) -> Result<Value> {
+        let validated = validate_settings_update(settings, strict)?;
+        let before = if return_diff {
+            Some(self.get_settings()?)
+        } else {
+            None
+        };
+        let mut response =
+            self.request_json("PUT", "/api/v1/settings", Some(validated.clone()), None)?;
+        if let Some(before) = before {
+            let after = self.get_settings()?;
+            let diff = settings_diff(&before, &after, &validated);
+            let updated = settings_updated_payload(&after);
+            if let Some(map) = response.as_object_mut() {
+                map.insert("diff".to_string(), diff);
+                map.insert("updated".to_string(), updated);
+            } else {
+                response = json!({"data": response, "diff": diff, "updated": updated});
+            }
+        }
+        Ok(response)
     }
 }
 
@@ -461,6 +485,16 @@ fn validate_messages(messages: &[Value], scope: &str) -> Result<()> {
                 "invalid role {role:?} for {scope} memory"
             )));
         }
+        if role == "tool"
+            && map
+                .get("tool_call_id")
+                .and_then(Value::as_str)
+                .is_none_or(|value| value.trim().is_empty())
+        {
+            return Err(EverOSError::Api(
+                "tool_call_id is required when role='tool'".to_string(),
+            ));
+        }
         if !map
             .get("timestamp")
             .is_some_and(|value| value.as_i64().is_some() || value.as_u64().is_some())
@@ -554,6 +588,94 @@ fn validate_get_params(
         ));
     }
     Ok(())
+}
+
+fn validate_settings_update(settings: Value, strict: bool) -> Result<Value> {
+    let Value::Object(map) = settings else {
+        return Err(EverOSError::Api(
+            "settings must be a non-empty object".to_string(),
+        ));
+    };
+    if map.is_empty() {
+        return Err(EverOSError::Api(
+            "settings must be a non-empty object".to_string(),
+        ));
+    }
+    if strict {
+        let mut unknown: Vec<String> = map
+            .keys()
+            .filter(|key| !matches!(key.as_str(), "timezone" | "llm_custom_setting"))
+            .cloned()
+            .collect();
+        unknown.sort();
+        if !unknown.is_empty() {
+            return Err(EverOSError::Api(format!(
+                "Unknown settings fields {unknown:?}; allowed fields: [\"llm_custom_setting\", \"timezone\"]"
+            )));
+        }
+    }
+    let mut out = Map::new();
+    for (key, value) in map {
+        match key.as_str() {
+            "timezone" => {
+                if value
+                    .as_str()
+                    .is_none_or(|timezone| timezone.trim().is_empty())
+                {
+                    return Err(EverOSError::Api(
+                        "timezone must be an IANA timezone string".to_string(),
+                    ));
+                }
+                out.insert(key, value);
+            }
+            "llm_custom_setting" => {
+                if !value.is_object() {
+                    return Err(EverOSError::Api(
+                        "llm_custom_setting must be an object".to_string(),
+                    ));
+                }
+                out.insert(key, value);
+            }
+            _ if !strict => {
+                out.insert(key, value);
+            }
+            _ => {}
+        }
+    }
+    Ok(Value::Object(out))
+}
+
+fn settings_diff(before: &Value, after: &Value, requested: &Value) -> Value {
+    let mut diff = Map::new();
+    let before_data = settings_data_object(before);
+    let after_data = settings_data_object(after);
+    if let Some(requested) = requested.as_object() {
+        for key in requested.keys() {
+            let old = before_data
+                .and_then(|map| map.get(key))
+                .cloned()
+                .unwrap_or(Value::Null);
+            let new = after_data
+                .and_then(|map| map.get(key))
+                .cloned()
+                .unwrap_or(Value::Null);
+            if old != new {
+                diff.insert(key.clone(), json!({"before": old, "after": new}));
+            }
+        }
+    }
+    Value::Object(diff)
+}
+
+fn settings_updated_payload(after: &Value) -> Value {
+    after.get("data").cloned().unwrap_or_else(|| after.clone())
+}
+
+fn settings_data_object(value: &Value) -> Option<&Map<String, Value>> {
+    value
+        .get("data")
+        .and_then(Value::as_object)
+        .or_else(|| value.as_object())
 }
 
 fn validate_delete_request(

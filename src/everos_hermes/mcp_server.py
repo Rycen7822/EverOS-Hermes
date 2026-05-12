@@ -121,7 +121,8 @@ async def everos_save_memory(
     user_id: str | None = None,
     session_id: str | None = None,
     scope: MemoryScope = "personal",
-    role: Literal["user", "assistant", "tool", "system"] = "user",
+    role: Literal["user", "assistant", "tool", "system"] | None = None,
+    tool_call_id: str | None = None,
     flush: bool = True,
     async_mode: bool = True,
     flush_timeout: float | None = None,
@@ -135,12 +136,16 @@ async def everos_save_memory(
     structured profile/fact is already searchable.
     """
     resolved_scope = normalize_scope(scope)
+    resolved_role = role or ("assistant" if resolved_scope == "agent" else "user")
+    message: dict[str, Any] = {"role": resolved_role, "timestamp": now_ms(), "content": content}
+    if tool_call_id:
+        message["tool_call_id"] = tool_call_id
     uid = user_id or default_user_id()
     client = make_client()
     result = client.add_memories(
         user_id=uid,
         session_id=session_id,
-        messages=[{"role": role, "timestamp": now_ms(), "content": content}],
+        messages=[message],
         async_mode=async_mode,
         scope=resolved_scope,
     )

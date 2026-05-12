@@ -179,7 +179,7 @@ Even when `include_original_data=true`, vector fields are stripped by default to
 
 | Tool | Purpose | Read-only? |
 | --- | --- | --- |
-| `everos_save_memory` | Queue one explicit text memory message, then optionally flush; response separates queue/extraction/searchability state. | No |
+| `everos_save_memory` | Queue one explicit text memory message, then optionally flush; response separates queue/extraction/searchability state. For agent scope, `role=tool` requires `tool_call_id`; default agent role is non-tool. | No |
 | `everos_add_memories` | Add one or more messages to personal or agent scope; legacy `agent` alias remains supported but conflicts with `scope`. | No |
 | `everos_flush_memories` | Trigger personal or agent extraction immediately; supports per-call `timeout` and retryable timeout responses. | No |
 | `everos_search_memories` | Search with keyword, vector, hybrid, or agentic retrieval; exposes `filters`, `radius`, `top_k=-1`, `timeout`, and agentic fallback; vector fields are stripped unless `include_vectors=true`. | Yes |
@@ -189,7 +189,7 @@ Even when `include_original_data=true`, vector fields are stripped by default to
 | `everos_get_settings` | Read EverOS memory-space settings. | Yes |
 | `everos_update_settings` | Update whitelisted EverOS settings fields and return a before/after diff. | No |
 
-Rust parity follows the Cloud v1 contract in the repository root: personal and agent memory are supported, while group/sender/multimodal storage endpoints stay out of scope. Search memory types are `episodic_memory`, `profile`, `raw_message`, and `agent_memory`; get memory types are `episodic_memory`, `profile`, `agent_case`, and `agent_skill`.
+Rust parity follows the Cloud v1 contract in the repository root: personal and agent memory are supported, while group/sender/multimodal storage endpoints stay out of scope. Search memory types are `episodic_memory`, `profile`, `raw_message`, and `agent_memory`; get memory types are `episodic_memory`, `profile`, `agent_case`, and `agent_skill`. Public numeric arguments are validated rather than silently coerced: invalid `top_k`, `page`, or `page_size` fails before HTTP, and schema-valid `radius=0` is preserved.
 
 ## Use as Hermes memory provider
 
@@ -228,7 +228,7 @@ Restart Hermes CLI/WebUI/gateway after changing the provider. MCP tools and the 
 
 | Tool | Purpose |
 | --- | --- |
-| `everos_memory_save` | Queue an explicit personal or agent scoped memory message and optionally request extraction; `saved=true` does not guarantee immediate structured/profile recall. |
+| `everos_memory_save` | Queue an explicit personal or agent scoped memory message and optionally request extraction; `saved=true` does not guarantee immediate structured/profile recall. For agent scope, `role=tool` requires `tool_call_id`; default agent role is non-tool. |
 | `everos_memory_search` | Search EverOS memory for the configured user with `filters`, `radius`, `top_k`, optional vector inclusion, and Markdown/JSON output. |
 | `everos_memory_get` | Retrieve structured memories by type, page, optional filters, and ranking. |
 | `everos_memory_flush` | Force personal or agent extraction for the user/session; accepts per-call `timeout` and returns retryable timeout guidance. |

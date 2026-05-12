@@ -168,3 +168,32 @@
 ## 当前剩余动作
 
 - 仅剩本 note 的最终记录提交；无代码/测试/打包/release 阻塞项。
+
+## 2026-05-12 12:14 CST：MCP 2.0 settings hotfix
+
+用户要求修复 `problems.md` 新记录的问题。已按 TDD 修复 Rust MCP `everos_update_settings` strict / return_diff 缺口：
+
+- RED：新增 Rust parity 测试后，旧实现上 `cargo test --test parity mcp_update_settings -- --nocapture` 失败，确认 strict 未知字段仍发 HTTP。
+- GREEN：`rust-version/src/client.rs` 已新增本地 settings whitelist 校验，`strict=true` 只允许 `timezone` / `llm_custom_setting`；`return_diff=true` 执行 GET-before / PUT / GET-after，并返回 `diff` / `updated`。
+- MCP：`rust-version/src/mcp.rs` 已透传 `strict` 与 `return_diff`。
+- 回归：Rust parity 扩展到 20 tests，`cargo clippy --all-targets --all-features -- -D warnings` 与 `cargo test --tests --no-fail-fast` 通过。
+- Python 回归：`python -m pytest -p no:cacheprovider tests -q` → `50 passed`；`python -m py_compile ...` 通过。
+- 本地 prebuild：已重打包并安装 `everos-hermes-rust-0.2.0-x86_64-unknown-linux-gnu.tar.gz`，安装后 `hermes mcp test everos` 连接成功并发现 9 tools。
+- installed-binary smoke：`/tmp/everos_mcp20_full_smoke.py` → `24 passed, 0 failed`。
+- `problems.md` 已整理：最新 P0 标记为已解决，保留批量迁移 helper / structured output schema / save_and_verify 为非阻塞 backlog。
+
+## 2026-05-12 13:05 CST：MCP 2.0 tool_call_id / numeric parser hotfix
+
+用户要求继续修复压力测试新增的 P1-02 / P1-03。已按 TDD 与真实 Cloud 压力验证闭环完成：
+
+- RED：新增 Python schema/MCP/provider 回归与 Rust parity，用例覆盖 `role=tool` 缺少 `tool_call_id`、`scope=agent` 默认 role、`tool_call_id` schema/请求体、`top_k/page/page_size` 非法边界 HTTP 前失败、`radius=0` 保留。
+- GREEN：
+  - Python：`schemas.py` 校验 `role=tool` 必须带 `tool_call_id`；`mcp_server.py` / `provider.py` 暴露并透传 `tool_call_id`，agent 默认 role 改为 `assistant`。
+  - Rust：`client.rs` 增加同等 message 校验；`mcp.rs` / `provider.rs` 暴露并透传 `tool_call_id`；`mcp.rs` numeric parser 不再 clamp，`float_arg()` 保留 `0.0`。
+- 文档：`README.md`、`rust-version/README.md`、`docs/everos_cloud_v1_contract.md` 已同步 tool role 与 numeric boundary 契约。
+- 验证：Python 全量 `51 passed`；Rust `cargo fmt --all --check` / `cargo clippy --all-targets --all-features -- -D warnings` / `cargo test --tests --no-fail-fast` 通过，Rust parity `24 passed`；`git diff --check` 通过。
+- 打包安装：已重打包 `everos-hermes-rust-0.2.0-x86_64-unknown-linux-gnu.tar.gz`，`sha256sum -c` 通过，并重新安装到 `/home/xu/.local/share/everos-hermes`；`provider is-available` 与 `hermes mcp test everos` 均通过。
+- 压力测试：
+  - fake-server installed MCP：`/tmp/everos_mcp20_stress.py` -> `18 passed, 0 failed`，201 次 MCP calls / 247 次 HTTP requests。
+  - 真实 Cloud installed MCP：`/tmp/everos_mcp20_real_stress.py` -> `24 passed, 0 failed`，46 次 MCP calls，合成 session 删除 204。
+- `problems.md` 已更新：P1-02 / P1-03 标记为已解决；当前无 P0/P1 阻塞问题，仅保留非阻塞 backlog。

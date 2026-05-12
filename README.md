@@ -339,7 +339,7 @@ The MCP server exposes nine tools:
 
 | Tool | Purpose | Read-only? |
 | --- | --- | --- |
-| `everos_save_memory` | Queue one explicit text memory message, then optionally flush; response separates queue/extraction/searchability state. | No |
+| `everos_save_memory` | Queue one explicit text memory message, then optionally flush; response separates queue/extraction/searchability state. For agent scope, `role=tool` requires `tool_call_id`; default agent role is non-tool. | No |
 | `everos_add_memories` | Add one or more messages to personal or agent scope; legacy `agent` alias remains supported but conflicts with `scope`. | No |
 | `everos_flush_memories` | Trigger personal or agent extraction immediately; supports per-call `timeout` and retryable timeout responses. | No |
 | `everos_search_memories` | Search with keyword, vector, hybrid, or agentic retrieval; exposes `filters`, `radius`, `top_k=-1`, `timeout`, and agentic fallback; vector fields are stripped unless `include_vectors=true`. | Yes |
@@ -369,7 +369,7 @@ Common search call shape:
 
 Use `method="agentic"` only for complex multi-part retrieval because it is slower and more expensive than `hybrid`. Even when `include_original_data=true`, embedding/vector fields are removed by default to avoid flooding context; set `include_vectors=true` only for debugging.
 
-Search/get type mapping is intentionally split: `search` accepts `episodic_memory`, `profile`, `raw_message`, and `agent_memory`; `get` accepts `episodic_memory`, `profile`, `agent_case`, and `agent_skill`. `top_k=-1` is allowed for Cloud search, but Markdown rendering still caps prompt context separately.
+Search/get type mapping is intentionally split: `search` accepts `episodic_memory`, `profile`, `raw_message`, and `agent_memory`; `get` accepts `episodic_memory`, `profile`, `agent_case`, and `agent_skill`. `top_k=-1` is allowed for Cloud search, but Markdown rendering still caps prompt context separately. Numeric public arguments are validated rather than silently coerced: invalid `top_k`, `page`, or `page_size` fails before HTTP, while schema-valid `radius=0` is preserved.
 
 Delete safety is stricter than raw CRUD: single delete uses `memory_id` only, while batch delete requires an explicit `user_id`, `confirm=true`, and `confirm_scope_text` exactly matching `delete user_id=<id>` or `delete user_id=<id> session_id=<session>`.
 
