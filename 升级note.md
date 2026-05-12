@@ -1,10 +1,10 @@
 # EverOS-Hermes Cloud v1 升级 note
 
-更新时间：2026-05-12 11:22 CST（最终验证、0.2.0 package、本地安装、MCP/provider smoke 均通过）
+更新时间：2026-05-12 11:26 CST（最终验证、0.2.0 package、本地安装、push/release/download 校验均通过）
 
 ## 必须优先报告的完成状态
 
-- `EverOS-Hermes_Cloud_升级清单.md` 的代码/文档/打包/本地安装主项已完成；剩余若用户需要，是 commit/push/GitHub release 发布动作。
+- `EverOS-Hermes_Cloud_升级清单.md` 的代码/文档/打包/本地安装/commit/push/GitHub release 主项已完成。
 - 当前已完成 Sprint 1/2/3/4/finalverify：Python client/MCP/provider/formatter、Rust client/MCP/provider/formatter、README/rust README、0.2.0 package 与本地 Hermes 安装均已同步。
 - 版本已按清单 P8 建议升至 `0.2.0`，并保持 Python/Rust/plugin manifest 一致。
 
@@ -155,7 +155,16 @@
 - `hermes mcp test everos` → Connected，发现 9 tools。
 - fresh provider sync-turn smoke：在本地 fake EverOS server 下确认同时 POST `/api/v1/memories` 与 `/api/v1/memories/agent`，agent message 以 `Task request:` 开头。
 
+## Release / push 结果
+
+- 主实现 commit：`386bb1fbc547be2f3f8573375aa4d68c4f64fb73`，已 push 到 `origin/main`。
+- GitHub Release：`v0.2.0`，URL：`https://github.com/Rycen7822/EverOS-Hermes/releases/tag/v0.2.0`。
+- Release target：`386bb1fbc547be2f3f8573375aa4d68c4f64fb73`。
+- 已上传 assets：
+  - `everos-hermes-rust-0.2.0-x86_64-unknown-linux-gnu.tar.gz`
+  - `everos-hermes-rust-0.2.0-x86_64-unknown-linux-gnu.tar.gz.sha256`
+- 已下载 GitHub release assets 并重新执行 `sha256sum -c`、解包、binary `--version`、plugin manifest `version: 0.2.0` 校验，均通过。
+
 ## 当前剩余动作
 
-- 代码/文档/测试/打包/本地安装已完成。
-- 若需要对外发布，还需执行：`git add` → `git commit` → `git push` → GitHub Release `v0.2.0` 上传 tar.gz 与 `.sha256` → 下载校验。
+- 仅剩本 note 的最终记录提交；无代码/测试/打包/release 阻塞项。
