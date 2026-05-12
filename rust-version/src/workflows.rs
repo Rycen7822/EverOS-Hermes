@@ -234,6 +234,14 @@ pub fn normalize_import_messages(
                 "messages[{index}].tool_call_id is required when role=tool"
             ));
         }
+        if !map
+            .get("timestamp")
+            .is_some_and(|value| value.as_i64().is_some() || value.as_u64().is_some())
+        {
+            warnings.push(format!(
+                "messages[{index}].timestamp must be an integer epoch millisecond value"
+            ));
+        }
         map.insert("role".to_string(), Value::String(role));
         map.insert("content".to_string(), Value::String(content));
         map.entry("timestamp".to_string())
@@ -246,6 +254,53 @@ pub fn normalize_import_messages(
 fn batched(items: &[Value], batch_size: usize) -> Vec<Vec<Value>> {
     let size = batch_size.clamp(1, 100);
     items.chunks(size).map(|chunk| chunk.to_vec()).collect()
+}
+
+fn json_bytes(value: &Value) -> usize {
+    serde_json::to_vec(value)
+        .map(|bytes| bytes.len())
+        .unwrap_or_else(|_| value.to_string().len())
+}
+
+fn batch_payload_bytes(batch: &[Value]) -> usize {
+    json_bytes(&json!({"messages": batch}))
+}
+
+fn message_metrics(messages: &[Value], batch_size: usize) -> Value {
+    let batches = batched(messages, batch_size);
+    let content_lengths: Vec<usize> = messages
+        .iter()
+        .map(|message| {
+            message
+                .get("content")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .chars()
+                .count()
+        })
+        .collect();
+    let total_content_chars: usize = content_lengths.iter().sum();
+    let max_content_chars = content_lengths.into_iter().max().unwrap_or(0);
+    let max_batch_payload_bytes = batches
+        .iter()
+        .map(|batch| batch_payload_bytes(batch))
+        .max()
+        .unwrap_or(0);
+    json!({
+        "total_messages": messages.len(),
+        "batch_count": batches.len(),
+        "requested_batch_size": batch_size,
+        "effective_batch_size": batch_size.clamp(1, 100),
+        "total_content_chars": total_content_chars,
+        "max_content_chars": max_content_chars,
+        "estimated_payload_bytes": batch_payload_bytes(messages),
+        "max_batch_payload_bytes": max_batch_payload_bytes,
+    })
+}
+
+fn is_cloud_403(err: &EverOSError) -> bool {
+    let text = err.to_string().to_ascii_lowercase();
+    text.contains("403") || text.contains("forbidden")
 }
 
 pub fn count_hits(response: &Value) -> usize {
@@ -419,6 +474,88 @@ pub fn save_and_verify(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn submit_batch_with_adaptive_split(
+    client: &EverOSClient,
+    user_id: &str,
+    session_id: Option<&str>,
+    scope: &str,
+    batch: Vec<Value>,
+    batch_index: usize,
+    split_from: Option<usize>,
+    batch_reports: &mut Vec<Value>,
+) -> (usize, usize, usize) {
+    match client.add_memories_scoped(user_id, session_id, batch.clone(), true, scope) {
+        Ok(response) => {
+            let queued = batch.len();
+            batch_reports.push(json!({
+                "batch_index": batch_index,
+                "split_from": split_from,
+                "ok": true,
+                "message_count": queued,
+                "payload_bytes": batch_payload_bytes(&batch),
+                "status": response.pointer("/data/status").and_then(Value::as_str).unwrap_or("queued"),
+                "task_id": response.pointer("/data/task_id").and_then(Value::as_str).unwrap_or(""),
+                "response": response,
+            }));
+            (queued, 0, 0)
+        }
+        Err(err) if is_cloud_403(&err) && batch.len() > 1 => {
+            let mid = (batch.len() / 2).max(1);
+            batch_reports.push(json!({
+                "batch_index": batch_index,
+                "split_from": split_from,
+                "ok": false,
+                "message_count": batch.len(),
+                "payload_bytes": batch_payload_bytes(&batch),
+                "error": err.to_string(),
+                "retryable": true,
+                "split": true,
+                "split_reason": "cloud_403",
+                "split_into": [mid, batch.len() - mid],
+            }));
+            let (left_queued, left_failed, left_splits) = submit_batch_with_adaptive_split(
+                client,
+                user_id,
+                session_id,
+                scope,
+                batch[..mid].to_vec(),
+                batch_index,
+                Some(batch_index),
+                batch_reports,
+            );
+            let (right_queued, right_failed, right_splits) = submit_batch_with_adaptive_split(
+                client,
+                user_id,
+                session_id,
+                scope,
+                batch[mid..].to_vec(),
+                batch_index,
+                Some(batch_index),
+                batch_reports,
+            );
+            (
+                left_queued + right_queued,
+                left_failed + right_failed,
+                1 + left_splits + right_splits,
+            )
+        }
+        Err(err) => {
+            let failed = batch.len();
+            batch_reports.push(json!({
+                "batch_index": batch_index,
+                "split_from": split_from,
+                "ok": false,
+                "message_count": failed,
+                "payload_bytes": batch_payload_bytes(&batch),
+                "error": err.to_string(),
+                "retryable": true,
+            }));
+            (0, failed, 0)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn import_and_verify(
     client: &EverOSClient,
     user_id: &str,
@@ -443,12 +580,14 @@ pub fn import_and_verify(
         "user"
     };
     let (messages, warnings) = normalize_import_messages(messages, file_path, default_role)?;
+    let metrics = message_metrics(&messages, batch_size);
     if dry_run {
         let mut payload = success_envelope(workflow, "dry_run");
         payload.insert("input_count".to_string(), json!(messages.len()));
         payload.insert("queued_count".to_string(), json!(0));
         payload.insert("failed_count".to_string(), json!(0));
         payload.insert("warnings".to_string(), json!(warnings));
+        payload.insert("metrics".to_string(), metrics);
         payload.insert("batches".to_string(), json!([]));
         payload.insert(
             "verification".to_string(),
@@ -465,7 +604,11 @@ pub fn import_and_verify(
     }
     let blocking_warnings: Vec<String> = warnings
         .iter()
-        .filter(|warning| warning.contains("tool_call_id") || warning.contains("empty"))
+        .filter(|warning| {
+            warning.contains("tool_call_id")
+                || warning.contains("empty")
+                || warning.contains("timestamp")
+        })
         .cloned()
         .collect();
     if !blocking_warnings.is_empty() {
@@ -479,6 +622,7 @@ pub fn import_and_verify(
             map.insert("queued_count".to_string(), json!(0));
             map.insert("failed_count".to_string(), json!(messages.len()));
             map.insert("warnings".to_string(), json!(warnings));
+            map.insert("metrics".to_string(), metrics);
         }
         return Ok(payload);
     }
@@ -486,30 +630,21 @@ pub fn import_and_verify(
     let mut batch_reports = Vec::new();
     let mut queued_count = 0usize;
     let mut failed_count = 0usize;
+    let mut split_count = 0usize;
     for (index, batch) in batches.into_iter().enumerate() {
-        match client.add_memories_scoped(user_id, session_id, batch.clone(), true, &scope) {
-            Ok(response) => {
-                queued_count += batch.len();
-                batch_reports.push(json!({
-                    "batch_index": index,
-                    "ok": true,
-                    "message_count": batch.len(),
-                    "status": response.pointer("/data/status").and_then(Value::as_str).unwrap_or("queued"),
-                    "task_id": response.pointer("/data/task_id").and_then(Value::as_str).unwrap_or(""),
-                    "response": response,
-                }));
-            }
-            Err(err) => {
-                failed_count += batch.len();
-                batch_reports.push(json!({
-                    "batch_index": index,
-                    "ok": false,
-                    "message_count": batch.len(),
-                    "error": err.to_string(),
-                    "retryable": true,
-                }));
-            }
-        }
+        let (queued, failed, splits) = submit_batch_with_adaptive_split(
+            client,
+            user_id,
+            session_id,
+            &scope,
+            batch,
+            index,
+            None,
+            &mut batch_reports,
+        );
+        queued_count += queued;
+        failed_count += failed;
+        split_count += splits;
     }
     let flush_payload = if flush && queued_count > 0 {
         match client.flush_memories_scoped(user_id, session_id, &scope, flush_timeout) {
@@ -548,6 +683,12 @@ pub fn import_and_verify(
         "queued"
     };
     let mut actions = Vec::new();
+    if split_count > 0 {
+        actions.push(Value::String(
+            "Cloud 403 triggered adaptive batch splitting; keep batch_size small for long messages"
+                .to_string(),
+        ));
+    }
     if failed_count > 0 {
         actions.push(Value::String(
             "retry only failed batches using the batch report".to_string(),
@@ -565,10 +706,12 @@ pub fn import_and_verify(
     payload.insert("input_count".to_string(), json!(messages.len()));
     payload.insert("queued_count".to_string(), json!(queued_count));
     payload.insert("failed_count".to_string(), json!(failed_count));
+    payload.insert("split_count".to_string(), json!(split_count));
     payload.insert("scope".to_string(), Value::String(scope));
     payload.insert("user_id".to_string(), Value::String(user_id.to_string()));
     payload.insert("session_id".to_string(), json!(session_id));
     payload.insert("warnings".to_string(), json!(warnings));
+    payload.insert("metrics".to_string(), metrics);
     payload.insert("batches".to_string(), Value::Array(batch_reports));
     payload.insert("flush".to_string(), flush_payload);
     payload.insert("verification".to_string(), verification);

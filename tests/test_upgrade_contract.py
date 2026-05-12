@@ -41,7 +41,7 @@ def test_readme_uses_current_mcp_13_badge_and_no_stale_mcp_9_wording():
     assert "MCP-13%20tools" in text or "MCP-13 tools" in text
 
 
-def test_readme_documents_python_context_engine_upgrade_and_rust_boundary():
+def test_readme_documents_provider_context_engine_and_rust_parity():
     text = (ROOT / "README.md").read_text(encoding="utf-8")
 
     for required in [
@@ -50,7 +50,7 @@ def test_readme_documents_python_context_engine_upgrade_and_rust_boundary():
         "include_recent_raw",
         "agent_trajectory_on_session_end",
         "prefetch_cache_enabled",
-        "Python context-engine upgrade is not yet Rust parity",
+        "Rust context-engine parity is current",
     ]:
         assert required in text
 

@@ -1,8 +1,11 @@
 use everos_hermes_rust::client::{DEFAULT_BASE_URL, DEFAULT_MEMORY_TYPES, EverOSClient};
+use everos_hermes_rust::context_assembler::{ContextAssemblyConfig, assemble_everos_context};
 use everos_hermes_rust::env::{get_env, read_dotenv};
 use everos_hermes_rust::formatting::{format_search_context, strip_vectors};
 use everos_hermes_rust::mcp::TOOL_NAMES;
+use everos_hermes_rust::policy::{should_skip_capture, should_skip_recall, stable_query_key};
 use everos_hermes_rust::provider::{EverOSProvider, ProviderInit};
+use everos_hermes_rust::trajectory::build_agent_trajectory_messages;
 use serde_json::{Value, json};
 use std::fs;
 use std::io::{Read, Write};
@@ -113,6 +116,50 @@ fn sequenced_request_server(
                     let body = responses[requests.len()].to_string();
                     let reply = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    stream.write_all(reply.as_bytes()).unwrap();
+                    requests.push(raw);
+                    deadline = Instant::now() + idle_timeout;
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(err) => panic!("test server accept failed: {err}"),
+            }
+        }
+        requests
+    });
+    (format!("http://{addr}"), handle)
+}
+
+fn sequenced_status_request_server(
+    responses: Vec<(u16, Value)>,
+    idle_timeout_ms: u64,
+) -> (String, thread::JoinHandle<Vec<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = thread::spawn(move || {
+        let mut requests = Vec::new();
+        let idle_timeout = Duration::from_millis(idle_timeout_ms);
+        let mut deadline = Instant::now() + idle_timeout;
+        while requests.len() < responses.len() && Instant::now() < deadline {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let raw = read_http_request(&mut stream);
+                    let (status, response) = &responses[requests.len()];
+                    let body = response.to_string();
+                    let reason = if *status >= 400 {
+                        "Internal Server Error"
+                    } else {
+                        "OK"
+                    };
+                    let reply = format!(
+                        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        status,
+                        reason,
                         body.len(),
                         body
                     );
@@ -499,7 +546,7 @@ fn mcp_save_tool_returns_queue_semantics_when_flush_disabled() {
 }
 
 #[test]
-fn mcp_tool_name_constant_matches_expected_nine_tools() {
+fn mcp_tool_name_constant_matches_expected_thirteen_tools() {
     assert_eq!(
         TOOL_NAMES.as_slice(),
         &[
@@ -825,7 +872,8 @@ fn mcp_import_and_verify_dry_run_reports_warnings_without_http() {
             "messages":[
                 {"role":"user","content":"Alpha","timestamp":1},
                 {"role":"user","content":"Alpha","timestamp":2},
-                {"role":"tool","content":"missing id","timestamp":3}
+                {"role":"tool","content":"missing id","timestamp":3},
+                {"role":"user","content":"ISO timestamp","timestamp":"2026-05-13T00:00:00Z"}
             ],
             "verification_queries":["Alpha"]
         }),
@@ -836,8 +884,16 @@ fn mcp_import_and_verify_dry_run_reports_warnings_without_http() {
     assert_eq!(response["ok"], true);
     assert_eq!(response["workflow"], "import_and_verify");
     assert_eq!(response["status"], "dry_run");
-    assert_eq!(response["input_count"], 3);
+    assert_eq!(response["input_count"], 4);
     assert_eq!(response["queued_count"], 0);
+    assert_eq!(response["metrics"]["total_messages"], 4);
+    assert_eq!(response["metrics"]["batch_count"], 1);
+    assert!(
+        response["metrics"]["estimated_payload_bytes"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
     let warnings = response["warnings"].as_array().unwrap();
     assert!(
         warnings
@@ -849,6 +905,12 @@ fn mcp_import_and_verify_dry_run_reports_warnings_without_http() {
             .iter()
             .any(|warning| warning.as_str().unwrap().contains("tool_call_id"))
     );
+    assert!(warnings.iter().any(|warning| {
+        warning
+            .as_str()
+            .unwrap()
+            .contains("timestamp must be an integer epoch millisecond value")
+    }));
 
     remove_env("EVEROS_API_KEY");
     remove_env("EVEROS_USER_ID");
@@ -908,6 +970,103 @@ fn mcp_batch_ingest_batches_flushes_and_verifies() {
             .unwrap()
             .len(),
         1
+    );
+
+    remove_env("EVEROS_API_KEY");
+    remove_env("EVEROS_USER_ID");
+    remove_env("EVEROS_BASE_URL");
+}
+
+#[test]
+fn mcp_batch_ingest_splits_cloud_403_batches() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let (base_url, handle) = sequenced_status_request_server(
+        vec![
+            (403, json!({"detail":"Forbidden"})),
+            (
+                200,
+                json!({"data":{"status":"queued","task_id":"task-left"}}),
+            ),
+            (
+                200,
+                json!({"data":{"status":"queued","task_id":"task-right"}}),
+            ),
+        ],
+        500,
+    );
+    set_env("EVEROS_API_KEY", "test-key");
+    set_env("EVEROS_USER_ID", "u1");
+    set_env("EVEROS_BASE_URL", &base_url);
+
+    let raw = everos_hermes_rust::mcp::call_tool(
+        "everos_batch_ingest",
+        json!({
+            "session_id":"sess-split",
+            "batch_size":4,
+            "flush":false,
+            "messages":[
+                {"role":"user","content":"Alpha long","timestamp":1},
+                {"role":"assistant","content":"Beta long","timestamp":2},
+                {"role":"user","content":"Gamma long","timestamp":3},
+                {"role":"assistant","content":"Delta long","timestamp":4}
+            ]
+        }),
+    )
+    .unwrap();
+    let response: Value = serde_json::from_str(&raw).unwrap();
+    let requests = handle.join().unwrap();
+
+    assert_eq!(response["ok"], true);
+    assert_eq!(response["workflow"], "batch_ingest");
+    assert_eq!(response["status"], "queued");
+    assert_eq!(response["input_count"], 4);
+    assert_eq!(response["queued_count"], 4);
+    assert_eq!(response["failed_count"], 0);
+    assert_eq!(response["split_count"], 1);
+    assert_eq!(response["batches"].as_array().unwrap().len(), 3);
+    assert_eq!(response["batches"][0]["split_reason"], "cloud_403");
+    assert_eq!(response["batches"][1]["split_from"], 0);
+    assert_eq!(response["batches"][2]["split_from"], 0);
+    assert!(
+        response["batches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|batch| { batch["payload_bytes"].as_u64().unwrap_or(0) > 0 })
+    );
+    assert!(
+        response["suggested_next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| {
+                action
+                    .as_str()
+                    .unwrap()
+                    .contains("adaptive batch splitting")
+            })
+    );
+    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        parse_http_body(&requests[0])["messages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        4
+    );
+    assert_eq!(
+        parse_http_body(&requests[1])["messages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        parse_http_body(&requests[2])["messages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
     );
 
     remove_env("EVEROS_API_KEY");
@@ -1317,6 +1476,501 @@ fn provider_sync_turn_capture_agent_memory_posts_personal_and_agent_endpoints() 
             .as_str()
             .unwrap()
             .contains("Task request:")
+    );
+
+    remove_env("HERMES_HOME");
+}
+
+#[test]
+fn rust_context_engine_policy_trajectory_match_python_contract() {
+    let config = json!({
+        "max_context_chars": 12_000,
+        "agent_recall": true,
+        "include_recent_raw": true,
+        "recent_raw_top_k": 4,
+        "min_recall_query_chars": 8
+    });
+    assert_eq!(
+        should_skip_recall("ok", "sess-1", &config),
+        (true, "trivial_query".to_string())
+    );
+    assert_eq!(
+        should_skip_recall("继续下一步实验", "sess-1", &config),
+        (false, String::new())
+    );
+    assert_eq!(
+        should_skip_capture("thanks", "done", "sess-1", &config),
+        (true, "trivial_turn".to_string())
+    );
+    let cache_key = stable_query_key(" Debug   Cache ", "sess-1", &config);
+    assert_eq!(cache_key.len(), 64);
+    assert_eq!(
+        cache_key,
+        stable_query_key("debug cache", "sess-1", &config)
+    );
+
+    let messages = vec![
+        json!({"role":"system","content":"do not export"}),
+        json!({"role":"user","timestamp":1,"content":"run diagnostics <everos-context>old</everos-context> token=very-secret"}),
+        json!({"role":"assistant","timestamp":2,"content":"","tool_calls":[{"id":"call-1","function":{"name":"diagnose","arguments":"{\"api_key\":\"hidden\"}"}}]}),
+        json!({"role":"tool","timestamp":3,"tool_call_id":"call-1","content":"diagnostics ok"}),
+        json!({"role":"tool","timestamp":4,"content":"missing id"}),
+    ];
+    let built = build_agent_trajectory_messages(
+        &messages,
+        "sess-traj",
+        "pre_compress",
+        Some(10_000),
+        80,
+        2_000,
+        2_000,
+        6_000,
+        false,
+    );
+    let rebuilt = build_agent_trajectory_messages(
+        &messages,
+        "sess-traj",
+        "pre_compress",
+        Some(10_000),
+        80,
+        2_000,
+        2_000,
+        6_000,
+        false,
+    );
+    assert_eq!(built.input_count, 5);
+    assert_eq!(built.output_count, 3);
+    assert_eq!(built.dropped_count, 2);
+    assert_eq!(built.fingerprint, rebuilt.fingerprint);
+    assert_eq!(built.messages[0]["source"], "pre_compress");
+    assert!(
+        built.messages[0]["message_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("eh_")
+    );
+    assert!(
+        !built.messages[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("everos-context")
+    );
+    assert!(
+        !built.messages[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("very-secret")
+    );
+    assert_eq!(
+        built.messages[1]["content"],
+        "[Assistant requested tool calls]"
+    );
+    assert_eq!(built.messages[1]["tool_calls"][0]["id"], "call-1");
+    assert_eq!(built.messages[2]["tool_call_id"], "call-1");
+}
+
+#[test]
+fn rust_context_assembler_renders_python_v2_sections_and_generic_agent_memory() {
+    let cfg = ContextAssemblyConfig {
+        max_context_chars: 12_000,
+        profile_max_items: 3,
+        agent_skills_max_items: 4,
+        agent_cases_max_items: 4,
+        episodic_max_items: 6,
+        recent_raw_top_k: 4,
+        min_score: 0.0,
+    };
+    let assembled = assemble_everos_context(
+        Some(&json!({"data": {
+            "profiles": [{"id":"profile-1","profile_data":{"explicit_info":["User verifies every phase"]},"score":1.0}],
+            "agent_skills": [{"id":"skill-1","name":"timeout recovery","description":"poll status before retry","score":0.9}],
+            "agent_memory": [{"id":"generic-1","task_intent":"debug cache","approach":"reuse cached result","score":0.8}],
+            "episodes": [{"id":"episode-1","subject":"cache","summary":"Cache should avoid duplicate search","score":0.7}]
+        }})),
+        Some(
+            &json!({"data": {"raw_messages": [{"id":"raw-1","role":"user","content":"recent raw clue","score":0.6}]}}),
+        ),
+        "debug cache",
+        &cfg,
+        "prefetch",
+    );
+    let text = assembled.text;
+    assert!(text.starts_with("<everos-context version=\"2\" source=\"prefetch\">"));
+    let profile_idx = text.find("<profile>").unwrap();
+    let skill_idx = text.find("<agent_skills>").unwrap();
+    let case_idx = text.find("<agent_cases>").unwrap();
+    let episodic_idx = text.find("<episodic>").unwrap();
+    let raw_idx = text.find("<recent_context>").unwrap();
+    assert!(
+        profile_idx < skill_idx
+            && skill_idx < case_idx
+            && case_idx < episodic_idx
+            && episodic_idx < raw_idx
+    );
+    assert!(text.contains("User verifies every phase"));
+    assert!(text.contains("timeout recovery: poll status before retry"));
+    assert!(text.contains("[agent_memory] debug cache: reuse cached result"));
+    assert!(text.contains("cache: Cache should avoid duplicate search [score=0.70]"));
+    assert!(text.contains("user: recent raw clue"));
+    assert_eq!(assembled.included_counts["recent_context"], 1);
+}
+
+#[test]
+fn provider_prefetch_uses_v2_assembler_cache_agent_and_session_scoped_raw() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let home = temp_home("provider_context_engine");
+    let (base_url, handle) = sequenced_request_server(
+        vec![
+            json!({"data":{"profiles":[{"id":"profile-1","profile_data":{"explicit_info":["User verifies every phase"]},"score":1.0}],"episodes":[{"id":"episode-1","subject":"cache","summary":"Cache should avoid duplicate search","score":0.7}]}}),
+            json!({"data":{"agent_cases":[{"id":"case-1","task_intent":"debug cache","approach":"reuse cached result","score":0.9}]}}),
+            json!({"data":{"raw_messages":[{"id":"raw-1","role":"user","content":"recent raw clue","score":0.8}]}}),
+        ],
+        500,
+    );
+    fs::write(
+        home.join(".env"),
+        format!("EVEROS_API_KEY=test-key\nEVEROS_USER_ID=u1\nEVEROS_BASE_URL={base_url}\n"),
+    )
+    .unwrap();
+    fs::write(
+        home.join("everos.json"),
+        json!({"agent_recall":true,"include_recent_raw":true,"prefetch_cache_ttl_seconds":90})
+            .to_string(),
+    )
+    .unwrap();
+    remove_env("EVEROS_API_KEY");
+    remove_env("EVEROS_USER_ID");
+    remove_env("EVEROS_BASE_URL");
+    set_env("HERMES_HOME", home.to_str().unwrap());
+
+    let provider = EverOSProvider::initialize(ProviderInit::for_test("sess-1", &home)).unwrap();
+    let context = provider.prefetch("debug cache", Some("sess-2"));
+    let cached = provider.prefetch("debug cache", Some("sess-2"));
+    let requests = handle.join().unwrap();
+    let bodies: Vec<Value> = requests.iter().map(|raw| parse_http_body(raw)).collect();
+
+    assert_eq!(context, cached);
+    assert!(context.starts_with("<everos-context version=\"2\" source=\"prefetch\">"));
+    assert!(context.contains("User verifies every phase"));
+    assert!(context.contains("reuse cached result"));
+    assert!(context.contains("recent raw clue"));
+    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        bodies[0]["memory_types"],
+        json!(["episodic_memory", "profile"])
+    );
+    assert_eq!(bodies[1]["memory_types"], json!(["agent_memory"]));
+    assert_eq!(bodies[2]["memory_types"], json!(["raw_message"]));
+    assert_eq!(bodies[0].get("session_id"), None);
+    assert_eq!(bodies[1].get("session_id"), None);
+    assert_eq!(bodies[2]["filters"]["AND"][0]["session_id"], "sess-2");
+
+    remove_env("HERMES_HOME");
+}
+
+#[test]
+fn provider_sync_turn_adds_personal_message_ids_and_respects_agent_summary_flag() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let home = temp_home("provider_sync_ids");
+    let (base_url, handle) =
+        n_request_server(json!({"data":{"status":"queued","task_id":"task-sync"}}), 1);
+    fs::write(
+        home.join(".env"),
+        format!("EVEROS_API_KEY=test-key\nEVEROS_USER_ID=u1\nEVEROS_BASE_URL={base_url}\n"),
+    )
+    .unwrap();
+    fs::write(
+        home.join("everos.json"),
+        json!({"capture_agent_memory":true,"agent_summary_after_turn":false,"flush_after_turn":false}).to_string(),
+    )
+    .unwrap();
+    remove_env("EVEROS_API_KEY");
+    remove_env("EVEROS_USER_ID");
+    remove_env("EVEROS_BASE_URL");
+    set_env("HERMES_HOME", home.to_str().unwrap());
+
+    let provider = EverOSProvider::initialize(ProviderInit::for_test("sess-1", &home)).unwrap();
+    provider
+        .sync_turn("remember deterministic ids", "Noted.", Some("sess-2"))
+        .unwrap();
+    let requests = handle.join().unwrap();
+    let body = parse_http_body(&requests[0]);
+    let messages = body["messages"].as_array().unwrap();
+
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].starts_with("POST /api/v1/memories "));
+    assert_eq!(body["session_id"], "sess-2");
+    assert_eq!(messages[0]["role"], "user");
+    assert_eq!(messages[1]["role"], "assistant");
+    assert!(
+        messages[0]["message_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("eh_")
+    );
+    assert!(
+        messages[1]["message_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("eh_")
+    );
+
+    remove_env("HERMES_HOME");
+}
+
+#[test]
+fn provider_pre_compress_and_session_end_capture_structured_trajectory_with_dedupe() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let home = temp_home("provider_precompress");
+    let (base_url, handle) = n_request_server(
+        json!({"data":{"status":"queued","task_id":"task-agent"}}),
+        2,
+    );
+    fs::write(
+        home.join(".env"),
+        format!("EVEROS_API_KEY=test-key\nEVEROS_USER_ID=u1\nEVEROS_BASE_URL={base_url}\n"),
+    )
+    .unwrap();
+    fs::write(
+        home.join("everos.json"),
+        json!({"capture_agent_memory":true}).to_string(),
+    )
+    .unwrap();
+    remove_env("EVEROS_API_KEY");
+    remove_env("EVEROS_USER_ID");
+    remove_env("EVEROS_BASE_URL");
+    set_env("HERMES_HOME", home.to_str().unwrap());
+
+    let provider = EverOSProvider::initialize(ProviderInit::for_test("sess-1", &home)).unwrap();
+    let messages = vec![
+        json!({"role":"user","timestamp":1,"content":"run diagnostics"}),
+        json!({"role":"assistant","timestamp":2,"content":"","tool_calls":[{"id":"call-1","function":{"name":"diagnose"}}]}),
+        json!({"role":"tool","timestamp":3,"tool_call_id":"call-1","content":"diagnostics ok"}),
+        json!({"role":"assistant","timestamp":4,"content":"verified"}),
+    ];
+
+    let summary = provider.on_pre_compress(&messages).unwrap();
+    provider.on_session_end(&messages).unwrap();
+    let requests = handle.join().unwrap();
+    let first_body = parse_http_body(&requests[0]);
+
+    assert!(summary.contains("EverOS captured 4 agent trajectory messages for session sess-1"));
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0].starts_with("POST /api/v1/memories/agent "));
+    assert!(requests[1].starts_with("POST /api/v1/memories/flush "));
+    assert_eq!(first_body["messages"][1]["tool_calls"][0]["id"], "call-1");
+    assert_eq!(first_body["messages"][2]["tool_call_id"], "call-1");
+    assert!(
+        first_body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|message| message["source"] == "pre_compress")
+    );
+
+    remove_env("HERMES_HOME");
+}
+
+#[test]
+fn provider_delegation_writes_child_session_id_prefix_and_agent_flush() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let home = temp_home("provider_delegation");
+    let (base_url, handle) = n_request_server(
+        json!({"data":{"status":"queued","task_id":"task-delegation"}}),
+        2,
+    );
+    fs::write(
+        home.join(".env"),
+        format!("EVEROS_API_KEY=test-key\nEVEROS_USER_ID=u1\nEVEROS_BASE_URL={base_url}\n"),
+    )
+    .unwrap();
+    fs::write(
+        home.join("everos.json"),
+        json!({"capture_agent_memory":true}).to_string(),
+    )
+    .unwrap();
+    remove_env("EVEROS_API_KEY");
+    remove_env("EVEROS_USER_ID");
+    remove_env("EVEROS_BASE_URL");
+    set_env("HERMES_HOME", home.to_str().unwrap());
+
+    let provider = EverOSProvider::initialize(ProviderInit::for_test("sess-1", &home)).unwrap();
+    provider
+        .on_delegation(
+            "investigate failing test",
+            "fixed with a regression test",
+            Some("child-42"),
+        )
+        .unwrap();
+    let requests = handle.join().unwrap();
+    let body = parse_http_body(&requests[0]);
+    let assistant = &body["messages"][1];
+
+    assert!(requests[0].starts_with("POST /api/v1/memories/agent "));
+    assert!(requests[1].starts_with("POST /api/v1/memories/agent/flush "));
+    assert!(
+        assistant["content"]
+            .as_str()
+            .unwrap()
+            .starts_with("[delegation child_session_id=child-42]")
+    );
+    assert_eq!(assistant["child_session_id"], "child-42");
+
+    remove_env("HERMES_HOME");
+}
+
+#[test]
+fn provider_session_end_still_flushes_personal_after_agent_write_error() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let home = temp_home("provider_session_end_error");
+    let (base_url, handle) = sequenced_status_request_server(
+        vec![
+            (500, json!({"error":"agent write failed"})),
+            (200, json!({"ok":true})),
+        ],
+        800,
+    );
+    fs::write(
+        home.join(".env"),
+        format!("EVEROS_API_KEY=test-key\nEVEROS_USER_ID=u1\nEVEROS_BASE_URL={base_url}\n"),
+    )
+    .unwrap();
+    fs::write(
+        home.join("everos.json"),
+        json!({"capture_agent_memory":true}).to_string(),
+    )
+    .unwrap();
+    remove_env("EVEROS_API_KEY");
+    remove_env("EVEROS_USER_ID");
+    remove_env("EVEROS_BASE_URL");
+    set_env("HERMES_HOME", home.to_str().unwrap());
+
+    let provider = EverOSProvider::initialize(ProviderInit::for_test("sess-err", &home)).unwrap();
+    provider
+        .on_session_end(&[json!({"role":"assistant","content":"final summary"})])
+        .unwrap();
+    let requests = handle.join().unwrap();
+
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0].starts_with("POST /api/v1/memories/agent "));
+    assert!(requests[1].starts_with("POST /api/v1/memories/flush "));
+
+    remove_env("HERMES_HOME");
+}
+
+#[test]
+fn provider_cli_routes_messages_precompress_session_end_and_delegation() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let home = temp_home("provider_cli_hooks");
+    let queued = json!({"data":{"status":"queued","task_id":"task-cli"}});
+    let (base_url, handle) = sequenced_request_server(vec![queued; 6], 1200);
+    fs::write(
+        home.join(".env"),
+        format!("EVEROS_API_KEY=test-key\nEVEROS_USER_ID=u1\nEVEROS_BASE_URL={base_url}\n"),
+    )
+    .unwrap();
+    fs::write(
+        home.join("everos.json"),
+        json!({"capture_agent_memory":true}).to_string(),
+    )
+    .unwrap();
+    remove_env("EVEROS_API_KEY");
+    remove_env("EVEROS_USER_ID");
+    remove_env("EVEROS_BASE_URL");
+    set_env("HERMES_HOME", home.to_str().unwrap());
+
+    let bin = env!("CARGO_BIN_EXE_everos-hermes-rust");
+    let state = json!({
+        "session_id":"sess-cli",
+        "hermes_home": home.to_string_lossy(),
+        "platform":"cli",
+        "agent_identity":"default"
+    })
+    .to_string();
+    let messages_json = json!([
+        {"role":"user","timestamp":1,"content":"run cli hook test"},
+        {"role":"assistant","timestamp":2,"content":"done"}
+    ])
+    .to_string();
+
+    let run_provider = |args: Vec<String>| {
+        Command::new(bin)
+            .args(args)
+            .env_remove("EVEROS_API_KEY")
+            .env_remove("EVEROS_USER_ID")
+            .env_remove("EVEROS_BASE_URL")
+            .env("HERMES_HOME", &home)
+            .output()
+            .unwrap()
+    };
+
+    let precompress = run_provider(vec![
+        "provider".into(),
+        "on-pre-compress".into(),
+        "--state-json".into(),
+        state.clone(),
+        "--messages-json".into(),
+        messages_json.clone(),
+    ]);
+    assert!(
+        precompress.status.success(),
+        "{}",
+        String::from_utf8_lossy(&precompress.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&precompress.stdout)
+            .contains("EverOS captured 2 agent trajectory messages")
+    );
+
+    let session_end = run_provider(vec![
+        "provider".into(),
+        "on-session-end".into(),
+        "--state-json".into(),
+        state.clone(),
+        "--messages-json".into(),
+        messages_json,
+    ]);
+    assert!(
+        session_end.status.success(),
+        "{}",
+        String::from_utf8_lossy(&session_end.stderr)
+    );
+
+    let delegation = run_provider(vec![
+        "provider".into(),
+        "on-delegation".into(),
+        "--state-json".into(),
+        state,
+        "--task".into(),
+        "investigate child task".into(),
+        "--result".into(),
+        "fixed in subagent".into(),
+        "--child-session-id".into(),
+        "child-cli".into(),
+    ]);
+    assert!(
+        delegation.status.success(),
+        "{}",
+        String::from_utf8_lossy(&delegation.stderr)
+    );
+
+    let requests = handle.join().unwrap();
+    assert_eq!(requests.len(), 6);
+    assert!(requests[0].starts_with("POST /api/v1/memories/agent "));
+    assert!(requests[1].starts_with("POST /api/v1/memories/agent "));
+    assert!(requests[2].starts_with("POST /api/v1/memories/agent/flush "));
+    assert!(requests[3].starts_with("POST /api/v1/memories/flush "));
+    assert!(requests[4].starts_with("POST /api/v1/memories/agent "));
+    assert!(requests[5].starts_with("POST /api/v1/memories/agent/flush "));
+    assert_eq!(
+        parse_http_body(&requests[1])["messages"][0]["source"],
+        "session_end"
+    );
+    assert!(
+        parse_http_body(&requests[4])["messages"][1]["content"]
+            .as_str()
+            .unwrap()
+            .starts_with("[delegation child_session_id=child-cli]")
     );
 
     remove_env("HERMES_HOME");

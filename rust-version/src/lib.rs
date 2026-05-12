@@ -6,8 +6,11 @@
 
 pub mod cli;
 pub mod client;
+pub mod context_assembler;
 pub mod env;
 pub mod formatting;
 pub mod mcp;
+pub mod policy;
 pub mod provider;
+pub mod trajectory;
 pub mod workflows;

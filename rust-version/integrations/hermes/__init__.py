@@ -63,6 +63,9 @@ except Exception:  # pragma: no cover - used outside Hermes during smoke tests
         def on_memory_write(self, action: str, target: str, content: str, metadata: dict[str, Any] | None = None) -> None:
             return None
 
+        def on_delegation(self, task: str, result: str, *, child_session_id: str = "", **kwargs: Any) -> None:
+            return None
+
         def shutdown(self) -> None:
             return None
 
@@ -199,10 +202,39 @@ class EverOSRustMemoryProvider(MemoryProvider):
         ])
 
     def on_session_end(self, messages: list[dict[str, Any]]) -> None:
-        self._run(["provider", "on-session-end", "--state-json", self._state_json()], timeout=20, default="")
+        self._run([
+            "provider",
+            "on-session-end",
+            "--state-json",
+            self._state_json(),
+            "--messages-json",
+            json.dumps(messages or [], ensure_ascii=False, separators=(",", ":")),
+        ], timeout=20, default="")
 
     def on_pre_compress(self, messages: list[dict[str, Any]]) -> str:
-        return ""
+        return self._run([
+            "provider",
+            "on-pre-compress",
+            "--state-json",
+            self._state_json(),
+            "--messages-json",
+            json.dumps(messages or [], ensure_ascii=False, separators=(",", ":")),
+        ], timeout=20, default="")
+
+    def on_delegation(self, task: str, result: str, *, child_session_id: str = "", **kwargs: Any) -> None:
+        args = [
+            "provider",
+            "on-delegation",
+            "--state-json",
+            self._state_json(),
+            "--task",
+            task,
+            "--result",
+            result,
+        ]
+        if child_session_id:
+            args.extend(["--child-session-id", child_session_id])
+        self._spawn(args)
 
     def on_session_switch(self, new_session_id: str, *, parent_session_id: str = "", reset: bool = False, **kwargs: Any) -> None:
         if new_session_id:

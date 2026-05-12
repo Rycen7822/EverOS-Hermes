@@ -14,17 +14,19 @@ The Rust version implements the same user-facing surfaces as the Python version:
 
 - EverOS REST client with Authorization-header auth and JSON request/response handling.
 - Hermes-style dotenv lookup: process env -> `$HERMES_HOME/.env` -> `~/.hermes/.env`.
-- Search-context formatting for episodes, profile facts, agent cases, and agent skills.
+- Search-context formatting plus the provider context engine: `trajectory`, `policy`, and budgeted `context_assembler` modules match the latest Python implementation.
 - Hermes memory-provider core behavior:
   - `is_available`
   - `initialize`
   - `system_prompt_block`
-  - `prefetch`
-  - `sync_turn`
+  - `prefetch` with policy skip, stable cache keys, ordered v2 context assembly, agent recall merge, and opt-in session-scoped recent raw recall
+  - `sync_turn` with deterministic personal `message_id` values and optional agent summary capture
   - `on_memory_write`
-  - `on_session_end`
-  - five explicit provider tools
-- stdio MCP server with the same nine EverOS tools.
+  - `on_session_end` with structured agent trajectory capture before personal flush; personal flush still runs if agent capture fails
+  - `on_pre_compress` with capped structured trajectory capture and no flush
+  - `on_delegation` with `[delegation child_session_id=...]` agent trajectory capture
+  - eight explicit provider tools
+- stdio MCP server with the same thirteen EverOS tools.
 - A thin Python Hermes plugin shim, because Hermes' plugin API loads Python entrypoints. The shim delegates behavior to the Rust binary.
 
 The original Python package remains in the repository root and is not removed.
@@ -35,11 +37,14 @@ The original Python package remains in the repository root and is not removed.
 rust-version/
   Cargo.toml
   src/
-    client.rs       # EverOS REST client
-    env.rs          # Hermes dotenv lookup
-    formatting.rs   # EverOS result -> prompt context formatting
-    provider.rs     # Rust Hermes memory-provider core
-    mcp.rs          # stdio MCP JSON-RPC server and tool handlers
+    client.rs             # EverOS REST client
+    context_assembler.rs  # v2 provider context assembly and budget trimming
+    env.rs                # Hermes dotenv lookup
+    formatting.rs         # EverOS result -> prompt context formatting helpers
+    policy.rs             # recall/capture skip rules and stable cache keys
+    provider.rs           # Rust Hermes memory-provider core
+    trajectory.rs         # structured agent trajectory normalization/dedupe ids
+    mcp.rs                # stdio MCP JSON-RPC server and tool handlers
     cli.rs          # binary CLI and provider helper commands
     main.rs
   integrations/hermes/
@@ -188,12 +193,14 @@ Even when `include_original_data=true`, vector fields are stripped by default to
 | `everos_get_task_status` | Check an async extraction task. | Yes |
 | `everos_get_settings` | Read EverOS memory-space settings. | Yes |
 | `everos_update_settings` | Update whitelisted EverOS settings fields and return a before/after diff. | No |
-| `everos_batch_ingest` | Dry-run or execute batched ingest, optionally flush, and return per-batch plus verification status. | No |
+| `everos_batch_ingest` | Dry-run or execute batched ingest, optionally flush, and return per-batch plus verification status; workflow reports metrics and adaptively splits Cloud 403 batches. | No |
 | `everos_verify_session_ingest` | Read-only search verification for an existing user/session/scope. | Yes |
 | `everos_save_and_verify` | Queue one message, optionally flush, then verify recall with one or more search queries. | No |
-| `everos_import_and_verify` | Batch-import messages or a local file with dry-run validation, optional flush, and verification report. | No |
+| `everos_import_and_verify` | Batch-import messages or a local file with dry-run validation, optional flush, verification report, metrics, and adaptive split-on-403 behavior. | No |
 
 Rust parity follows the Cloud v1 contract in the repository root: personal and agent memory are supported, while group/sender/multimodal storage endpoints stay out of scope. Search memory types are `episodic_memory`, `profile`, `raw_message`, and `agent_memory`; get memory types are `episodic_memory`, `profile`, `agent_case`, and `agent_skill`. Public numeric arguments are validated rather than silently coerced: invalid `top_k`, `page`, or `page_size` fails before HTTP, and schema-valid `radius=0` is preserved.
+
+Import workflows validate supplied `messages[].timestamp` values locally as integer epoch milliseconds, report dry-run `metrics` for message counts/content length/payload bytes, and split multi-message batches when EverOS Cloud returns `403 Forbidden`. Split reports include `split_count`, `payload_bytes`, `split_reason`, and a recommendation to use smaller batches for long messages.
 
 ## Use as Hermes memory provider
 
@@ -241,7 +248,7 @@ Restart Hermes CLI/WebUI/gateway after changing the provider. MCP tools and the 
 | `everos_memory_import_and_verify` | Dry-run or execute batched message/file import with warnings, per-batch status, optional flush, and verification queries. |
 | `everos_memory_verify_session` | Read-only verification helper for an existing user/session/scope using sample search queries. |
 
-Advanced non-secret provider settings remain compatible with the Python version and live in `$HERMES_HOME/everos.json`.
+Advanced non-secret provider settings remain compatible with the Python version and live in `$HERMES_HOME/everos.json`. Context-engine fields shared with Python include `max_context_chars`, `include_recent_raw`, `recent_raw_top_k`, `profile_max_items`, `agent_skills_max_items`, `agent_cases_max_items`, `episodic_max_items`, `min_score`, `min_recall_query_chars`, `prefetch_cache_enabled`, `prefetch_cache_ttl_seconds`, `agent_trajectory_on_session_end`, `agent_trajectory_on_pre_compress`, `agent_trajectory_on_delegation`, `agent_summary_after_turn`, `agent_max_messages`, `agent_max_message_chars`, `agent_max_tool_result_chars`, `agent_max_payload_chars`, and `agent_dedupe_entries`.
 
 ## Provider CLI helpers
 
@@ -258,6 +265,14 @@ The Python shim calls these commands internally, but they are useful for debuggi
 ./target/release/everos-hermes-rust provider prefetch \
   --state-json '{"session_id":"s1","hermes_home":"/home/xu/.hermes","platform":"cli","agent_identity":"default"}' \
   --query 'coffee preference'
+
+# Capture agent trajectory before compression or at session end
+./target/release/everos-hermes-rust provider on-pre-compress \
+  --state-json '{"session_id":"s1","hermes_home":"/home/xu/.hermes","platform":"cli","agent_identity":"default"}' \
+  --messages-json '[{"role":"user","content":"debug timeout"},{"role":"assistant","content":"fixed"}]'
+./target/release/everos-hermes-rust provider on-session-end \
+  --state-json '{"session_id":"s1","hermes_home":"/home/xu/.hermes","platform":"cli","agent_identity":"default"}' \
+  --messages-json '[{"role":"assistant","content":"final summary"}]'
 ```
 
 ## Development and verification
@@ -275,8 +290,11 @@ The test suite includes:
 - EverOS client HTTP request construction through a local TCP mock server;
 - search default/filter parity;
 - context formatter parity;
+- v2 context assembler / policy / structured trajectory parity;
 - provider availability/user-id/tool-schema parity;
 - provider save tool behavior;
+- provider prefetch cache, session-scoped recent raw recall, deterministic `message_id`, `on_pre_compress`, `on_session_end`, and `on_delegation` parity;
+- provider CLI hook routing for `--messages-json` and delegation child session ids;
 - vector stripping / `include_vectors` parity for search;
 - real binary stdio MCP initialize + tools/list smoke test.
 

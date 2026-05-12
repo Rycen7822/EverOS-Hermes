@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .client import DEFAULT_MEMORY_TYPES, EverOSClient, EverOSTimeoutError
-from .schemas import normalize_scope
+from .schemas import normalize_scope, validate_messages
 
 SEARCH_KEYS = (
     "episodes",
@@ -168,6 +168,9 @@ def normalize_import_messages(messages: list[dict[str, Any]] | None, file_path: 
         item["role"] = str(item.get("role") or default_role)
         item.setdefault("timestamp", now_ms())
         item["content"] = str(item.get("content") or "").strip()
+        timestamp = item.get("timestamp")
+        if not isinstance(timestamp, int) or isinstance(timestamp, bool):
+            warnings.append(f"messages[{index}].timestamp must be an integer epoch millisecond value")
         if not item["content"]:
             warnings.append(f"messages[{index}].content is empty")
         fingerprint = f"{item.get('role')}\0{item.get('content')}"
@@ -183,6 +186,31 @@ def normalize_import_messages(messages: list[dict[str, Any]] | None, file_path: 
 def batch_items(items: list[dict[str, Any]], batch_size: int) -> list[list[dict[str, Any]]]:
     size = max(1, min(100, int(batch_size or 50)))
     return [items[index : index + size] for index in range(0, len(items), size)]
+
+
+def message_metrics(messages: list[dict[str, Any]], batch_size: int) -> dict[str, Any]:
+    batches = batch_items(messages, batch_size)
+    content_lengths = [len(str(message.get("content") or "")) for message in messages]
+    batch_payload_bytes = [_json_bytes({"messages": batch}) for batch in batches]
+    return {
+        "total_messages": len(messages),
+        "batch_count": len(batches),
+        "requested_batch_size": batch_size,
+        "effective_batch_size": max(1, min(100, int(batch_size or 50))),
+        "total_content_chars": sum(content_lengths),
+        "max_content_chars": max(content_lengths, default=0),
+        "estimated_payload_bytes": _json_bytes({"messages": messages}),
+        "max_batch_payload_bytes": max(batch_payload_bytes, default=0),
+    }
+
+
+def _json_bytes(value: Any) -> int:
+    return len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
+
+
+def _is_cloud_403(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "403" in text or "forbidden" in text
 
 
 def count_hits(response: dict[str, Any]) -> int:
@@ -347,7 +375,15 @@ def import_and_verify(
 ) -> dict[str, Any]:
     resolved_scope = normalize_scope(scope)
     normalized, warnings = normalize_import_messages(messages, file_path, default_role=("assistant" if resolved_scope == "agent" else "user"))
-    validation_warnings = [warning for warning in warnings if "tool_call_id" in warning or "empty" in warning]
+    metrics = message_metrics(normalized, batch_size)
+    try:
+        validate_messages(normalized, resolved_scope)
+    except ValueError as exc:
+        message = str(exc)
+        if message not in warnings:
+            warnings.append(message)
+    fatal_tokens = ("tool_call_id", "empty", "timestamp", "role", "message_id", "1..500")
+    validation_warnings = [warning for warning in warnings if any(token in warning for token in fatal_tokens)]
     if dry_run:
         actions = ["fix warnings before importing"] if warnings else ["rerun with dry_run=false to import messages"]
         return success_envelope(
@@ -357,6 +393,7 @@ def import_and_verify(
             queued_count=0,
             failed_count=0,
             warnings=warnings,
+            metrics=metrics,
             batches=[],
             verification={"status": "verification_skipped", "verified": None, "queries": []},
             suggested_next_actions=actions,
@@ -370,12 +407,15 @@ def import_and_verify(
             queued_count=0,
             failed_count=len(normalized),
             warnings=warnings,
+            metrics=metrics,
         )
     batches = batch_items(normalized, batch_size)
     batch_reports: list[dict[str, Any]] = []
     queued_count = 0
     failed_count = 0
-    for index, batch in enumerate(batches):
+    split_count = 0
+
+    def submit_batch(batch: list[dict[str, Any]], *, batch_index: int, split_from: int | None = None) -> tuple[int, int, int]:
         try:
             result = client.add_memories(
                 user_id=user_id,
@@ -384,19 +424,52 @@ def import_and_verify(
                 async_mode=True,
                 scope=resolved_scope,
             )
-            queued_count += len(batch)
             data = result.get("data", {}) if isinstance(result, dict) else {}
             batch_reports.append({
-                "batch_index": index,
+                "batch_index": batch_index,
+                "split_from": split_from,
                 "ok": True,
                 "message_count": len(batch),
+                "payload_bytes": _json_bytes({"messages": batch}),
                 "status": data.get("status", "queued") if isinstance(data, dict) else "queued",
                 "task_id": data.get("task_id", "") if isinstance(data, dict) else "",
                 "response": result,
             })
+            return len(batch), 0, 0
         except Exception as exc:  # keep importing independent batches if possible
-            failed_count += len(batch)
-            batch_reports.append({"batch_index": index, "ok": False, "message_count": len(batch), "error": str(exc), "retryable": True})
+            if _is_cloud_403(exc) and len(batch) > 1:
+                mid = max(1, len(batch) // 2)
+                batch_reports.append({
+                    "batch_index": batch_index,
+                    "split_from": split_from,
+                    "ok": False,
+                    "message_count": len(batch),
+                    "payload_bytes": _json_bytes({"messages": batch}),
+                    "error": str(exc),
+                    "retryable": True,
+                    "split": True,
+                    "split_reason": "cloud_403",
+                    "split_into": [mid, len(batch) - mid],
+                })
+                left_queued, left_failed, left_splits = submit_batch(batch[:mid], batch_index=batch_index, split_from=batch_index)
+                right_queued, right_failed, right_splits = submit_batch(batch[mid:], batch_index=batch_index, split_from=batch_index)
+                return left_queued + right_queued, left_failed + right_failed, 1 + left_splits + right_splits
+            batch_reports.append({
+                "batch_index": batch_index,
+                "split_from": split_from,
+                "ok": False,
+                "message_count": len(batch),
+                "payload_bytes": _json_bytes({"messages": batch}),
+                "error": str(exc),
+                "retryable": True,
+            })
+            return 0, len(batch), 0
+
+    for index, batch in enumerate(batches):
+        queued, failed, splits = submit_batch(batch, batch_index=index)
+        queued_count += queued
+        failed_count += failed
+        split_count += splits
     flush_payload = {"ok": None, "status": "not_requested"}
     if flush and queued_count:
         try:
@@ -424,6 +497,8 @@ def import_and_verify(
     else:
         status = "queued"
     actions: list[str] = []
+    if split_count:
+        actions.append("Cloud 403 triggered adaptive batch splitting; keep batch_size small for long messages")
     if failed_count:
         actions.append("retry only failed batches using the batch report")
     if verification.get("verified") is False:
@@ -434,10 +509,12 @@ def import_and_verify(
         input_count=len(normalized),
         queued_count=queued_count,
         failed_count=failed_count,
+        split_count=split_count,
         scope=resolved_scope,
         user_id=user_id,
         session_id=session_id,
         warnings=warnings,
+        metrics=metrics,
         batches=batch_reports,
         flush=flush_payload,
         verification=verification,

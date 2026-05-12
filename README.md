@@ -43,7 +43,7 @@ Secrets stay in the normal Hermes secret file, so users can edit `~/.hermes/.env
 
 - **Optional Hermes memory provider**: set `memory.provider: everos` when you want automatic recall/capture hooks.
 - **Thirteen explicit MCP tools**: the nine Cloud v1 primitives plus batch/import/verify workflow helpers for safer migration and searchability checks.
-- **Python context engine**: the Python provider includes structured agent trajectory capture, a budgeted context assembler, deterministic message ids, prefetch caching, and opt-in session-scoped recent raw recall.
+- **Provider context engine**: both Python and Rust provider runtimes include structured agent trajectory capture, a budgeted context assembler, deterministic message ids, prefetch caching, and opt-in session-scoped recent raw recall.
 - **Dotenv fallback**: credential lookup is `process env` -> `$HERMES_HOME/.env` -> `~/.hermes/.env`.
 - **Two runtimes**: Python/FastMCP source implementation plus a Rust binary with a prebuilt Linux x86_64 package.
 - **Cloud v1 contract**: personal and agent memory are supported; group, sender, and multimodal object storage endpoints are explicitly out of scope. See [`docs/everos_cloud_v1_contract.md`](docs/everos_cloud_v1_contract.md).
@@ -54,7 +54,7 @@ Secrets stay in the normal Hermes secret file, so users can edit `~/.hermes/.env
 
 A Rust port is available under [`rust-version/`](rust-version/). It keeps this Python version intact while adding a native `everos-hermes-rust` binary for the stdio MCP server plus a thin Hermes Python shim that delegates provider behavior to Rust.
 
-Important boundary: this Python context-engine upgrade is not yet Rust parity. The new structured agent trajectory capture, budgeted context assembler, prefetch cache, and opt-in recent raw recall described below apply to the Python runtime unless the Rust README explicitly says otherwise.
+Rust context-engine parity is current for the provider hooks described below: `rust-version/` now includes matching `trajectory`, `policy`, and `context_assembler` modules, prefetch caching, session-scoped recent raw recall, deterministic message ids, and structured agent trajectory hooks for `sync_turn`, `on_pre_compress`, `on_session_end`, and `on_delegation`.
 
 Quick build:
 
@@ -176,7 +176,7 @@ python -m pytest tests -q
 
 If Hermes runs under a different Python environment than your shell, install the package with that interpreter instead.
 
-Python-only provider context-engine knobs can be placed in `$HERMES_HOME/everos.json` during development/debugging:
+Provider context-engine knobs shared by the Python and Rust runtimes can be placed in `$HERMES_HOME/everos.json` during development/debugging:
 
 ```json
 {
@@ -189,7 +189,10 @@ Python-only provider context-engine knobs can be placed in `$HERMES_HOME/everos.
   "agent_trajectory_on_session_end": true,
   "agent_trajectory_on_pre_compress": true,
   "agent_trajectory_on_delegation": true,
-  "agent_max_chars": 16000
+  "agent_max_messages": 80,
+  "agent_max_message_chars": 8000,
+  "agent_max_tool_result_chars": 6000,
+  "agent_max_payload_chars": 60000
 }
 ```
 
@@ -313,9 +316,11 @@ Advanced non-secret provider settings live in `$HERMES_HOME/everos.json`:
   "memory_types": ["episodic_memory", "profile"],
   "max_context_chars": 12000,
   "profile_max_items": 3,
-  "skills_max_items": 4,
-  "cases_max_items": 4,
+  "agent_skills_max_items": 4,
+  "agent_cases_max_items": 4,
   "episodic_max_items": 6,
+  "min_score": 0.0,
+  "min_recall_query_chars": 8,
   "include_recent_raw": false,
   "recent_raw_top_k": 4,
   "prefetch_cache_enabled": true,
@@ -328,9 +333,11 @@ Advanced non-secret provider settings live in `$HERMES_HOME/everos.json`:
   "agent_trajectory_on_delegation": true,
   "agent_flush_after_turn": false,
   "agent_memory_types": ["agent_memory"],
-  "agent_max_chars": 16000,
-  "agent_dedupe_entries": 128,
-  "agent_dedupe_ttl_seconds": 86400,
+  "agent_max_messages": 80,
+  "agent_max_message_chars": 8000,
+  "agent_max_tool_result_chars": 6000,
+  "agent_max_payload_chars": 60000,
+  "agent_dedupe_entries": 256,
   "timeout": 10.0
 }
 ```
@@ -391,10 +398,10 @@ The MCP server exposes thirteen tools:
 | `everos_get_task_status` | Check an asynchronous extraction task. | Yes |
 | `everos_get_settings` | Read EverOS memory-space settings. | Yes |
 | `everos_update_settings` | Update whitelisted EverOS settings fields and return a before/after diff. | No |
-| `everos_batch_ingest` | Dry-run or execute batched ingest, optionally flush, and return per-batch plus verification status. | No |
+| `everos_batch_ingest` | Dry-run or execute batched ingest, optionally flush, and return per-batch plus verification status; workflow reports metrics and adaptively splits Cloud 403 batches. | No |
 | `everos_verify_session_ingest` | Read-only search verification for an existing user/session/scope. | Yes |
 | `everos_save_and_verify` | Queue one message, optionally flush, then verify recall with one or more search queries. | No |
-| `everos_import_and_verify` | Batch-import messages or a local file with dry-run validation, optional flush, and verification report. | No |
+| `everos_import_and_verify` | Batch-import messages or a local file with dry-run validation, optional flush, verification report, metrics, and adaptive split-on-403 behavior. | No |
 
 Common search call shape:
 
@@ -421,6 +428,8 @@ Search/get type mapping is intentionally split: `search` accepts `episodic_memor
 Delete safety is stricter than raw CRUD: single delete uses `memory_id` only, while batch delete requires an explicit `user_id`, `confirm=true`, and `confirm_scope_text` exactly matching `delete user_id=<id>` or `delete user_id=<id> session_id=<session>`.
 
 Settings updates are restricted to the documented settings whitelist and return a diff. Unknown keys are rejected before the request is sent.
+
+Workflow import helpers validate `messages[].timestamp` locally: when supplied, it must be an integer epoch-millisecond value such as `1712052000000`, not an ISO datetime string. Dry-run reports `warnings` plus `metrics` (`total_messages`, batch counts, content length, and estimated payload bytes). During execution, if EverOS Cloud returns `403 Forbidden` for a multi-message batch, the helper records the failed oversized batch, splits it in half, retries the child batches, and returns `split_count`, `payload_bytes`, `split_reason`, and a small-batch recommendation in `suggested_next_actions`.
 
 ## Runtime Modes
 

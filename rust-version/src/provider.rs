@@ -1,14 +1,21 @@
 use crate::client::{DEFAULT_BASE_URL, DEFAULT_MEMORY_TYPES, EverOSClient, EverOSError};
+use crate::context_assembler::{ContextAssemblyConfig, assemble_everos_context};
 use crate::env::get_env;
 use crate::formatting::{format_search_context, pretty_json};
+use crate::policy::{should_skip_capture, should_skip_recall, stable_query_key};
+use crate::trajectory::{
+    TrajectoryBuildResult, build_agent_trajectory_messages as build_trajectory_messages,
+};
 use crate::workflows;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
@@ -28,6 +35,26 @@ pub struct ProviderConfig {
     pub agentic_timeout: f64,
     pub max_context_items: u64,
     pub timeout: f64,
+    pub max_context_chars: usize,
+    pub include_recent_raw: bool,
+    pub recent_raw_top_k: usize,
+    pub profile_max_items: usize,
+    pub agent_skills_max_items: usize,
+    pub agent_cases_max_items: usize,
+    pub episodic_max_items: usize,
+    pub min_score: f64,
+    pub min_recall_query_chars: usize,
+    pub prefetch_cache_enabled: bool,
+    pub prefetch_cache_ttl_seconds: u64,
+    pub agent_trajectory_on_session_end: bool,
+    pub agent_trajectory_on_pre_compress: bool,
+    pub agent_trajectory_on_delegation: bool,
+    pub agent_summary_after_turn: bool,
+    pub agent_max_messages: usize,
+    pub agent_max_message_chars: usize,
+    pub agent_max_tool_result_chars: usize,
+    pub agent_max_payload_chars: usize,
+    pub agent_dedupe_entries: usize,
 }
 
 impl Default for ProviderConfig {
@@ -52,6 +79,26 @@ impl Default for ProviderConfig {
             agentic_timeout: 60.0,
             max_context_items: 8,
             timeout: 10.0,
+            max_context_chars: 12_000,
+            include_recent_raw: false,
+            recent_raw_top_k: 4,
+            profile_max_items: 3,
+            agent_skills_max_items: 4,
+            agent_cases_max_items: 4,
+            episodic_max_items: 6,
+            min_score: 0.0,
+            min_recall_query_chars: 8,
+            prefetch_cache_enabled: true,
+            prefetch_cache_ttl_seconds: 90,
+            agent_trajectory_on_session_end: true,
+            agent_trajectory_on_pre_compress: true,
+            agent_trajectory_on_delegation: true,
+            agent_summary_after_turn: true,
+            agent_max_messages: 80,
+            agent_max_message_chars: 8_000,
+            agent_max_tool_result_chars: 6_000,
+            agent_max_payload_chars: 60_000,
+            agent_dedupe_entries: 256,
         }
     }
 }
@@ -81,7 +128,7 @@ impl ProviderInit {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct EverOSProvider {
     config: ProviderConfig,
     client: Option<EverOSClient>,
@@ -89,6 +136,14 @@ pub struct EverOSProvider {
     write_enabled: bool,
     user_id: String,
     session_id: String,
+    prefetch_cache: Mutex<HashMap<String, PrefetchCacheEntry>>,
+    agent_saved_fingerprints: Mutex<VecDeque<String>>,
+}
+
+#[derive(Debug, Clone)]
+struct PrefetchCacheEntry {
+    created_at: Instant,
+    text: String,
 }
 
 impl EverOSProvider {
@@ -129,6 +184,8 @@ impl EverOSProvider {
             write_enabled,
             user_id,
             session_id: init.session_id,
+            prefetch_cache: Mutex::new(HashMap::new()),
+            agent_saved_fingerprints: Mutex::new(VecDeque::new()),
         })
     }
 
@@ -146,7 +203,7 @@ impl EverOSProvider {
         )
     }
 
-    pub fn prefetch(&self, query: &str, _session_id: Option<&str>) -> String {
+    pub fn prefetch(&self, query: &str, session_id: Option<&str>) -> String {
         if !self.active
             || !self.config.auto_recall
             || self.client.is_none()
@@ -154,62 +211,88 @@ impl EverOSProvider {
         {
             return String::new();
         }
+        let sid = session_id
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(&self.session_id);
+        let config_value = self.config_value();
+        if should_skip_recall(query, sid, &config_value).0 {
+            return String::new();
+        }
+        let query: String = query.chars().take(1000).collect();
+        let cache_key = stable_query_key(&query, sid, &config_value);
+        if let Some(cached) = self.cached_prefetch(&cache_key) {
+            return cached;
+        }
         let Some(client) = &self.client else {
             return String::new();
         };
-        let query: String = query.chars().take(1000).collect();
-        let mut sections = Vec::new();
-        if let Ok(response) = client.search_memories(
-            &query,
-            Some(&self.user_id),
-            None,
-            None,
-            None,
-            &self.config.search_method,
-            Some(self.config.memory_types.clone()),
-            self.config.top_k as i64,
-            None,
-            false,
-            false,
-            Some(self.config.timeout),
-        ) {
-            let formatted =
-                format_search_context(&response, self.config.max_context_items as usize);
-            if !formatted.is_empty() {
-                sections.push(formatted);
-            }
-        }
-        let agent_response = self.config.agent_recall.then(|| {
-            client.search_memories(
+
+        let main_response = client
+            .search_memories(
                 &query,
                 Some(&self.user_id),
                 None,
                 None,
                 None,
                 &self.config.search_method,
-                Some(self.config.agent_memory_types.clone()),
+                Some(self.config.memory_types.clone()),
                 self.config.top_k as i64,
                 None,
                 false,
                 false,
-                Some(self.config.agentic_timeout),
+                Some(self.config.timeout),
             )
-        });
-        if let Some(Ok(response)) = agent_response {
-            let formatted =
-                format_search_context(&response, self.config.max_context_items as usize);
-            if !formatted.is_empty() {
-                sections.push(formatted);
-            }
-        }
-        if sections.is_empty() {
-            String::new()
+            .ok();
+        let agent_response = if self.config.agent_recall {
+            client
+                .search_memories(
+                    &query,
+                    Some(&self.user_id),
+                    None,
+                    None,
+                    None,
+                    &self.config.search_method,
+                    Some(self.config.agent_memory_types.clone()),
+                    self.config.top_k as i64,
+                    None,
+                    false,
+                    false,
+                    Some(self.config.agentic_timeout),
+                )
+                .ok()
         } else {
-            format!(
-                "<everos-context>\n{}\n</everos-context>",
-                sections.join("\n\n")
-            )
-        }
+            None
+        };
+        let raw_response = if self.config.include_recent_raw && !sid.trim().is_empty() {
+            client
+                .search_memories(
+                    &query,
+                    Some(&self.user_id),
+                    None,
+                    Some(sid),
+                    None,
+                    &self.config.search_method,
+                    Some(vec!["raw_message".to_string()]),
+                    self.config.recent_raw_top_k as i64,
+                    None,
+                    false,
+                    false,
+                    Some(self.config.timeout),
+                )
+                .ok()
+        } else {
+            None
+        };
+        let merged = merge_agent_response(main_response.as_ref(), agent_response.as_ref());
+        let assembled = assemble_everos_context(
+            Some(&merged),
+            raw_response.as_ref(),
+            &query,
+            &self.context_assembly_config(),
+            "prefetch",
+        );
+        self.store_prefetch(cache_key, assembled.text.clone());
+        assembled.text
     }
 
     pub fn tool_schemas(&self) -> Vec<Value> {
@@ -251,23 +334,20 @@ impl EverOSProvider {
         }
         let clean_user = clean_content(user_content);
         let clean_assistant = clean_content(assistant_content);
-        if clean_user.is_empty() || clean_assistant.is_empty() || is_trivial(&clean_user) {
-            return Ok(());
-        }
         let sid = session_id
             .filter(|value| !value.trim().is_empty())
             .unwrap_or(&self.session_id);
+        if should_skip_capture(&clean_user, &clean_assistant, sid, &self.config_value()).0 {
+            return Ok(());
+        }
         let now = now_ms();
-        let personal_messages = vec![
-            json!({"role":"user","timestamp":now,"content":clean_user}),
-            json!({"role":"assistant","timestamp":now + 1,"content":clean_assistant}),
-        ];
-        let agent_messages =
-            build_agent_trajectory_messages(&clean_user, &clean_assistant, now + 2);
+        let personal_messages =
+            build_personal_turn_messages(&clean_user, &clean_assistant, sid, now);
         let client = self.client.as_ref().expect("checked above");
         let write_personal = self.config.agent_capture_mode != "agent_only";
-        let write_agent =
-            self.config.capture_agent_memory && self.config.agent_capture_mode != "off";
+        let write_agent = self.config.capture_agent_memory
+            && self.config.agent_summary_after_turn
+            && self.config.agent_capture_mode != "off";
         if write_personal {
             client.add_memories_scoped(
                 &self.user_id,
@@ -281,10 +361,9 @@ impl EverOSProvider {
             }
         }
         if write_agent {
-            client.add_memories_scoped(&self.user_id, Some(sid), agent_messages, true, "agent")?;
-            if self.config.agent_flush_after_turn {
-                client.flush_memories_scoped(&self.user_id, Some(sid), "agent", None)?;
-            }
+            let agent_result =
+                self.build_agent_summary_result(&clean_user, &clean_assistant, sid, now + 2);
+            self.write_agent_trajectory(&agent_result, sid, true, "sync_turn.agent")?;
         }
         Ok(())
     }
@@ -319,7 +398,7 @@ impl EverOSProvider {
         Ok(())
     }
 
-    pub fn on_session_end(&self) -> Result<(), EverOSError> {
+    pub fn on_session_end(&self, messages: &[Value]) -> Result<(), EverOSError> {
         if !self.active
             || !self.write_enabled
             || self.client.is_none()
@@ -327,17 +406,240 @@ impl EverOSProvider {
         {
             return Ok(());
         }
+        if self.config.capture_agent_memory && self.config.agent_trajectory_on_session_end {
+            let result = self.build_agent_trajectory_result(messages, "session_end");
+            let _ =
+                self.write_agent_trajectory(&result, &self.session_id, true, "session_end.agent");
+        }
         self.client
             .as_ref()
             .expect("checked above")
             .flush_memories_scoped(&self.user_id, Some(&self.session_id), "personal", None)?;
-        if self.config.capture_agent_memory && self.config.agent_flush_after_turn {
-            self.client
-                .as_ref()
-                .expect("checked above")
-                .flush_memories_scoped(&self.user_id, Some(&self.session_id), "agent", None)?;
-        }
         Ok(())
+    }
+
+    pub fn on_pre_compress(&self, messages: &[Value]) -> Result<String, EverOSError> {
+        if !self.active
+            || !self.write_enabled
+            || self.client.is_none()
+            || self.session_id.is_empty()
+            || !self.config.capture_agent_memory
+            || !self.config.agent_trajectory_on_pre_compress
+        {
+            return Ok(String::new());
+        }
+        let result = self.build_agent_trajectory_result(messages, "pre_compress");
+        let wrote =
+            self.write_agent_trajectory(&result, &self.session_id, false, "pre_compress.agent")?;
+        if !wrote {
+            return Ok(String::new());
+        }
+        Ok(format!(
+            "EverOS captured {} agent trajectory messages for session {}; preserve task outcome and reusable tool lessons.",
+            result.output_count, self.session_id
+        ))
+    }
+
+    pub fn on_delegation(
+        &self,
+        task: &str,
+        result: &str,
+        child_session_id: Option<&str>,
+    ) -> Result<(), EverOSError> {
+        if !self.active
+            || !self.write_enabled
+            || self.client.is_none()
+            || self.session_id.is_empty()
+            || !self.config.capture_agent_memory
+            || !self.config.agent_trajectory_on_delegation
+        {
+            return Ok(());
+        }
+        let child = child_session_id.unwrap_or_default().trim();
+        let prefix = if child.is_empty() {
+            "[delegation] ".to_string()
+        } else {
+            format!("[delegation child_session_id={child}] ")
+        };
+        let now = now_ms();
+        let messages = vec![
+            json!({"role":"user","timestamp":now,"content":task.trim()}),
+            json!({"role":"assistant","timestamp":now + 1,"content":format!("{}{}", prefix, result.trim())}),
+        ];
+        let mut built = build_trajectory_messages(
+            &messages,
+            &self.session_id,
+            "delegation",
+            Some(now),
+            self.config.agent_max_messages,
+            self.config.agent_max_message_chars,
+            self.config.agent_max_tool_result_chars,
+            self.config.agent_max_payload_chars,
+            false,
+        );
+        if !child.is_empty() {
+            for message in built.messages.iter_mut() {
+                if message.get("role").and_then(Value::as_str) == Some("assistant")
+                    && let Some(map) = message.as_object_mut()
+                {
+                    map.insert(
+                        "child_session_id".to_string(),
+                        Value::String(child.to_string()),
+                    );
+                }
+            }
+        }
+        self.write_agent_trajectory(&built, &self.session_id, true, "delegation.agent")?;
+        Ok(())
+    }
+
+    fn cached_prefetch(&self, cache_key: &str) -> Option<String> {
+        if !self.config.prefetch_cache_enabled || self.config.prefetch_cache_ttl_seconds == 0 {
+            return None;
+        }
+        let ttl = Duration::from_secs(self.config.prefetch_cache_ttl_seconds);
+        let mut cache = self.prefetch_cache.lock().ok()?;
+        if let Some(entry) = cache.get(cache_key)
+            && entry.created_at.elapsed() <= ttl
+        {
+            return Some(entry.text.clone());
+        }
+        cache.remove(cache_key);
+        None
+    }
+
+    fn store_prefetch(&self, cache_key: String, text: String) {
+        if !self.config.prefetch_cache_enabled || self.config.prefetch_cache_ttl_seconds == 0 {
+            return;
+        }
+        if let Ok(mut cache) = self.prefetch_cache.lock() {
+            cache.insert(
+                cache_key,
+                PrefetchCacheEntry {
+                    created_at: Instant::now(),
+                    text,
+                },
+            );
+            while cache.len() > 128 {
+                if let Some(oldest) = cache
+                    .iter()
+                    .min_by_key(|(_, entry)| entry.created_at)
+                    .map(|(key, _)| key.clone())
+                {
+                    cache.remove(&oldest);
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    fn context_assembly_config(&self) -> ContextAssemblyConfig {
+        ContextAssemblyConfig {
+            max_context_chars: self.config.max_context_chars,
+            profile_max_items: self.config.profile_max_items,
+            agent_skills_max_items: self.config.agent_skills_max_items,
+            agent_cases_max_items: self.config.agent_cases_max_items,
+            episodic_max_items: self.config.episodic_max_items,
+            recent_raw_top_k: self.config.recent_raw_top_k,
+            min_score: self.config.min_score,
+        }
+    }
+
+    fn config_value(&self) -> Value {
+        serde_json::to_value(&self.config).unwrap_or_else(|_| Value::Object(Map::new()))
+    }
+
+    fn build_agent_summary_result(
+        &self,
+        user_content: &str,
+        assistant_content: &str,
+        session_id: &str,
+        now_ms: u128,
+    ) -> TrajectoryBuildResult {
+        let messages = vec![
+            json!({"role":"user","timestamp":now_ms,"content":format!("Task request: {}", truncate_for_memory(user_content, 4000))}),
+            json!({"role":"assistant","timestamp":now_ms + 1,"content":format!("Agent response summary: {}\nOutcome: completed_or_partial\nReusable lesson hint: capture approach, correction, and verification if useful.", truncate_for_memory(assistant_content, 4000))}),
+        ];
+        build_trajectory_messages(
+            &messages,
+            session_id,
+            "sync_turn",
+            Some(now_ms),
+            2,
+            self.config.agent_max_message_chars,
+            self.config.agent_max_tool_result_chars,
+            self.config.agent_max_payload_chars,
+            false,
+        )
+    }
+
+    fn build_agent_trajectory_result(
+        &self,
+        messages: &[Value],
+        source: &str,
+    ) -> TrajectoryBuildResult {
+        build_trajectory_messages(
+            messages,
+            &self.session_id,
+            source,
+            Some(now_ms()),
+            self.config.agent_max_messages,
+            self.config.agent_max_message_chars,
+            self.config.agent_max_tool_result_chars,
+            self.config.agent_max_payload_chars,
+            false,
+        )
+    }
+
+    fn write_agent_trajectory(
+        &self,
+        result: &TrajectoryBuildResult,
+        session_id: &str,
+        flush_allowed: bool,
+        _operation: &str,
+    ) -> Result<bool, EverOSError> {
+        if result.messages.is_empty() || self.agent_fingerprint_seen(&result.fingerprint) {
+            return Ok(false);
+        }
+        let Some(client) = &self.client else {
+            return Ok(false);
+        };
+        client.add_memories_scoped(
+            &self.user_id,
+            Some(session_id),
+            result.messages.clone(),
+            true,
+            "agent",
+        )?;
+        self.remember_agent_fingerprint(result.fingerprint.clone());
+        if flush_allowed && self.config.agent_flush_after_turn {
+            client.flush_memories_scoped(&self.user_id, Some(session_id), "agent", None)?;
+        }
+        Ok(true)
+    }
+
+    fn agent_fingerprint_seen(&self, fingerprint: &str) -> bool {
+        self.agent_saved_fingerprints
+            .lock()
+            .map(|items| items.iter().any(|item| item == fingerprint))
+            .unwrap_or(false)
+    }
+
+    fn remember_agent_fingerprint(&self, fingerprint: String) {
+        if fingerprint.is_empty() {
+            return;
+        }
+        if let Ok(mut items) = self.agent_saved_fingerprints.lock() {
+            if let Some(pos) = items.iter().position(|item| item == &fingerprint) {
+                items.remove(pos);
+            }
+            items.push_back(fingerprint);
+            let max_entries = self.config.agent_dedupe_entries.max(1);
+            while items.len() > max_entries {
+                items.pop_front();
+            }
+        }
     }
 
     fn tool_save(&self, args: &Value) -> Result<String, EverOSError> {
@@ -710,6 +1012,24 @@ fn normalize_config_from_value(config: &mut ProviderConfig, value: &Value) {
         ("capture_agent_memory", &mut config.capture_agent_memory),
         ("agent_recall", &mut config.agent_recall),
         ("agent_flush_after_turn", &mut config.agent_flush_after_turn),
+        ("include_recent_raw", &mut config.include_recent_raw),
+        ("prefetch_cache_enabled", &mut config.prefetch_cache_enabled),
+        (
+            "agent_trajectory_on_session_end",
+            &mut config.agent_trajectory_on_session_end,
+        ),
+        (
+            "agent_trajectory_on_pre_compress",
+            &mut config.agent_trajectory_on_pre_compress,
+        ),
+        (
+            "agent_trajectory_on_delegation",
+            &mut config.agent_trajectory_on_delegation,
+        ),
+        (
+            "agent_summary_after_turn",
+            &mut config.agent_summary_after_turn,
+        ),
     ] {
         if let Some(value) = map.get(key) {
             *slot = as_bool(Some(value), *slot);
@@ -726,6 +1046,54 @@ fn normalize_config_from_value(config: &mut ProviderConfig, value: &Value) {
     }
     if let Some(value) = map.get("agentic_timeout").and_then(Value::as_f64) {
         config.agentic_timeout = value.clamp(1.0, 120.0);
+    }
+    if let Some(value) = map.get("max_context_chars").and_then(Value::as_u64) {
+        config.max_context_chars = (value as usize).clamp(1_000, 200_000);
+    }
+    if let Some(value) = map.get("recent_raw_top_k").and_then(Value::as_u64) {
+        config.recent_raw_top_k = (value as usize).clamp(0, 100);
+    }
+    if let Some(value) = map.get("profile_max_items").and_then(Value::as_u64) {
+        config.profile_max_items = (value as usize).clamp(0, 100);
+    }
+    if let Some(value) = map.get("agent_skills_max_items").and_then(Value::as_u64) {
+        config.agent_skills_max_items = (value as usize).clamp(0, 100);
+    }
+    if let Some(value) = map.get("agent_cases_max_items").and_then(Value::as_u64) {
+        config.agent_cases_max_items = (value as usize).clamp(0, 100);
+    }
+    if let Some(value) = map.get("episodic_max_items").and_then(Value::as_u64) {
+        config.episodic_max_items = (value as usize).clamp(0, 100);
+    }
+    if let Some(value) = map.get("min_score").and_then(Value::as_f64) {
+        config.min_score = value.clamp(0.0, 1.0);
+    }
+    if let Some(value) = map.get("min_recall_query_chars").and_then(Value::as_u64) {
+        config.min_recall_query_chars = (value as usize).clamp(0, 100);
+    }
+    if let Some(value) = map
+        .get("prefetch_cache_ttl_seconds")
+        .and_then(Value::as_u64)
+    {
+        config.prefetch_cache_ttl_seconds = value.clamp(0, 86_400);
+    }
+    if let Some(value) = map.get("agent_max_messages").and_then(Value::as_u64) {
+        config.agent_max_messages = (value as usize).clamp(1, 500);
+    }
+    if let Some(value) = map.get("agent_max_message_chars").and_then(Value::as_u64) {
+        config.agent_max_message_chars = (value as usize).clamp(100, 200_000);
+    }
+    if let Some(value) = map
+        .get("agent_max_tool_result_chars")
+        .and_then(Value::as_u64)
+    {
+        config.agent_max_tool_result_chars = (value as usize).clamp(100, 200_000);
+    }
+    if let Some(value) = map.get("agent_max_payload_chars").and_then(Value::as_u64) {
+        config.agent_max_payload_chars = (value as usize).clamp(1_000, 1_000_000);
+    }
+    if let Some(value) = map.get("agent_dedupe_entries").and_then(Value::as_u64) {
+        config.agent_dedupe_entries = (value as usize).clamp(1, 10_000);
     }
     if let Some(mode) = map.get("agent_capture_mode").and_then(Value::as_str) {
         let mode = mode.trim().to_ascii_lowercase();
@@ -828,28 +1196,6 @@ fn clean_content(text: &str) -> String {
         .replace_all(text, "")
         .trim()
         .to_string()
-}
-
-fn is_trivial(text: &str) -> bool {
-    matches!(
-        text.trim()
-            .trim_end_matches('.')
-            .to_ascii_lowercase()
-            .as_str(),
-        "ok" | "okay"
-            | "thanks"
-            | "thank you"
-            | "got it"
-            | "sure"
-            | "yes"
-            | "no"
-            | "yep"
-            | "nope"
-            | "k"
-            | "ty"
-            | "thx"
-            | "np"
-    )
 }
 
 fn tool_error(message: &str) -> String {
@@ -1007,17 +1353,114 @@ fn parse_string_list(value: &Value) -> Vec<String> {
     }
 }
 
-fn build_agent_trajectory_messages(
+fn build_personal_turn_messages(
     user_content: &str,
     assistant_content: &str,
+    session_id: &str,
     now_ms: u128,
 ) -> Vec<Value> {
-    let user_summary = truncate_for_memory(user_content, 4000);
-    let assistant_summary = truncate_for_memory(assistant_content, 4000);
-    vec![
-        json!({"role":"user","timestamp":now_ms,"content":format!("Task request: {user_summary}")}),
-        json!({"role":"assistant","timestamp":now_ms + 1,"content":format!("Agent response summary: {assistant_summary}\nOutcome: completed_or_partial\nReusable lesson hint: capture approach, correction, and verification if useful.")}),
-    ]
+    let mut messages = vec![
+        json!({"role":"user","timestamp":now_ms,"content":user_content}),
+        json!({"role":"assistant","timestamp":now_ms + 1,"content":assistant_content}),
+    ];
+    for (index, message) in messages.iter_mut().enumerate() {
+        let role = message
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let timestamp = message
+            .get("timestamp")
+            .and_then(Value::as_u64)
+            .unwrap_or(now_ms as u64);
+        let content = message
+            .get("content")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let message_id = personal_message_id(session_id, role, index, timestamp, content);
+        if let Some(map) = message.as_object_mut() {
+            map.insert("message_id".to_string(), Value::String(message_id));
+        }
+    }
+    messages
+}
+
+fn personal_message_id(
+    session_id: &str,
+    role: &str,
+    index: usize,
+    timestamp: u64,
+    content: &str,
+) -> String {
+    let payload = json!({
+        "session_id": session_id,
+        "role": role,
+        "index": index,
+        "timestamp": timestamp,
+        "content": content,
+    });
+    format!(
+        "eh_{}",
+        &hash_text(&serde_json::to_string(&payload).unwrap_or_default())[..32]
+    )
+}
+
+fn merge_agent_response(main_response: Option<&Value>, agent_response: Option<&Value>) -> Value {
+    let mut data = response_data(main_response);
+    let agent_data = response_data(agent_response);
+    for key in ["agent_skills", "agent_cases"] {
+        if let Some(value) = agent_data.get(key) {
+            let mut items = as_list_copy(data.get(key));
+            items.extend(as_list_copy(Some(value)));
+            if !items.is_empty() {
+                data.insert(key.to_string(), Value::Array(items));
+            }
+        }
+    }
+    if let Some(value) = agent_data.get("agent_memory") {
+        let mut items = as_list_copy(data.get("agent_memory"));
+        items.extend(as_list_copy(Some(value)));
+        if !items.is_empty() {
+            data.insert("agent_memory".to_string(), Value::Array(items));
+        }
+    } else if let Some(value) = agent_data
+        .get("results")
+        .or_else(|| agent_data.get("memories"))
+        .or_else(|| agent_data.get("episodes"))
+    {
+        let mut items = as_list_copy(data.get("agent_memory"));
+        items.extend(as_list_copy(Some(value)));
+        if !items.is_empty() {
+            data.insert("agent_memory".to_string(), Value::Array(items));
+        }
+    }
+    Value::Object(Map::from_iter([("data".to_string(), Value::Object(data))]))
+}
+
+fn response_data(response: Option<&Value>) -> Map<String, Value> {
+    let Some(response) = response else {
+        return Map::new();
+    };
+    response
+        .get("data")
+        .unwrap_or(response)
+        .as_object()
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn as_list_copy(value: Option<&Value>) -> Vec<Value> {
+    match value {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(items)) => items.clone(),
+        Some(other) => vec![other.clone()],
+    }
+}
+
+fn hash_text(text: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(text.as_bytes());
+    let digest = hasher.finalize();
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn truncate_for_memory(text: &str, limit: usize) -> String {

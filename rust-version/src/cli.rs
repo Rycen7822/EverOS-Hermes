@@ -1,6 +1,6 @@
 use crate::mcp;
 use crate::provider::{EverOSProvider, ProviderInit, provider_tool_schemas, save_config};
-use anyhow::Context;
+use anyhow::{Context, anyhow};
 use clap::{Args, Parser, Subcommand};
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -79,7 +79,28 @@ enum ProviderCommand {
         #[arg(long, default_value = "null")]
         metadata_json: String,
     },
-    OnSessionEnd(StateArgs),
+    OnSessionEnd {
+        #[command(flatten)]
+        state: StateArgs,
+        #[arg(long, default_value = "[]")]
+        messages_json: String,
+    },
+    OnPreCompress {
+        #[command(flatten)]
+        state: StateArgs,
+        #[arg(long, default_value = "[]")]
+        messages_json: String,
+    },
+    OnDelegation {
+        #[command(flatten)]
+        state: StateArgs,
+        #[arg(long)]
+        task: String,
+        #[arg(long)]
+        result: String,
+        #[arg(long, default_value = "")]
+        child_session_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Args, Default)]
@@ -193,16 +214,54 @@ fn run_provider(command: ProviderCommand) -> anyhow::Result<()> {
                 serde_json::to_string_pretty(&json!({"queued": true}))?
             );
         }
-        ProviderCommand::OnSessionEnd(state) => {
+        ProviderCommand::OnSessionEnd {
+            state,
+            messages_json,
+        } => {
             let provider = provider_from_state(state)?;
-            provider.on_session_end()?;
+            let messages = parse_messages_json(&messages_json)?;
+            provider.on_session_end(&messages)?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&json!({"flushed": true}))?
             );
         }
+        ProviderCommand::OnPreCompress {
+            state,
+            messages_json,
+        } => {
+            let provider = provider_from_state(state)?;
+            let messages = parse_messages_json(&messages_json)?;
+            println!("{}", provider.on_pre_compress(&messages)?);
+        }
+        ProviderCommand::OnDelegation {
+            state,
+            task,
+            result,
+            child_session_id,
+        } => {
+            let provider = provider_from_state(state)?;
+            let child = if child_session_id.is_empty() {
+                None
+            } else {
+                Some(child_session_id.as_str())
+            };
+            provider.on_delegation(&task, &result, child)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({"captured": true}))?
+            );
+        }
     }
     Ok(())
+}
+
+fn parse_messages_json(raw: &str) -> anyhow::Result<Vec<Value>> {
+    let value: Value = serde_json::from_str(raw).context("invalid --messages-json")?;
+    value
+        .as_array()
+        .cloned()
+        .ok_or_else(|| anyhow!("--messages-json must be a JSON array"))
 }
 
 fn provider_from_state(args: StateArgs) -> anyhow::Result<EverOSProvider> {
