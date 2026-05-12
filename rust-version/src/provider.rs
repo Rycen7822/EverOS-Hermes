@@ -1,6 +1,7 @@
 use crate::client::{DEFAULT_BASE_URL, DEFAULT_MEMORY_TYPES, EverOSClient, EverOSError};
 use crate::env::get_env;
 use crate::formatting::{format_search_context, pretty_json};
+use crate::workflows;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -228,6 +229,11 @@ impl EverOSProvider {
             "everos_memory_get" => self.tool_get(&Value::Object(args))?,
             "everos_memory_flush" => self.tool_flush(&Value::Object(args))?,
             "everos_memory_forget" => self.tool_forget(&Value::Object(args))?,
+            "everos_memory_save_and_verify" => self.tool_save_and_verify(&Value::Object(args))?,
+            "everos_memory_import_and_verify" => {
+                self.tool_import_and_verify(&Value::Object(args))?
+            }
+            "everos_memory_verify_session" => self.tool_verify_session(&Value::Object(args))?,
             _ => tool_error(&format!("Unknown EverOS memory tool: {tool_name}")),
         };
         Ok(result)
@@ -529,6 +535,114 @@ impl EverOSProvider {
         )?;
         Ok(pretty_json(&response))
     }
+
+    fn tool_save_and_verify(&self, args: &Value) -> Result<String, EverOSError> {
+        let content = value_string(args, "content").trim().to_string();
+        if content.is_empty() {
+            return Ok(tool_error("content is required"));
+        }
+        let session_id = value_string(args, "session_id");
+        let sid = if session_id.is_empty() {
+            self.session_id.as_str()
+        } else {
+            session_id.as_str()
+        };
+        let mut queries =
+            parse_string_list(args.get("verification_queries").unwrap_or(&Value::Null));
+        let verification_query = value_string(args, "verification_query");
+        if !verification_query.trim().is_empty() {
+            queries.insert(0, verification_query.trim().to_string());
+        }
+        let memory_types = args
+            .get("memory_types")
+            .map(parse_string_list)
+            .filter(|items| !items.is_empty());
+        let scope = normalize_scope_arg(&value_string(args, "scope"));
+        let role = optional_value_string(args, "role");
+        let tool_call_id = optional_value_string(args, "tool_call_id");
+        let result = workflows::save_and_verify(
+            self.client.as_ref().expect("active"),
+            &content,
+            &self.user_id,
+            if sid.is_empty() { None } else { Some(sid) },
+            &scope,
+            role.as_deref(),
+            tool_call_id.as_deref(),
+            as_bool(args.get("flush"), true),
+            float_or_none(args.get("flush_timeout")),
+            queries,
+            memory_types,
+            int_between(args.get("top_k"), -1, 100, self.config.top_k),
+            float_or_none(args.get("timeout")),
+        )?;
+        Ok(pretty_json(&result))
+    }
+
+    fn tool_import_and_verify(&self, args: &Value) -> Result<String, EverOSError> {
+        let session_id = value_string(args, "session_id");
+        let sid = if session_id.is_empty() {
+            self.session_id.as_str()
+        } else {
+            session_id.as_str()
+        };
+        let messages = args
+            .get("messages")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let memory_types = args
+            .get("memory_types")
+            .map(parse_string_list)
+            .filter(|items| !items.is_empty());
+        let file_path = optional_value_string(args, "file_path");
+        let scope = normalize_scope_arg(&value_string(args, "scope"));
+        let result = workflows::import_and_verify(
+            self.client.as_ref().expect("active"),
+            &self.user_id,
+            if sid.is_empty() { None } else { Some(sid) },
+            messages,
+            file_path.as_deref(),
+            &scope,
+            as_bool(args.get("dry_run"), false),
+            int_between(args.get("batch_size"), 1, 100, 50) as usize,
+            as_bool(args.get("flush"), true),
+            float_or_none(args.get("flush_timeout")),
+            parse_string_list(args.get("verification_queries").unwrap_or(&Value::Null)),
+            memory_types,
+            int_between(args.get("top_k"), -1, 100, self.config.top_k),
+            float_or_none(args.get("timeout")),
+            "import_and_verify",
+        )?;
+        Ok(pretty_json(&result))
+    }
+
+    fn tool_verify_session(&self, args: &Value) -> Result<String, EverOSError> {
+        let queries = parse_string_list(args.get("verification_queries").unwrap_or(&Value::Null));
+        if queries.is_empty() {
+            return Ok(tool_error("verification_queries is required"));
+        }
+        let session_id = value_string(args, "session_id");
+        let sid = if session_id.is_empty() {
+            self.session_id.as_str()
+        } else {
+            session_id.as_str()
+        };
+        let memory_types = args
+            .get("memory_types")
+            .map(parse_string_list)
+            .filter(|items| !items.is_empty());
+        let result = workflows::verify_session_ingest(
+            self.client.as_ref().expect("active"),
+            &self.user_id,
+            if sid.is_empty() { None } else { Some(sid) },
+            queries,
+            memory_types,
+            &normalize_scope_arg(&value_string(args, "scope")),
+            int_between(args.get("top_k"), -1, 100, self.config.top_k),
+            float_or_none(args.get("timeout")),
+        )?;
+        Ok(pretty_json(&result))
+    }
 }
 
 pub fn provider_tool_schemas() -> Vec<Value> {
@@ -538,6 +652,9 @@ pub fn provider_tool_schemas() -> Vec<Value> {
         json!({"name":"everos_memory_get","description":"Get structured EverOS memories by type for the configured user.","parameters":{"type":"object","properties":{"memory_type":{"type":"string","enum":["episodic_memory","profile","agent_case","agent_skill"],"description":"Memory type to retrieve."},"page":{"type":"integer","description":"Page number starting at 1."},"page_size":{"type":"integer","description":"Items per page, 1-100."},"session_id":{"type":"string","description":"Optional session filter."},"filters":{"type":"object","description":"Optional Cloud v1 filters DSL."},"rank_by":{"type":"string","description":"Rank field. Default timestamp."},"rank_order":{"type":"string","enum":["asc","desc"],"description":"Rank order."}}}}),
         json!({"name":"everos_memory_flush","description":"Force EverOS memory extraction for the configured user/session. Timeout errors are retryable; search/status checks should happen before retrying.","parameters":{"type":"object","properties":{"session_id":{"type":"string","description":"Optional session id."},"scope":{"type":"string","enum":["personal","agent"],"description":"Memory scope to flush."},"timeout":{"type":"number","description":"Optional per-call timeout in seconds."}}}}),
         json!({"name":"everos_memory_forget","description":"Delete an EverOS memory by id. Requires confirm=true because this is destructive.","parameters":{"type":"object","properties":{"memory_id":{"type":"string","description":"Exact EverOS memory id to delete."},"confirm":{"type":"boolean","description":"Must be true to delete."}},"required":["memory_id","confirm"]}}),
+        json!({"name":"everos_memory_save_and_verify","description":"Queue one memory message, optionally flush extraction, then verify searchability with sample queries.","parameters":{"type":"object","properties":{"content":{"type":"string","description":"Memory content to store."},"verification_query":{"type":"string","description":"Primary query used to verify recall."},"verification_queries":{"type":"array","items":{"type":"string"},"description":"Additional verification queries."},"session_id":{"type":"string","description":"Optional session id."},"scope":{"type":"string","enum":["personal","agent"],"description":"Memory scope."},"role":{"type":"string","enum":["user","assistant","tool","system"],"description":"Message role; role=tool requires tool_call_id."},"tool_call_id":{"type":"string","description":"Required when role=tool for agent memory."},"flush":{"type":"boolean","description":"Trigger extraction before verification. Default true."},"top_k":{"type":"integer","description":"Verification search top_k."}},"required":["content"]}}),
+        json!({"name":"everos_memory_import_and_verify","description":"Batch-import messages or a local file, with dry-run validation, optional flush, and verification report.","parameters":{"type":"object","properties":{"messages":{"type":"array","items":{"type":"object"},"description":"Messages to import."},"file_path":{"type":"string","description":"Optional local JSON/JSONL/Markdown file to import."},"verification_queries":{"type":"array","items":{"type":"string"},"description":"Queries used to verify recall."},"session_id":{"type":"string","description":"Optional session id."},"scope":{"type":"string","enum":["personal","agent"],"description":"Memory scope."},"dry_run":{"type":"boolean","description":"Validate and summarize without writing."},"batch_size":{"type":"integer","description":"Messages per add_memories call."},"flush":{"type":"boolean","description":"Flush after importing. Default true."},"top_k":{"type":"integer","description":"Verification search top_k."}}}}),
+        json!({"name":"everos_memory_verify_session","description":"Read-only verification for an existing user/session using sample search queries.","parameters":{"type":"object","properties":{"verification_queries":{"type":"array","items":{"type":"string"},"description":"Queries used to verify recall."},"session_id":{"type":"string","description":"Optional session id."},"scope":{"type":"string","enum":["personal","agent"],"description":"Memory scope."},"memory_types":{"type":"array","items":{"type":"string","enum":["episodic_memory","profile","raw_message","agent_memory"]}},"top_k":{"type":"integer","description":"Verification search top_k."}},"required":["verification_queries"]}}),
     ]
 }
 
@@ -810,6 +927,15 @@ fn value_string(value: &Value, key: &str) -> String {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string()
+}
+
+fn optional_value_string(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(ToString::to_string)
 }
 
 fn non_empty_or(value: &str, default: &str) -> String {

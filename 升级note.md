@@ -197,3 +197,30 @@
   - fake-server installed MCP：`/tmp/everos_mcp20_stress.py` -> `18 passed, 0 failed`，201 次 MCP calls / 247 次 HTTP requests。
   - 真实 Cloud installed MCP：`/tmp/everos_mcp20_real_stress.py` -> `24 passed, 0 failed`，46 次 MCP calls，合成 session 删除 204。
 - `problems.md` 已更新：P1-02 / P1-03 标记为已解决；当前无 P0/P1 阻塞问题，仅保留非阻塞 backlog。
+
+## 2026-05-12 14:12 CST：非阻塞 workflow/helper 改进项落地
+
+用户要求执行此前保留的 B1/B2/B3 非阻塞改进项。本轮按 Python → Rust parity → installed MCP smoke 闭环完成，没有新增 Cloud endpoint，只编排既有 Cloud v1 白名单端点：
+
+- B1 batch/import helper：
+  - Python 新增 `src/everos_hermes/workflows.py`；Rust 新增 `rust-version/src/workflows.rs`。
+  - MCP 新增 `everos_batch_ingest`、`everos_import_and_verify`、`everos_verify_session_ingest`。
+  - Provider 新增 `everos_memory_import_and_verify`、`everos_memory_verify_session`。
+  - 支持 dry-run、warnings、batch_size 分批、optional flush、verification queries、per-batch 报告。
+- B2 structured output：
+  - 新 workflow tools 声明/返回稳定 envelope：`ok`、`workflow`、`status`、`retryable`、`suggested_next_actions`。
+  - workflow payload 补充 `input_count`、`queued_count`、`failed_count`、`warnings`、`batches`、`flush`、`verification`、`save` 等 typed fields。
+  - 9 个底层 primitive tools 暂不强行迁移完整 envelope，保持兼容；workflow envelope 作为后续模板。
+- B3 save/import/verify 高层工作流：
+  - MCP 新增 `everos_save_and_verify`、`everos_import_and_verify`、`everos_batch_ingest`、`everos_verify_session_ingest`。
+  - Provider 新增 `everos_memory_save_and_verify`、`everos_memory_import_and_verify`、`everos_memory_verify_session`。
+  - 状态区分 `verified`、`partially_verified`、`not_yet_searchable`、`verification_skipped`、`dry_run`，不把 verification miss 误判成写入失败。
+- 验证：
+  - Python 全量：`python -m pytest -p no:cacheprovider tests -q` -> `59 passed`；`py_compile` 通过。
+  - Rust 全量：`cargo fmt --all --check`、`cargo clippy --all-targets --all-features -- -D warnings`、`cargo test --tests --no-fail-fast` 通过；Rust parity `30 passed`。
+  - 打包安装：`./scripts/package-release.sh` 重打包 0.2.0 本地 prebuild，`sha256sum -c` 通过，已重新安装到 `/home/xu/.local/share/everos-hermes` 与 `~/.hermes/plugins/everos`。
+  - `hermes mcp test everos` -> connected，13 tools discovered。
+  - 新 workflow installed MCP smoke：`/tmp/everos_mcp_workflow_smoke.py` -> `5 passed, 0 failed`。
+  - 原 fake-server installed MCP 压力测试更新 tool discovery 后：`/tmp/everos_mcp20_stress.py` -> `18 passed, 0 failed`，201 calls / 247 HTTP requests。
+- 文档：`README.md`、`rust-version/README.md`、`docs/everos_cloud_v1_contract.md`、`problems.md` 已同步 workflow/helper 能力、收益和剩余边界。
+- 剩余风险：真实 Cloud 大批量导入尚未执行；建议未来真实迁移先 `dry_run=true`，再小样本导入并用 batch delete 清理。版本号仍为 `0.2.0`，本轮暂未 release；若公开发布建议另起 patch 版本。

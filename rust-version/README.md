@@ -188,6 +188,10 @@ Even when `include_original_data=true`, vector fields are stripped by default to
 | `everos_get_task_status` | Check an async extraction task. | Yes |
 | `everos_get_settings` | Read EverOS memory-space settings. | Yes |
 | `everos_update_settings` | Update whitelisted EverOS settings fields and return a before/after diff. | No |
+| `everos_batch_ingest` | Dry-run or execute batched ingest, optionally flush, and return per-batch plus verification status. | No |
+| `everos_verify_session_ingest` | Read-only search verification for an existing user/session/scope. | Yes |
+| `everos_save_and_verify` | Queue one message, optionally flush, then verify recall with one or more search queries. | No |
+| `everos_import_and_verify` | Batch-import messages or a local file with dry-run validation, optional flush, and verification report. | No |
 
 Rust parity follows the Cloud v1 contract in the repository root: personal and agent memory are supported, while group/sender/multimodal storage endpoints stay out of scope. Search memory types are `episodic_memory`, `profile`, `raw_message`, and `agent_memory`; get memory types are `episodic_memory`, `profile`, `agent_case`, and `agent_skill`. Public numeric arguments are validated rather than silently coerced: invalid `top_k`, `page`, or `page_size` fails before HTTP, and schema-valid `radius=0` is preserved.
 
@@ -233,6 +237,9 @@ Restart Hermes CLI/WebUI/gateway after changing the provider. MCP tools and the 
 | `everos_memory_get` | Retrieve structured memories by type, page, optional filters, and ranking. |
 | `everos_memory_flush` | Force personal or agent extraction for the user/session; accepts per-call `timeout` and returns retryable timeout guidance. |
 | `everos_memory_forget` | Delete a memory by id; requires `confirm=true`. |
+| `everos_memory_save_and_verify` | Queue one message, optionally flush, then run targeted search verification and return a structured queue/verification report. |
+| `everos_memory_import_and_verify` | Dry-run or execute batched message/file import with warnings, per-batch status, optional flush, and verification queries. |
+| `everos_memory_verify_session` | Read-only verification helper for an existing user/session/scope using sample search queries. |
 
 Advanced non-secret provider settings remain compatible with the Python version and live in `$HERMES_HOME/everos.json`.
 

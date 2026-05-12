@@ -1,11 +1,12 @@
 use crate::client::{DEFAULT_MEMORY_TYPES, EverOSClient, EverOSError};
 use crate::env::get_env;
 use crate::formatting::{format_search_context, pretty_json};
+use crate::workflows;
 use serde_json::{Value, json};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const TOOL_NAMES: [&str; 9] = [
+pub const TOOL_NAMES: [&str; 13] = [
     "everos_save_memory",
     "everos_add_memories",
     "everos_flush_memories",
@@ -15,6 +16,10 @@ pub const TOOL_NAMES: [&str; 9] = [
     "everos_get_task_status",
     "everos_get_settings",
     "everos_update_settings",
+    "everos_batch_ingest",
+    "everos_verify_session_ingest",
+    "everos_save_and_verify",
+    "everos_import_and_verify",
 ];
 
 pub fn make_client() -> crate::client::Result<EverOSClient> {
@@ -54,6 +59,10 @@ pub fn tool_definitions() -> Vec<Value> {
         json!({"name":"everos_get_task_status","title":"Get EverOS Task Status","description":"Check an asynchronous EverOS extraction task status.","inputSchema":{"type":"object","properties":{"task_id":{"type":"string"}},"required":["task_id"]},"annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}}),
         json!({"name":"everos_get_settings","title":"Get EverOS Settings","description":"Get current EverOS memory-space settings.","inputSchema":{"type":"object","properties":{}},"annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}}),
         json!({"name":"everos_update_settings","title":"Update EverOS Settings","description":"Update EverOS memory-space settings with strict schema validation by default.","inputSchema":{"type":"object","properties":{"settings":{"type":"object"},"strict":{"type":"boolean","default":true},"return_diff":{"type":"boolean","default":true}},"required":["settings"]},"annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}}),
+        json!({"name":"everos_batch_ingest","title":"Batch Ingest EverOS Memories","description":"Dry-run or execute batched EverOS ingest with optional flush and verification report.","inputSchema":{"type":"object","properties":{"messages":{"type":"array","items":{"type":"object"}},"file_path":{"type":"string"},"verification_queries":{"type":"array","items":{"type":"string"}},"user_id":{"type":"string"},"session_id":{"type":"string"},"scope":{"type":"string","enum":["personal","agent"],"default":"personal"},"dry_run":{"type":"boolean","default":false},"batch_size":{"type":"integer","default":50,"minimum":1,"maximum":100},"flush":{"type":"boolean","default":true},"flush_timeout":{"type":"number"},"memory_types":{"type":"array","items":{"type":"string","enum":["episodic_memory","profile","raw_message","agent_memory"]}},"top_k":{"type":"integer","default":5,"minimum":-1,"maximum":100},"timeout":{"type":"number"}}},"outputSchema":{"type":"object","properties":{"ok":{"type":"boolean"},"workflow":{"type":"string"},"status":{"type":"string"},"suggested_next_actions":{"type":"array","items":{"type":"string"}}}},"annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":true}}),
+        json!({"name":"everos_verify_session_ingest","title":"Verify EverOS Session Ingest","description":"Read-only verification for an existing user/session using sample search queries.","inputSchema":{"type":"object","properties":{"verification_queries":{"type":"array","items":{"type":"string"}},"user_id":{"type":"string"},"session_id":{"type":"string"},"scope":{"type":"string","enum":["personal","agent"],"default":"personal"},"memory_types":{"type":"array","items":{"type":"string","enum":["episodic_memory","profile","raw_message","agent_memory"]}},"top_k":{"type":"integer","default":5,"minimum":-1,"maximum":100},"timeout":{"type":"number"}},"required":["verification_queries"]},"outputSchema":{"type":"object","properties":{"ok":{"type":"boolean"},"workflow":{"type":"string"},"status":{"type":"string"},"suggested_next_actions":{"type":"array","items":{"type":"string"}}}},"annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}}),
+        json!({"name":"everos_save_and_verify","title":"Save and Verify EverOS Memory","description":"Queue one memory message, optionally flush, then verify searchability with sample queries.","inputSchema":{"type":"object","properties":{"content":{"type":"string"},"verification_query":{"type":"string"},"verification_queries":{"type":"array","items":{"type":"string"}},"user_id":{"type":"string"},"session_id":{"type":"string"},"scope":{"type":"string","enum":["personal","agent"],"default":"personal"},"role":{"type":"string","enum":["user","assistant","tool","system"]},"tool_call_id":{"type":"string","description":"Required when role=tool for agent memory."},"flush":{"type":"boolean","default":true},"flush_timeout":{"type":"number"},"memory_types":{"type":"array","items":{"type":"string","enum":["episodic_memory","profile","raw_message","agent_memory"]}},"top_k":{"type":"integer","default":5,"minimum":-1,"maximum":100},"timeout":{"type":"number"}},"required":["content"]},"outputSchema":{"type":"object","properties":{"ok":{"type":"boolean"},"workflow":{"type":"string"},"status":{"type":"string"},"suggested_next_actions":{"type":"array","items":{"type":"string"}}}},"annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":true}}),
+        json!({"name":"everos_import_and_verify","title":"Import and Verify EverOS Memories","description":"Batch-import messages or a local file, with dry-run validation, optional flush, and verification report.","inputSchema":{"type":"object","properties":{"messages":{"type":"array","items":{"type":"object"}},"file_path":{"type":"string"},"verification_queries":{"type":"array","items":{"type":"string"}},"user_id":{"type":"string"},"session_id":{"type":"string"},"scope":{"type":"string","enum":["personal","agent"],"default":"personal"},"dry_run":{"type":"boolean","default":false},"batch_size":{"type":"integer","default":50,"minimum":1,"maximum":100},"flush":{"type":"boolean","default":true},"flush_timeout":{"type":"number"},"memory_types":{"type":"array","items":{"type":"string","enum":["episodic_memory","profile","raw_message","agent_memory"]}},"top_k":{"type":"integer","default":5,"minimum":-1,"maximum":100},"timeout":{"type":"number"}}},"outputSchema":{"type":"object","properties":{"ok":{"type":"boolean"},"workflow":{"type":"string"},"status":{"type":"string"},"suggested_next_actions":{"type":"array","items":{"type":"string"}}}},"annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":true}}),
     ]
 }
 
@@ -366,6 +375,100 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
                 return_diff,
             )?))
         }
+        "everos_verify_session_ingest" => {
+            let uid = optional_string(&value, "user_id").unwrap_or_else(default_user_id);
+            let session_id = optional_string(&value, "session_id");
+            let scope = scope_from_args(&value)?;
+            let memory_types = string_array_arg(&value, "memory_types");
+            let memory_types = (!memory_types.is_empty()).then_some(memory_types);
+            let top_k = int_arg(&value, "top_k", 5)?;
+            let timeout = float_arg(&value, "timeout");
+            let queries = string_array_arg(&value, "verification_queries");
+            if queries.is_empty() {
+                anyhow::bail!("verification_queries is required");
+            }
+            Ok(pretty_json(&workflows::verify_session_ingest(
+                &make_client()?,
+                &uid,
+                session_id.as_deref(),
+                queries,
+                memory_types,
+                &scope,
+                top_k,
+                timeout,
+            )?))
+        }
+        "everos_save_and_verify" => {
+            let content = required_string(&value, "content")?;
+            let uid = optional_string(&value, "user_id").unwrap_or_else(default_user_id);
+            let session_id = optional_string(&value, "session_id");
+            let scope = scope_from_args(&value)?;
+            let role = optional_string(&value, "role");
+            let tool_call_id = optional_string(&value, "tool_call_id");
+            let flush = bool_arg(&value, "flush", true);
+            let flush_timeout = float_arg(&value, "flush_timeout");
+            let mut queries = string_array_arg(&value, "verification_queries");
+            if let Some(query) = optional_string(&value, "verification_query") {
+                queries.insert(0, query);
+            }
+            let memory_types = string_array_arg(&value, "memory_types");
+            let memory_types = (!memory_types.is_empty()).then_some(memory_types);
+            let top_k = int_arg(&value, "top_k", 5)?;
+            let timeout = float_arg(&value, "timeout");
+            Ok(pretty_json(&workflows::save_and_verify(
+                &make_client()?,
+                &content,
+                &uid,
+                session_id.as_deref(),
+                &scope,
+                role.as_deref(),
+                tool_call_id.as_deref(),
+                flush,
+                flush_timeout,
+                queries,
+                memory_types,
+                top_k,
+                timeout,
+            )?))
+        }
+        "everos_import_and_verify" | "everos_batch_ingest" => {
+            let uid = optional_string(&value, "user_id").unwrap_or_else(default_user_id);
+            let session_id = optional_string(&value, "session_id");
+            let scope = scope_from_args(&value)?;
+            let messages = object_array_arg(&value, "messages");
+            let file_path = optional_string(&value, "file_path");
+            let dry_run = bool_arg(&value, "dry_run", false);
+            let batch_size = uint_arg(&value, "batch_size", 50)? as usize;
+            let flush = bool_arg(&value, "flush", true);
+            let flush_timeout = float_arg(&value, "flush_timeout");
+            let queries = string_array_arg(&value, "verification_queries");
+            let memory_types = string_array_arg(&value, "memory_types");
+            let memory_types = (!memory_types.is_empty()).then_some(memory_types);
+            let top_k = int_arg(&value, "top_k", 5)?;
+            let timeout = float_arg(&value, "timeout");
+            let workflow = if name == "everos_batch_ingest" {
+                "batch_ingest"
+            } else {
+                "import_and_verify"
+            };
+            Ok(pretty_json(&workflows::import_and_verify(
+                &make_client()?,
+                &uid,
+                session_id.as_deref(),
+                messages,
+                file_path.as_deref(),
+                &scope,
+                dry_run,
+                batch_size,
+                flush,
+                flush_timeout,
+                queries,
+                memory_types,
+                top_k,
+                timeout,
+                workflow,
+            )?))
+        }
         _ => anyhow::bail!("Unknown EverOS MCP tool: {name}"),
     }
 }
@@ -522,6 +625,36 @@ fn optional_string(value: &Value, key: &str) -> Option<String> {
         .map(str::trim)
         .filter(|text| !text.is_empty())
         .map(ToString::to_string)
+}
+
+fn string_array_arg(value: &Value, key: &str) -> Vec<String> {
+    value
+        .get(key)
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn object_array_arg(value: &Value, key: &str) -> Vec<Value> {
+    value
+        .get(key)
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter(|item| item.is_object())
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn bool_arg(value: &Value, key: &str, default: bool) -> bool {

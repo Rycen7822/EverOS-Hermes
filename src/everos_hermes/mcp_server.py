@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any, Literal
+from typing import Any, Literal, TypedDict
 
 from mcp.server.fastmcp import FastMCP
 
@@ -10,6 +10,7 @@ from .client import DEFAULT_BASE_URL, DEFAULT_MEMORY_TYPES, EverOSClient, EverOS
 from .env import get_env
 from .formatting import format_search_context, pretty_json, strip_vectors
 from .schemas import GetMemoryType, MemoryScope, SearchMemoryType, delete_confirm_text, normalize_scope
+from .workflows import import_and_verify, save_and_verify, verify_session_ingest
 
 mcp = FastMCP("everos_mcp")
 
@@ -23,10 +24,22 @@ TOOL_NAMES = [
     "everos_get_task_status",
     "everos_get_settings",
     "everos_update_settings",
+    "everos_batch_ingest",
+    "everos_verify_session_ingest",
+    "everos_save_and_verify",
+    "everos_import_and_verify",
 ]
 
 RetrievalMethod = Literal["keyword", "vector", "hybrid", "agentic"]
 ResponseFormat = Literal["json", "markdown"]
+
+
+class WorkflowOutput(TypedDict, total=False):
+    ok: bool
+    workflow: str
+    status: str
+    retryable: bool
+    suggested_next_actions: list[str]
 
 
 def make_client() -> EverOSClient:
@@ -51,7 +64,7 @@ def _render(response: dict[str, Any], response_format: str = "json") -> str:
     return pretty_json(response)
 
 
-def _flush_result_payload(response: dict[str, Any]) -> dict[str, Any]:
+def _flush_result_payload(response: dict[str, Any]) -> WorkflowOutput:
     data = response.get("data", {}) if isinstance(response, dict) else {}
     payload: dict[str, Any] = {"ok": True}
     if isinstance(data, dict):
@@ -66,7 +79,7 @@ def _flush_result_payload(response: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
-def _timeout_payload(operation: str, exc: EverOSTimeoutError) -> dict[str, Any]:
+def _timeout_payload(operation: str, exc: EverOSTimeoutError) -> WorkflowOutput:
     return {
         "ok": False,
         "operation": operation,
@@ -85,7 +98,7 @@ def _save_result_payload(
     flush_requested: bool,
     flush_result: dict[str, Any] | None = None,
     flush_error: EverOSTimeoutError | None = None,
-) -> dict[str, Any]:
+) -> WorkflowOutput:
     data = result.get("data", {}) if isinstance(result, dict) else {}
     status = data.get("status", "") if isinstance(data, dict) else ""
     task_id = data.get("task_id", "") if isinstance(data, dict) else ""
@@ -382,6 +395,152 @@ async def everos_get_settings() -> str:
 async def everos_update_settings(settings: dict[str, Any], strict: bool = True, return_diff: bool = True) -> str:
     """Update EverOS memory-space settings. Only supplied fields are changed."""
     return pretty_json(make_client().update_settings(settings, strict=strict, return_diff=return_diff))
+
+
+@mcp.tool(
+    name="everos_verify_session_ingest",
+    title="Verify EverOS Session Ingest",
+    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
+)
+async def everos_verify_session_ingest(
+    verification_queries: list[str],
+    user_id: str | None = None,
+    session_id: str | None = None,
+    scope: MemoryScope = "personal",
+    memory_types: list[SearchMemoryType] | None = None,
+    top_k: int = 5,
+    timeout: float | None = None,
+) -> WorkflowOutput:
+    """Verify that an existing user/session is searchable by running read-only sample queries."""
+    return verify_session_ingest(
+        client=make_client(),
+        user_id=user_id or default_user_id(),
+        session_id=session_id,
+        scope=scope,
+        verification_queries=verification_queries,
+        memory_types=memory_types,
+        top_k=top_k,
+        timeout=timeout,
+    )
+
+
+@mcp.tool(
+    name="everos_save_and_verify",
+    title="Save and Verify EverOS Memory",
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
+)
+async def everos_save_and_verify(
+    content: str,
+    verification_query: str | None = None,
+    verification_queries: list[str] | None = None,
+    user_id: str | None = None,
+    session_id: str | None = None,
+    scope: MemoryScope = "personal",
+    role: Literal["user", "assistant", "tool", "system"] | None = None,
+    tool_call_id: str | None = None,
+    flush: bool = True,
+    flush_timeout: float | None = None,
+    memory_types: list[SearchMemoryType] | None = None,
+    top_k: int = 5,
+    timeout: float | None = None,
+) -> WorkflowOutput:
+    """Queue one memory message, optionally flush, then verify searchability with sample queries."""
+    return save_and_verify(
+        client=make_client(),
+        content=content,
+        user_id=user_id or default_user_id(),
+        session_id=session_id,
+        scope=scope,
+        role=role,
+        tool_call_id=tool_call_id,
+        flush=flush,
+        flush_timeout=flush_timeout,
+        verification_query=verification_query,
+        verification_queries=verification_queries,
+        memory_types=memory_types,
+        top_k=top_k,
+        timeout=timeout,
+    )
+
+
+@mcp.tool(
+    name="everos_import_and_verify",
+    title="Import and Verify EverOS Memories",
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
+)
+async def everos_import_and_verify(
+    messages: list[dict[str, Any]] | None = None,
+    file_path: str | None = None,
+    verification_queries: list[str] | None = None,
+    user_id: str | None = None,
+    session_id: str | None = None,
+    scope: MemoryScope = "personal",
+    dry_run: bool = False,
+    batch_size: int = 50,
+    flush: bool = True,
+    flush_timeout: float | None = None,
+    memory_types: list[SearchMemoryType] | None = None,
+    top_k: int = 5,
+    timeout: float | None = None,
+) -> WorkflowOutput:
+    """Batch-import messages or a local file, then flush/poll-compatible verify with sample queries."""
+    return import_and_verify(
+        client=make_client(),
+        user_id=user_id or default_user_id(),
+        session_id=session_id,
+        messages=messages,
+        file_path=file_path,
+        scope=scope,
+        dry_run=dry_run,
+        batch_size=batch_size,
+        flush=flush,
+        flush_timeout=flush_timeout,
+        verification_queries=verification_queries,
+        memory_types=memory_types,
+        top_k=top_k,
+        timeout=timeout,
+        workflow="import_and_verify",
+    )
+
+
+@mcp.tool(
+    name="everos_batch_ingest",
+    title="Batch Ingest EverOS Memories",
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
+)
+async def everos_batch_ingest(
+    messages: list[dict[str, Any]] | None = None,
+    file_path: str | None = None,
+    verification_queries: list[str] | None = None,
+    user_id: str | None = None,
+    session_id: str | None = None,
+    scope: MemoryScope = "personal",
+    dry_run: bool = False,
+    batch_size: int = 50,
+    flush: bool = True,
+    flush_timeout: float | None = None,
+    memory_types: list[SearchMemoryType] | None = None,
+    top_k: int = 5,
+    timeout: float | None = None,
+) -> WorkflowOutput:
+    """Dry-run or execute batched EverOS ingest with optional flush and verification report."""
+    return import_and_verify(
+        client=make_client(),
+        user_id=user_id or default_user_id(),
+        session_id=session_id,
+        messages=messages,
+        file_path=file_path,
+        scope=scope,
+        dry_run=dry_run,
+        batch_size=batch_size,
+        flush=flush,
+        flush_timeout=flush_timeout,
+        verification_queries=verification_queries,
+        memory_types=memory_types,
+        top_k=top_k,
+        timeout=timeout,
+        workflow="batch_ingest",
+    )
 
 
 def main() -> None:

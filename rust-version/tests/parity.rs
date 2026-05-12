@@ -375,6 +375,9 @@ fn provider_availability_user_resolution_and_tool_schemas_match_python_surface()
             "everos_memory_get",
             "everos_memory_flush",
             "everos_memory_forget",
+            "everos_memory_save_and_verify",
+            "everos_memory_import_and_verify",
+            "everos_memory_verify_session",
         ]
     );
 
@@ -498,8 +501,8 @@ fn mcp_save_tool_returns_queue_semantics_when_flush_disabled() {
 #[test]
 fn mcp_tool_name_constant_matches_expected_nine_tools() {
     assert_eq!(
-        TOOL_NAMES,
-        [
+        TOOL_NAMES.as_slice(),
+        &[
             "everos_save_memory",
             "everos_add_memories",
             "everos_flush_memories",
@@ -509,6 +512,10 @@ fn mcp_tool_name_constant_matches_expected_nine_tools() {
             "everos_get_task_status",
             "everos_get_settings",
             "everos_update_settings",
+            "everos_batch_ingest",
+            "everos_verify_session_ingest",
+            "everos_save_and_verify",
+            "everos_import_and_verify",
         ]
     );
     assert_eq!(DEFAULT_BASE_URL, "https://api.evermind.ai");
@@ -715,6 +722,274 @@ fn mcp_and_provider_schemas_expose_cloud_v1_parameters() {
             "missing provider search {key}"
         );
     }
+}
+
+#[test]
+fn mcp_and_provider_workflow_tools_are_registered() {
+    let tools = everos_hermes_rust::mcp::tool_definitions();
+    for name in [
+        "everos_batch_ingest",
+        "everos_verify_session_ingest",
+        "everos_save_and_verify",
+        "everos_import_and_verify",
+    ] {
+        let tool = tools
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .unwrap_or_else(|| panic!("missing MCP workflow tool {name}"));
+        assert_eq!(tool["outputSchema"]["properties"]["ok"]["type"], "boolean");
+        assert_eq!(
+            tool["outputSchema"]["properties"]["status"]["type"],
+            "string"
+        );
+    }
+    let schemas = everos_hermes_rust::provider::provider_tool_schemas();
+    for name in [
+        "everos_memory_save_and_verify",
+        "everos_memory_import_and_verify",
+        "everos_memory_verify_session",
+    ] {
+        assert!(
+            schemas.iter().any(|tool| tool["name"] == name),
+            "missing provider workflow tool {name}"
+        );
+    }
+}
+
+#[test]
+fn mcp_save_and_verify_queues_flushes_and_searches() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let (base_url, handle) = sequenced_request_server(
+        vec![
+            json!({"data":{"status":"queued","task_id":"task-save"}}),
+            json!({"data":{"status":"success","task_id":"task-flush"}}),
+            json!({"data":{"episodes":[{"id":"ep1","summary":"espresso preference"}]}}),
+        ],
+        500,
+    );
+    set_env("EVEROS_API_KEY", "test-key");
+    set_env("EVEROS_USER_ID", "u1");
+    set_env("EVEROS_BASE_URL", &base_url);
+
+    let raw = everos_hermes_rust::mcp::call_tool(
+        "everos_save_and_verify",
+        json!({
+            "content":"User prefers espresso.",
+            "session_id":"sess-verify",
+            "verification_query":"espresso preference",
+            "flush":true,
+            "top_k":3
+        }),
+    )
+    .unwrap();
+    let response: Value = serde_json::from_str(&raw).unwrap();
+    let requests = handle.join().unwrap();
+    let paths: Vec<&str> = requests
+        .iter()
+        .map(|raw| raw.lines().next().unwrap_or(""))
+        .collect();
+
+    assert_eq!(response["ok"], true);
+    assert_eq!(response["workflow"], "save_and_verify");
+    assert_eq!(response["status"], "verified");
+    assert_eq!(response["save"]["message_queued"], true);
+    assert_eq!(response["verification"]["verified"], true);
+    assert_eq!(response["verification"]["queries"][0]["hit_count"], 1);
+    assert_eq!(
+        paths,
+        vec![
+            "POST /api/v1/memories HTTP/1.1",
+            "POST /api/v1/memories/flush HTTP/1.1",
+            "POST /api/v1/memories/search HTTP/1.1",
+        ]
+    );
+    assert_eq!(parse_http_body(&requests[2])["top_k"], 3);
+
+    remove_env("EVEROS_API_KEY");
+    remove_env("EVEROS_USER_ID");
+    remove_env("EVEROS_BASE_URL");
+}
+
+#[test]
+fn mcp_import_and_verify_dry_run_reports_warnings_without_http() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    set_env("EVEROS_API_KEY", "test-key");
+    set_env("EVEROS_USER_ID", "u1");
+    remove_env("EVEROS_BASE_URL");
+
+    let raw = everos_hermes_rust::mcp::call_tool(
+        "everos_import_and_verify",
+        json!({
+            "scope":"agent",
+            "dry_run":true,
+            "messages":[
+                {"role":"user","content":"Alpha","timestamp":1},
+                {"role":"user","content":"Alpha","timestamp":2},
+                {"role":"tool","content":"missing id","timestamp":3}
+            ],
+            "verification_queries":["Alpha"]
+        }),
+    )
+    .unwrap();
+    let response: Value = serde_json::from_str(&raw).unwrap();
+
+    assert_eq!(response["ok"], true);
+    assert_eq!(response["workflow"], "import_and_verify");
+    assert_eq!(response["status"], "dry_run");
+    assert_eq!(response["input_count"], 3);
+    assert_eq!(response["queued_count"], 0);
+    let warnings = response["warnings"].as_array().unwrap();
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.as_str().unwrap().contains("duplicate"))
+    );
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.as_str().unwrap().contains("tool_call_id"))
+    );
+
+    remove_env("EVEROS_API_KEY");
+    remove_env("EVEROS_USER_ID");
+}
+
+#[test]
+fn mcp_batch_ingest_batches_flushes_and_verifies() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let (base_url, handle) = sequenced_request_server(
+        vec![
+            json!({"data":{"status":"queued","task_id":"task-1"}}),
+            json!({"data":{"status":"queued","task_id":"task-2"}}),
+            json!({"data":{"status":"success"}}),
+            json!({"data":{"profiles":[{"id":"p1","profile_data":{"explicit_info":"Alpha"}}]}}),
+        ],
+        500,
+    );
+    set_env("EVEROS_API_KEY", "test-key");
+    set_env("EVEROS_USER_ID", "u1");
+    set_env("EVEROS_BASE_URL", &base_url);
+
+    let raw = everos_hermes_rust::mcp::call_tool(
+        "everos_batch_ingest",
+        json!({
+            "session_id":"sess-batch",
+            "batch_size":2,
+            "flush":true,
+            "verification_queries":["Alpha"],
+            "messages":[
+                {"role":"user","content":"Alpha","timestamp":1},
+                {"role":"assistant","content":"Beta","timestamp":2},
+                {"role":"user","content":"Gamma","timestamp":3}
+            ]
+        }),
+    )
+    .unwrap();
+    let response: Value = serde_json::from_str(&raw).unwrap();
+    let requests = handle.join().unwrap();
+
+    assert_eq!(response["ok"], true);
+    assert_eq!(response["workflow"], "batch_ingest");
+    assert_eq!(response["status"], "verified");
+    assert_eq!(response["input_count"], 3);
+    assert_eq!(response["queued_count"], 3);
+    assert_eq!(response["batches"].as_array().unwrap().len(), 2);
+    assert_eq!(requests.len(), 4);
+    assert_eq!(
+        parse_http_body(&requests[0])["messages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        parse_http_body(&requests[1])["messages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    remove_env("EVEROS_API_KEY");
+    remove_env("EVEROS_USER_ID");
+    remove_env("EVEROS_BASE_URL");
+}
+
+#[test]
+fn mcp_verify_session_ingest_is_read_only_and_reports_misses() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let (base_url, handle) = sequenced_request_server(
+        vec![
+            json!({"data":{"episodes":[{"id":"ep1","summary":"found"}]}}),
+            json!({"data":{"episodes":[]}}),
+        ],
+        500,
+    );
+    set_env("EVEROS_API_KEY", "test-key");
+    set_env("EVEROS_USER_ID", "u1");
+    set_env("EVEROS_BASE_URL", &base_url);
+
+    let raw = everos_hermes_rust::mcp::call_tool(
+        "everos_verify_session_ingest",
+        json!({"session_id":"sess-readonly","verification_queries":["found","missing"]}),
+    )
+    .unwrap();
+    let response: Value = serde_json::from_str(&raw).unwrap();
+    let requests = handle.join().unwrap();
+
+    assert_eq!(response["ok"], true);
+    assert_eq!(response["workflow"], "verify_session_ingest");
+    assert_eq!(response["status"], "partially_verified");
+    assert_eq!(response["verified"], false);
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests
+            .iter()
+            .all(|raw| raw.starts_with("POST /api/v1/memories/search "))
+    );
+
+    remove_env("EVEROS_API_KEY");
+    remove_env("EVEROS_USER_ID");
+    remove_env("EVEROS_BASE_URL");
+}
+
+#[test]
+fn provider_workflow_tools_run_save_and_verify() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let home = temp_home("provider_save_verify");
+    let (base_url, handle) = sequenced_request_server(
+        vec![
+            json!({"data":{"status":"queued","task_id":"task-save"}}),
+            json!({"data":{"status":"success"}}),
+            json!({"data":{"episodes":[{"summary":"pytest preference"}]}}),
+        ],
+        500,
+    );
+    fs::write(
+        home.join(".env"),
+        format!("EVEROS_API_KEY=test-key\nEVEROS_USER_ID=u1\nEVEROS_BASE_URL={base_url}\n"),
+    )
+    .unwrap();
+    remove_env("EVEROS_API_KEY");
+    remove_env("EVEROS_USER_ID");
+    remove_env("EVEROS_BASE_URL");
+    set_env("HERMES_HOME", home.to_str().unwrap());
+
+    let provider = EverOSProvider::initialize(ProviderInit::for_test("sess-1", &home)).unwrap();
+    let raw = provider
+        .handle_tool_call(
+            "everos_memory_save_and_verify",
+            json!({"content":"User prefers pytest.","verification_query":"pytest preference","session_id":"sess-verify","flush":true}),
+        )
+        .unwrap();
+    let response: Value = serde_json::from_str(&raw).unwrap();
+    let requests = handle.join().unwrap();
+
+    assert_eq!(response["ok"], true);
+    assert_eq!(response["status"], "verified");
+    assert_eq!(requests.len(), 3);
+
+    remove_env("HERMES_HOME");
 }
 
 #[test]

@@ -42,7 +42,7 @@ Secrets stay in the normal Hermes secret file, so users can edit `~/.hermes/.env
 ## Features
 
 - **Optional Hermes memory provider**: set `memory.provider: everos` when you want automatic recall/capture hooks.
-- **Nine explicit MCP tools**: save, add, flush, search, get, delete, task status, get settings, and update settings.
+- **Thirteen explicit MCP tools**: the nine Cloud v1 primitives plus batch/import/verify workflow helpers for safer migration and searchability checks.
 - **Dotenv fallback**: credential lookup is `process env` -> `$HERMES_HOME/.env` -> `~/.hermes/.env`.
 - **Two runtimes**: Python/FastMCP source implementation plus a Rust binary with a prebuilt Linux x86_64 package.
 - **Cloud v1 contract**: personal and agent memory are supported; group, sender, and multimodal object storage endpoints are explicitly out of scope. See [`docs/everos_cloud_v1_contract.md`](docs/everos_cloud_v1_contract.md).
@@ -271,6 +271,9 @@ Hermes provider tools exposed to the agent:
 | `everos_memory_get` | Retrieve structured memories by type and page. |
 | `everos_memory_flush` | Force EverOS extraction for the user/session; accepts per-call `timeout` and returns retryable timeout guidance. |
 | `everos_memory_forget` | Delete a memory by id; requires `confirm=true`. |
+| `everos_memory_save_and_verify` | Queue one message, optionally flush, then run targeted search verification and return a structured queue/verification report. |
+| `everos_memory_import_and_verify` | Dry-run or execute batched message/file import with warnings, per-batch status, optional flush, and verification queries. |
+| `everos_memory_verify_session` | Read-only verification helper for an existing user/session/scope using sample search queries. |
 
 Advanced non-secret provider settings live in `$HERMES_HOME/everos.json`:
 
@@ -335,7 +338,7 @@ When configured in Hermes, the stdio MCP server is launched as a Hermes-managed 
 
 ## MCP Operations
 
-The MCP server exposes nine tools:
+The MCP server exposes thirteen tools:
 
 | Tool | Purpose | Read-only? |
 | --- | --- | --- |
@@ -348,6 +351,10 @@ The MCP server exposes nine tools:
 | `everos_get_task_status` | Check an asynchronous extraction task. | Yes |
 | `everos_get_settings` | Read EverOS memory-space settings. | Yes |
 | `everos_update_settings` | Update whitelisted EverOS settings fields and return a before/after diff. | No |
+| `everos_batch_ingest` | Dry-run or execute batched ingest, optionally flush, and return per-batch plus verification status. | No |
+| `everos_verify_session_ingest` | Read-only search verification for an existing user/session/scope. | Yes |
+| `everos_save_and_verify` | Queue one message, optionally flush, then verify recall with one or more search queries. | No |
+| `everos_import_and_verify` | Batch-import messages or a local file with dry-run validation, optional flush, and verification report. | No |
 
 Common search call shape:
 
@@ -392,7 +399,8 @@ For lower latency or stricter control, keep `auto_capture=true` but set `auto_re
 | `src/everos_hermes/client.py` | Stdlib EverOS v1 REST client and API error handling. |
 | `src/everos_hermes/env.py` | Hermes dotenv lookup helpers for secrets and endpoint overrides. |
 | `src/everos_hermes/formatting.py` | EverOS response to compact prompt/Markdown formatting. |
-| `src/everos_hermes/mcp_server.py` | FastMCP stdio server and nine MCP tools. |
+| `src/everos_hermes/mcp_server.py` | FastMCP stdio server and thirteen MCP tools. |
+| `src/everos_hermes/workflows.py` | Shared batch/import/save-and-verify workflow helpers used by MCP and provider tools. |
 | `src/everos_hermes/provider.py` | Hermes `MemoryProvider` implementation. |
 | `integrations/hermes/` | Thin plugin entrypoint and Hermes-specific install notes. |
 | `tests/` | Client, provider, and MCP tool tests with fake clients / HTTP. |

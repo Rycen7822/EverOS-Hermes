@@ -380,3 +380,113 @@ def test_provider_background_error_records_redacted_log_and_status(monkeypatch, 
     assert "sync_turn.personal" in log_text
     assert "sk-test" not in log_text
     assert "please remember failure" not in log_text
+
+
+
+def test_provider_exposes_and_runs_save_and_verify_workflow(monkeypatch, tmp_path):
+    from everos_hermes.provider import EverOSMemoryProvider
+
+    calls = []
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def add_memories(self, **kwargs):
+            calls.append(("add", kwargs))
+            return {"data": {"status": "queued", "task_id": "task-save"}}
+
+        def flush_memories(self, **kwargs):
+            calls.append(("flush", kwargs))
+            return {"data": {"status": "success"}}
+
+        def search_memories(self, **kwargs):
+            calls.append(("search", kwargs))
+            return {"data": {"episodes": [{"summary": "pytest preference"}]}}
+
+    monkeypatch.setenv("EVEROS_API_KEY", "sk-test")
+    monkeypatch.setenv("EVEROS_USER_ID", "u1")
+    monkeypatch.setattr("everos_hermes.provider.EverOSClient", FakeClient)
+    provider = EverOSMemoryProvider()
+    provider.initialize(session_id="sess-1", hermes_home=str(tmp_path), platform="cli")
+
+    schemas = {schema["name"]: schema for schema in provider.get_tool_schemas()}
+    assert "everos_memory_save_and_verify" in schemas
+    assert "everos_memory_import_and_verify" in schemas
+    assert "everos_memory_verify_session" in schemas
+
+    raw = provider.handle_tool_call("everos_memory_save_and_verify", {
+        "content": "User prefers pytest.",
+        "verification_query": "pytest preference",
+        "session_id": "sess-verify",
+        "flush": True,
+    })
+
+    result = json.loads(raw)
+    assert result["ok"] is True
+    assert result["status"] == "verified"
+    assert result["verification"]["verified"] is True
+    assert [call[0] for call in calls] == ["add", "flush", "search"]
+
+
+def test_provider_import_and_verify_dry_run_does_not_write(monkeypatch, tmp_path):
+    from everos_hermes.provider import EverOSMemoryProvider
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def add_memories(self, **kwargs):  # pragma: no cover - should not be called
+            raise AssertionError("dry-run must not write")
+
+    monkeypatch.setenv("EVEROS_API_KEY", "sk-test")
+    monkeypatch.setenv("EVEROS_USER_ID", "u1")
+    monkeypatch.setattr("everos_hermes.provider.EverOSClient", FakeClient)
+    provider = EverOSMemoryProvider()
+    provider.initialize(session_id="sess-1", hermes_home=str(tmp_path), platform="cli")
+
+    raw = provider.handle_tool_call("everos_memory_import_and_verify", {
+        "messages": [
+            {"role": "user", "content": "Alpha", "timestamp": 1},
+            {"role": "tool", "content": "missing id", "timestamp": 2},
+        ],
+        "scope": "agent",
+        "dry_run": True,
+    })
+
+    result = json.loads(raw)
+    assert result["ok"] is True
+    assert result["status"] == "dry_run"
+    assert result["queued_count"] == 0
+    assert any("tool_call_id" in warning for warning in result["warnings"])
+
+
+def test_provider_verify_session_tool_is_read_only(monkeypatch, tmp_path):
+    from everos_hermes.provider import EverOSMemoryProvider
+
+    calls = []
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def search_memories(self, **kwargs):
+            calls.append(kwargs)
+            return {"data": {"episodes": []}}
+
+    monkeypatch.setenv("EVEROS_API_KEY", "sk-test")
+    monkeypatch.setenv("EVEROS_USER_ID", "u1")
+    monkeypatch.setattr("everos_hermes.provider.EverOSClient", FakeClient)
+    provider = EverOSMemoryProvider()
+    provider.initialize(session_id="sess-1", hermes_home=str(tmp_path), platform="cli")
+
+    raw = provider.handle_tool_call("everos_memory_verify_session", {
+        "session_id": "sess-verify",
+        "verification_queries": ["missing"],
+    })
+
+    result = json.loads(raw)
+    assert result["ok"] is True
+    assert result["status"] == "not_yet_searchable"
+    assert result["verified"] is False
+    assert calls[0]["session_id"] == "sess-verify"

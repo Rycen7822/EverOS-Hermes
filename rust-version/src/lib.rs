@@ -10,3 +10,4 @@ pub mod env;
 pub mod formatting;
 pub mod mcp;
 pub mod provider;
+pub mod workflows;

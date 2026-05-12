@@ -11,6 +11,7 @@ from .client import DEFAULT_BASE_URL, DEFAULT_MEMORY_TYPES, EverOSClient, EverOS
 from .env import get_env
 from .formatting import format_search_context, pretty_json
 from .schemas import normalize_scope
+from .workflows import import_and_verify, save_and_verify, verify_session_ingest
 
 try:
     from agent.memory_provider import MemoryProvider
@@ -167,6 +168,61 @@ FORGET_SCHEMA = {
             "confirm": {"type": "boolean", "description": "Must be true to delete."},
         },
         "required": ["memory_id", "confirm"],
+    },
+}
+
+SAVE_AND_VERIFY_SCHEMA = {
+    "name": "everos_memory_save_and_verify",
+    "description": "Queue one memory message, optionally flush extraction, then verify searchability with sample queries.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "content": {"type": "string", "description": "Memory content to store."},
+            "verification_query": {"type": "string", "description": "Primary query used to verify recall."},
+            "verification_queries": {"type": "array", "items": {"type": "string"}, "description": "Additional verification queries."},
+            "session_id": {"type": "string", "description": "Optional session id."},
+            "scope": {"type": "string", "enum": ["personal", "agent"], "description": "Memory scope."},
+            "role": {"type": "string", "enum": ["user", "assistant", "tool", "system"], "description": "Message role; role=tool requires tool_call_id."},
+            "tool_call_id": {"type": "string", "description": "Required when role=tool for agent memory."},
+            "flush": {"type": "boolean", "description": "Trigger extraction before verification. Default true."},
+            "top_k": {"type": "integer", "description": "Verification search top_k."},
+        },
+        "required": ["content"],
+    },
+}
+
+IMPORT_AND_VERIFY_SCHEMA = {
+    "name": "everos_memory_import_and_verify",
+    "description": "Batch-import messages or a local file, with dry-run validation, optional flush, and verification report.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "messages": {"type": "array", "items": {"type": "object"}, "description": "Messages to import."},
+            "file_path": {"type": "string", "description": "Optional local JSON/JSONL/Markdown file to import."},
+            "verification_queries": {"type": "array", "items": {"type": "string"}, "description": "Queries used to verify recall."},
+            "session_id": {"type": "string", "description": "Optional session id."},
+            "scope": {"type": "string", "enum": ["personal", "agent"], "description": "Memory scope."},
+            "dry_run": {"type": "boolean", "description": "Validate and summarize without writing."},
+            "batch_size": {"type": "integer", "description": "Messages per add_memories call."},
+            "flush": {"type": "boolean", "description": "Flush after importing. Default true."},
+            "top_k": {"type": "integer", "description": "Verification search top_k."},
+        },
+    },
+}
+
+VERIFY_SESSION_SCHEMA = {
+    "name": "everos_memory_verify_session",
+    "description": "Read-only verification for an existing user/session using sample search queries.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "verification_queries": {"type": "array", "items": {"type": "string"}, "description": "Queries used to verify recall."},
+            "session_id": {"type": "string", "description": "Optional session id."},
+            "scope": {"type": "string", "enum": ["personal", "agent"], "description": "Memory scope."},
+            "memory_types": {"type": "array", "items": {"type": "string", "enum": ["episodic_memory", "profile", "raw_message", "agent_memory"]}},
+            "top_k": {"type": "integer", "description": "Verification search top_k."},
+        },
+        "required": ["verification_queries"],
     },
 }
 
@@ -463,7 +519,16 @@ class EverOSMemoryProvider(MemoryProvider):
         return None
 
     def get_tool_schemas(self) -> list[dict[str, Any]]:
-        return [SAVE_SCHEMA, SEARCH_SCHEMA, GET_SCHEMA, FLUSH_SCHEMA, FORGET_SCHEMA]
+        return [
+            SAVE_SCHEMA,
+            SEARCH_SCHEMA,
+            GET_SCHEMA,
+            FLUSH_SCHEMA,
+            FORGET_SCHEMA,
+            SAVE_AND_VERIFY_SCHEMA,
+            IMPORT_AND_VERIFY_SCHEMA,
+            VERIFY_SESSION_SCHEMA,
+        ]
 
     def handle_tool_call(self, tool_name: str, args: dict[str, Any], **kwargs: Any) -> str:
         if not self._active or not self._client:
@@ -479,6 +544,12 @@ class EverOSMemoryProvider(MemoryProvider):
                 return self._tool_flush(args)
             if tool_name == "everos_memory_forget":
                 return self._tool_forget(args)
+            if tool_name == "everos_memory_save_and_verify":
+                return self._tool_save_and_verify(args)
+            if tool_name == "everos_memory_import_and_verify":
+                return self._tool_import_and_verify(args)
+            if tool_name == "everos_memory_verify_session":
+                return self._tool_verify_session(args)
             return _tool_error(f"Unknown EverOS memory tool: {tool_name}")
         except EverOSError as exc:
             return _tool_error(str(exc))
@@ -584,6 +655,63 @@ class EverOSMemoryProvider(MemoryProvider):
             return _tool_error("memory_id is required")
         response = self._client.delete_memories(memory_id=memory_id)
         return pretty_json(response)
+
+    def _tool_save_and_verify(self, args: dict[str, Any]) -> str:
+        content = str(args.get("content") or "").strip()
+        if not content:
+            return _tool_error("content is required")
+        result = save_and_verify(
+            client=self._client,
+            content=content,
+            user_id=self._user_id,
+            session_id=str(args.get("session_id") or self._session_id or "") or None,
+            scope=normalize_scope(str(args.get("scope") or "personal")),
+            role=str(args.get("role") or "").strip() or None,
+            tool_call_id=str(args.get("tool_call_id") or "").strip() or None,
+            flush=_as_bool(args.get("flush", True), True),
+            flush_timeout=_float_or_none(args.get("flush_timeout")),
+            verification_query=str(args.get("verification_query") or "").strip() or None,
+            verification_queries=args.get("verification_queries") if isinstance(args.get("verification_queries"), list) else None,
+            memory_types=args.get("memory_types") if isinstance(args.get("memory_types"), list) else None,
+            top_k=_top_k(args.get("top_k", self._config["top_k"]), self._config["top_k"]),
+            timeout=_float_or_none(args.get("timeout")),
+        )
+        return pretty_json(result)
+
+    def _tool_import_and_verify(self, args: dict[str, Any]) -> str:
+        result = import_and_verify(
+            client=self._client,
+            user_id=self._user_id,
+            session_id=str(args.get("session_id") or self._session_id or "") or None,
+            messages=args.get("messages") if isinstance(args.get("messages"), list) else None,
+            file_path=str(args.get("file_path") or "").strip() or None,
+            scope=normalize_scope(str(args.get("scope") or "personal")),
+            dry_run=_as_bool(args.get("dry_run", False), False),
+            batch_size=_int_between(args.get("batch_size", 50), 1, 100, 50),
+            flush=_as_bool(args.get("flush", True), True),
+            flush_timeout=_float_or_none(args.get("flush_timeout")),
+            verification_queries=args.get("verification_queries") if isinstance(args.get("verification_queries"), list) else None,
+            memory_types=args.get("memory_types") if isinstance(args.get("memory_types"), list) else None,
+            top_k=_top_k(args.get("top_k", self._config["top_k"]), self._config["top_k"]),
+            timeout=_float_or_none(args.get("timeout")),
+        )
+        return pretty_json(result)
+
+    def _tool_verify_session(self, args: dict[str, Any]) -> str:
+        queries = args.get("verification_queries") if isinstance(args.get("verification_queries"), list) else []
+        if not queries:
+            return _tool_error("verification_queries is required")
+        result = verify_session_ingest(
+            client=self._client,
+            user_id=self._user_id,
+            session_id=str(args.get("session_id") or self._session_id or "") or None,
+            scope=normalize_scope(str(args.get("scope") or "personal")),
+            verification_queries=[str(query) for query in queries],
+            memory_types=args.get("memory_types") if isinstance(args.get("memory_types"), list) else None,
+            top_k=_top_k(args.get("top_k", self._config["top_k"]), self._config["top_k"]),
+            timeout=_float_or_none(args.get("timeout")),
+        )
+        return pretty_json(result)
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
         if not self._active or not self._write_enabled or not self._config["auto_capture"] or not self._client:
