@@ -11,8 +11,9 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 try:
     from agent.memory_provider import MemoryProvider
@@ -299,5 +300,73 @@ class EverOSRustMemoryProvider(MemoryProvider):
         return shutil.which("everos-hermes-rust") or ""
 
 
+TOOLSET = "everos"
+SKILL_NAME = "everos-memory-curation"
+SKILL_DESCRIPTION = "Operate and curate EverOS-Hermes memory safely."
+_REQUIRED_ENV = ["EVEROS_API_KEY"]
+_PLUGIN_TOOL_SESSION_ID = "everos-rust-plugin-tools"
+
+_tool_provider: EverOSRustMemoryProvider | None = None
+_tool_provider_lock = threading.Lock()
+
+
+def _skill_path() -> Path:
+    return Path(__file__).resolve().parent / "resources" / "skills" / SKILL_NAME / "SKILL.md"
+
+
+def _provider_available() -> bool:
+    return EverOSRustMemoryProvider().is_available()
+
+
+def _get_tool_provider() -> EverOSRustMemoryProvider:
+    global _tool_provider
+    with _tool_provider_lock:
+        if _tool_provider is None:
+            _tool_provider = EverOSRustMemoryProvider()
+            _tool_provider.initialize(_PLUGIN_TOOL_SESSION_ID)
+        return _tool_provider
+
+
+def _make_tool_handler(tool_name: str) -> Callable[..., str]:
+    def _handler(args: dict[str, Any] | None = None, **kwargs: Any) -> str:
+        provider = _get_tool_provider()
+        return provider.handle_tool_call(tool_name, args or {}, **kwargs)
+
+    return _handler
+
+
+def _register_standalone_tools(ctx: Any) -> None:
+    if not hasattr(ctx, "register_tool"):
+        return
+    provider = EverOSRustMemoryProvider()
+    for schema in provider.get_tool_schemas():
+        name = str(schema.get("name") or "").strip()
+        if not name:
+            continue
+        ctx.register_tool(
+            name=name,
+            toolset=TOOLSET,
+            schema=schema,
+            handler=_make_tool_handler(name),
+            check_fn=_provider_available,
+            requires_env=_REQUIRED_ENV,
+            description=str(schema.get("description") or ""),
+            emoji="🧠",
+        )
+
+
+def _register_bundled_skill(ctx: Any) -> None:
+    if not hasattr(ctx, "register_skill"):
+        return
+    path = _skill_path()
+    if path.exists():
+        ctx.register_skill(SKILL_NAME, path, SKILL_DESCRIPTION)
+
+
 def register(ctx: Any) -> None:
-    ctx.register_memory_provider(EverOSRustMemoryProvider())
+    if hasattr(ctx, "register_memory_provider"):
+        ctx.register_memory_provider(EverOSRustMemoryProvider())
+        return
+
+    _register_standalone_tools(ctx)
+    _register_bundled_skill(ctx)

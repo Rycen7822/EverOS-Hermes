@@ -1,89 +1,87 @@
-# EverOS memory provider for Hermes Agent
+# EverOS Hermes plugin
 
-This folder is the Hermes memory-provider plugin entrypoint for EverOS.
-It mirrors the lightweight `agentmemory-main/integrations/hermes` pattern: copy the plugin into Hermes, set `memory.provider`, and run the MCP server if you also want explicit EverOS tools.
+This directory is the single Hermes plugin entrypoint for EverOS-Hermes.
+Copy it to `$HERMES_HOME/plugins/everos` or `~/.hermes/plugins/everos`.
 
-## What it does
+It supports both Hermes loader paths from the same plugin directory:
 
-- `prefetch()` searches EverOS before each LLM turn and injects relevant episode/profile context.
-- `sync_turn()` stores completed user/assistant turns in EverOS and optionally flushes extraction.
-- `on_memory_write()` mirrors explicit Hermes memory writes into EverOS.
-- `on_session_end()` flushes the active EverOS session.
-- Provider tools exposed to Hermes: `everos_memory_search`, `everos_memory_save`, `everos_memory_get`, `everos_memory_flush`, `everos_memory_forget`.
+- Standalone plugin loading via `hermes plugins enable everos` registers the `everos` toolset and the bundled skill `everos:everos-memory-curation`.
+- Memory-provider loading via `hermes config set memory.provider everos` registers automatic EverOS recall/capture hooks.
 
-## Install
+Use both settings for normal operation.
 
-From this repository:
+## Install from this repository
 
 ```bash
-cd /home/xu/project/tools/EverOS-Hermes
+cd /path/to/EverOS-Hermes
 python -m pip install -e .
-mkdir -p ~/.hermes/plugins
-cp -r integrations/hermes ~/.hermes/plugins/everos
+
+mkdir -p "${HERMES_HOME:-$HOME/.hermes}/plugins"
+rm -rf "${HERMES_HOME:-$HOME/.hermes}/plugins/everos"
+cp -R integrations/hermes "${HERMES_HOME:-$HOME/.hermes}/plugins/everos"
+
+hermes plugins enable everos
+hermes config set memory.provider everos
 ```
 
-Set credentials in `~/.hermes/.env` or your shell:
+Set credentials in `$HERMES_HOME/.env`, `~/.hermes/.env`, or the process environment:
 
 ```bash
 EVEROS_API_KEY=your_everos_api_key
-# Optional but recommended for a stable single-user CLI identity:
 EVEROS_USER_ID=hermes_default
-# Optional:
+# optional:
 EVEROS_BASE_URL=https://api.evermind.ai
 ```
 
-Lookup order is: process environment, `$HERMES_HOME/.env`, then `~/.hermes/.env`.
-The EverOS MCP server reads the dotenv file itself, so you normally do not need
-to duplicate the key in an MCP `env:` block.
+Restart Hermes CLI/WebUI/gateway after changing plugin, provider, or secret configuration.
 
-Then set Hermes config:
+## Registered toolset
 
-```yaml
-memory:
-  provider: everos
+The standalone plugin registers these tool names under the `everos` toolset:
+
+- `everos_memory_save`
+- `everos_memory_search`
+- `everos_memory_get`
+- `everos_memory_flush`
+- `everos_memory_forget`
+- `everos_memory_save_and_verify`
+- `everos_memory_import_and_verify`
+- `everos_memory_verify_session`
+
+If the memory provider is also active, Hermes skips duplicate tool schemas and routes the same tool names through the active provider instance. If the standalone plugin is enabled without `memory.provider: everos`, the plugin lazily initializes its own provider for tool calls.
+
+## Bundled skill
+
+The operator/curation runbook is bundled at:
+
+```text
+resources/skills/everos-memory-curation/SKILL.md
 ```
 
-Restart Hermes (or gateway/WebUI) after changing provider config.
+Load it by qualified name:
 
-## Optional MCP server
-
-After `python -m pip install -e .`, add this to `~/.hermes/config.yaml`:
-
-```yaml
-mcp_servers:
-  everos:
-    command: python
-    args:
-      - -m
-      - everos_hermes.mcp_server
+```text
+/skill everos:everos-memory-curation
 ```
 
-Keep `EVEROS_API_KEY` / `EVEROS_USER_ID` in `~/.hermes/.env` or the environment that launches Hermes. The server reads that file itself, so an MCP `env:` block is optional. If you must use an MCP `env:` block, put real non-placeholder values there and avoid committing secrets.
+Do not install it separately into `~/.hermes/skills/` unless you intentionally want a user-local fork outside this plugin.
 
-Then run:
+## Advanced config
 
-```bash
-hermes mcp test everos
-```
-
-If Hermes is already running, use `/reload-mcp` or restart the process.
-
-## Config file
-
-Advanced non-secret settings live at `$HERMES_HOME/everos.json`:
+Advanced non-secret settings live at `$HERMES_HOME/everos.json`. Common settings:
 
 ```json
 {
-  "base_url": "https://api.evermind.ai",
-  "user_id": "hermes_{identity}",
   "auto_recall": true,
   "auto_capture": true,
-  "flush_after_turn": true,
+  "capture_agent_memory": true,
+  "agent_recall": true,
+  "agent_flush_after_turn": true,
   "search_method": "hybrid",
-  "top_k": 5,
-  "memory_types": ["episodic_memory", "profile"],
-  "timeout": 10.0
+  "top_k": 2,
+  "max_context_items": 2,
+  "max_context_chars": 3000
 }
 ```
 
-`EVEROS_USER_ID` overrides `everos.json`. The value can use `{user_id}`, `{user_name}`, `{identity}`, and `{platform}` placeholders when the provider is initialized by Hermes.
+`EVEROS_USER_ID` overrides `everos.json`. It can use `{user_id}`, `{user_name}`, `{identity}`, and `{platform}` placeholders when Hermes initializes the provider.

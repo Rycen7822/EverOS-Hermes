@@ -38,16 +38,20 @@ Target: $TARGET
 
 ## Contents
 
-- bin/everos-hermes-rust — Rust MCP server and Hermes provider helper binary
-- integrations/hermes — thin Hermes Python memory-provider plugin shim
+- bin/everos-hermes-rust — Rust provider helper and stdio compatibility binary
+- integrations/hermes — single Hermes plugin directory with provider shim, tools, and bundled skill
 - README.md — Rust runtime documentation
 
 ## Quick install
 
 \`\`\`bash
-mkdir -p ~/.local/share/everos-hermes
-cp -R . ~/.local/share/everos-hermes/
-~/.local/share/everos-hermes/bin/everos-hermes-rust --help
+INSTALL_DIR="\$HOME/.local/share/everos-hermes"
+HERMES_HOME="\${HERMES_HOME:-\$HOME/.hermes}"
+mkdir -p "\$INSTALL_DIR" "\$HERMES_HOME/plugins"
+cp -R . "\$INSTALL_DIR/"
+rm -rf "\$HERMES_HOME/plugins/everos"
+cp -R "\$INSTALL_DIR/integrations/hermes" "\$HERMES_HOME/plugins/everos"
+"\$INSTALL_DIR/bin/everos-hermes-rust" --help
 \`\`\`
 
 Set secrets in \`\${HERMES_HOME:-\$HOME/.hermes}/.env\`, not in committed config. Use an absolute path for \`EVEROS_HERMES_RUST_BIN\`; this package's dotenv parser does not expand \`~\`, \`\$HOME\`, or \`\$INSTALL_DIR\` inside values.
@@ -58,15 +62,14 @@ EVEROS_USER_ID=hermes_default
 EVEROS_HERMES_RUST_BIN=/home/you/.local/share/everos-hermes/bin/everos-hermes-rust
 \`\`\`
 
-For Hermes provider use, copy the plugin shim and select the provider:
+Enable both plugin roles:
 
 \`\`\`bash
-HERMES_HOME="\${HERMES_HOME:-\$HOME/.hermes}"
-mkdir -p "\$HERMES_HOME/plugins"
-rm -rf "\$HERMES_HOME/plugins/everos"
-cp -R /home/you/.local/share/everos-hermes/integrations/hermes "\$HERMES_HOME/plugins/everos"
+hermes plugins enable everos
 hermes config set memory.provider everos
 \`\`\`
+
+Load the bundled runbook with \`/skill everos:everos-memory-curation\`. Restart Hermes CLI/WebUI/gateway after changing plugin, provider, or secret configuration.
 EOF
 
 tar -C "$DIST_DIR" -czf "$ARCHIVE" "$PKG_NAME"

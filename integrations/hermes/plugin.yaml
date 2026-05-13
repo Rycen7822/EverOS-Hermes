@@ -1,9 +1,28 @@
 name: everos
-version: 0.2.0
-description: "EverOS Cloud long-term memory provider for Hermes Agent with MCP tools."
+version: 0.3.0
+kind: standalone
+description: "One Hermes plugin for EverOS Cloud memory: automatic memory provider hooks, explicit tools, and bundled curation skill."
 author: "Hermes Agent integration"
 homepage: "https://everos.evermind.ai/"
-hooks:
+requires_env:
+  - name: EVEROS_API_KEY
+    description: "EverOS API key. Store it in $HERMES_HOME/.env or ~/.hermes/.env, not in plugin source."
+  - name: EVEROS_USER_ID
+    description: "Optional stable EverOS user id/template."
+    optional: true
+  - name: EVEROS_BASE_URL
+    description: "Optional EverOS API base URL override."
+    optional: true
+provides_tools:
+  - everos_memory_save
+  - everos_memory_search
+  - everos_memory_get
+  - everos_memory_flush
+  - everos_memory_forget
+  - everos_memory_save_and_verify
+  - everos_memory_import_and_verify
+  - everos_memory_verify_session
+provides_hooks:
   - on_session_end
   - on_memory_write
   - on_pre_compress
