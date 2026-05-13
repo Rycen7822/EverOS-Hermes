@@ -1,7 +1,7 @@
 ---
 name: everos-memory-curation
 description: "Use proactively when complex or iterative work may produce durable EverOS/Hermes memory: recall, save, verify, clean, compress, or migrate reusable workflows, debugging lessons, tool/API quirks, and agent cases without saving noisy task logs."
-version: 1.0.8
+version: 1.0.9
 author: Hermes Agent
 license: MIT
 metadata:

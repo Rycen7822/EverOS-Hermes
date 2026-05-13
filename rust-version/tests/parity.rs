@@ -747,11 +747,17 @@ fn mcp_save_and_verify_agent_scope_reports_structured_visibility() {
         "not_visible"
     );
     assert_eq!(response["agent_visibility"]["agent_raw_queued"], true);
+    assert_eq!(response["agent_visibility"]["verification_user_id"], "u1");
+    assert_eq!(response["agent_visibility"]["verification_session_id"], "sess-agent");
+    let visibility_checks = response["agent_visibility"]["agent_visibility_checks"]
+        .as_array()
+        .unwrap();
+    assert!(visibility_checks.iter().all(|check| check["user_id"] == "u1"));
+    assert!(visibility_checks
+        .iter()
+        .all(|check| check["session_id"] == "sess-agent"));
     assert_eq!(
-        response["agent_visibility"]["agent_visibility_checks"]
-            .as_array()
-            .unwrap()
-            .len(),
+        visibility_checks.len(),
         3
     );
     assert_eq!(

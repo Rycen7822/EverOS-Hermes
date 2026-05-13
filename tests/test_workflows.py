@@ -132,6 +132,10 @@ def test_save_and_verify_agent_reports_not_visible_separately_from_queue():
     assert result["agent_visibility"]["agent_flush"]["status"] == "success"
     assert result["agent_visibility"]["agent_structured_visible"] is False
     assert result["agent_visibility"]["agent_visibility_status"] == "not_visible"
+    assert result["agent_visibility"]["verification_user_id"] == "u1"
+    assert result["agent_visibility"]["verification_session_id"] == "s1"
+    assert all(check["user_id"] == "u1" for check in result["agent_visibility"]["agent_visibility_checks"])
+    assert all(check["session_id"] == "s1" for check in result["agent_visibility"]["agent_visibility_checks"])
     assert result["status"] == "agent_not_visible"
     assert result["verification"]["status"] == "agent_not_visible"
 
@@ -155,5 +159,9 @@ def test_verify_session_ingest_agent_scope_returns_visibility_checks():
     assert visibility["agent_raw_queued"] is None
     assert visibility["agent_structured_visible"] is False
     assert visibility["agent_visibility_status"] == "not_visible"
+    assert visibility["verification_user_id"] == "u1"
+    assert visibility["verification_session_id"] == "s1"
     assert [check["kind"] for check in visibility["agent_visibility_checks"]] == ["search", "get", "get"]
+    assert all(check["user_id"] == "u1" for check in visibility["agent_visibility_checks"])
+    assert all(check["session_id"] == "s1" for check in visibility["agent_visibility_checks"])
     assert visibility["agent_visibility_checks"][0]["memory_types"] == ["agent_memory"]

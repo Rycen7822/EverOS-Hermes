@@ -717,7 +717,13 @@ impl EverOSProvider {
         } else if let Some(flush_payload) = flush_payload
             && let Ok(mut slot) = self.last_agent_visibility_status.lock()
         {
-            *slot = build_agent_visibility_report(Some(true), Some(flush_payload), vec![]);
+            *slot = build_agent_visibility_report(
+                Some(true),
+                Some(flush_payload),
+                vec![],
+                Some(&self.user_id),
+                Some(session_id),
+            );
         }
         Ok(true)
     }
@@ -849,7 +855,12 @@ impl EverOSProvider {
                     map.insert("agent_visibility".to_string(), visibility);
                 }
             } else {
-                add_agent_visibility(&mut payload, Some(true));
+                add_agent_visibility(
+                    &mut payload,
+                    Some(true),
+                    Some(&self.user_id),
+                    session_id_opt,
+                );
             }
         }
         Ok(serde_json::to_string(&payload).unwrap())
@@ -964,7 +975,13 @@ impl EverOSProvider {
             let flush_payload = flush_result_payload_with_attempt(&response, Some(attempt_count));
             return Ok(pretty_json(&json!({
                 "flush": flush_payload.clone(),
-                "agent_visibility": build_agent_visibility_report(None, Some(flush_payload), vec![]),
+                "agent_visibility": build_agent_visibility_report(
+                    None,
+                    Some(flush_payload),
+                    vec![],
+                    Some(&self.user_id),
+                    if sid.is_empty() { None } else { Some(sid) },
+                ),
             })));
         }
         Ok(pretty_json(&response))
@@ -1456,12 +1473,17 @@ fn save_result_payload(
     })
 }
 
-fn add_agent_visibility(payload: &mut Value, agent_raw_queued: Option<bool>) {
+fn add_agent_visibility(
+    payload: &mut Value,
+    agent_raw_queued: Option<bool>,
+    user_id: Option<&str>,
+    session_id: Option<&str>,
+) {
     let flush = payload.get("flush").cloned();
     if let Some(map) = payload.as_object_mut() {
         map.insert(
             "agent_visibility".to_string(),
-            build_agent_visibility_report(agent_raw_queued, flush, vec![]),
+            build_agent_visibility_report(agent_raw_queued, flush, vec![], user_id, session_id),
         );
     }
 }

@@ -210,6 +210,9 @@ def test_skill_includes_agentmemory_style_operator_runbooks_and_guardrails():
         "memory.provider: everos",
         "plugins.enabled",
         "agent_visibility",
+        "verification_user_id",
+        "same `user_id` and `session_id`",
+        "Do not invent or override `user_id`",
         "Do not make up memories",
     ]
 

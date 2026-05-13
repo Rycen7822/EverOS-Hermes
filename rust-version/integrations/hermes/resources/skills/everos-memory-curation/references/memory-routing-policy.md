@@ -122,7 +122,7 @@ Use automatic capture plus deliberate post-task curation; do not rely on blanket
 Do not wait for the user to explicitly ask for memory. After a complex or iterative task, ask internally before the final response:
 
 - [ ] Did this produce a reusable workflow? If yes, create/patch a skill.
-- [ ] Did this produce a reusable solved-problem pattern, diagnostic path, migration pattern, or future-agent decision case? If yes, aggressively save a compact EverOS agent case; when Cloud visibility matters, use the multi-message trajectory recipe, then verify `agent_memory` search and `agent_case` get.
+- [ ] Did this produce a reusable solved-problem pattern, diagnostic path, migration pattern, or future-agent decision case? If yes, aggressively save a compact EverOS agent case; when Cloud visibility matters, use the multi-message trajectory recipe, then verify `agent_memory` search and `agent_case` get with the same `user_id` and `session_id` used for the save.
 - [ ] Did this reveal a stable API/tool/cloud quirk? If yes, save a compact fact or case.
 - [ ] Did the user state a durable preference or correction? If yes, save to user profile only if it must be injected every session; otherwise prefer a skill/reference/agent case.
 - [ ] Is USER PROFILE carrying workflow detail better suited to skills/agent memories? If yes, migrate using `references/user-profile-agent-memory-routing.md` and keep only a short fallback.

@@ -11,6 +11,8 @@ def build_agent_visibility_report(
     agent_raw_queued: bool | None,
     agent_flush: dict[str, Any] | None,
     checks: list[dict[str, Any]],
+    user_id: str | None = None,
+    session_id: str | None = None,
 ) -> dict[str, Any]:
     normalized_checks = [dict(check) for check in checks]
     executed = bool(normalized_checks)
@@ -33,13 +35,18 @@ def build_agent_visibility_report(
         structured_visible = False
         status = "not_visible"
 
-    return {
+    report = {
         "agent_raw_queued": agent_raw_queued,
         "agent_flush": agent_flush,
         "agent_structured_visible": structured_visible,
         "agent_visibility_status": status,
         "agent_visibility_checks": normalized_checks,
     }
+    if user_id is not None:
+        report["verification_user_id"] = user_id
+    if session_id is not None:
+        report["verification_session_id"] = session_id
+    return report
 
 
 def audit_agent_visibility(
@@ -59,6 +66,8 @@ def audit_agent_visibility(
         started = time.perf_counter()
         check: dict[str, Any] = {
             "kind": "search",
+            "user_id": user_id,
+            "session_id": session_id,
             "memory_types": ["agent_memory"],
             "query": query,
         }
@@ -84,7 +93,7 @@ def audit_agent_visibility(
 
     for memory_type in ("agent_case", "agent_skill"):
         started = time.perf_counter()
-        check = {"kind": "get", "memory_type": memory_type}
+        check = {"kind": "get", "user_id": user_id, "session_id": session_id, "memory_type": memory_type}
         try:
             response = client.get_memories(
                 user_id=user_id,
@@ -101,7 +110,13 @@ def audit_agent_visibility(
             check["latency_ms"] = _elapsed_ms(started)
         checks.append(check)
 
-    return build_agent_visibility_report(agent_raw_queued=None, agent_flush=None, checks=checks)
+    return build_agent_visibility_report(
+        agent_raw_queued=None,
+        agent_flush=None,
+        checks=checks,
+        user_id=user_id,
+        session_id=session_id,
+    )
 
 
 def _count_hits(response: dict[str, Any]) -> int:

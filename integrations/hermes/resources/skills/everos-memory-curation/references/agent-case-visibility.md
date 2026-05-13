@@ -13,7 +13,7 @@ Current EverOS-Hermes behavior has three layers. Do not collapse them:
 For `scope="agent"` writes:
 
 1. A successful queue/flush response is not enough.
-2. Check `agent_visibility` when available.
+2. Check `agent_visibility` when available. Current EverOS-Hermes workflow reports include `verification_user_id`, `verification_session_id`, and per-check `user_id` / `session_id`; use these fields as the controller-side identity for follow-up checks.
 3. Treat `not_visible` as a real state, not a failure of local write.
 4. Treat `partial` as useful: a visible `agent_case` with no `agent_skill` is still a successful reusable case.
 5. If structured agent memory is not visible but the content is important, use a fallback:
@@ -31,6 +31,18 @@ When the user wants future agents or Cloud UI/search to see a case, prefer a rea
 4. `assistant`: final fix/verification plus reusable lesson and pitfalls.
 
 If calling the Cloud API directly, every message needs an epoch-millisecond `timestamp`. The tool-role message requires `tool_call_id`. This shape was verified to produce a visible `agent_case`; single assistant notes can remain `not_visible`.
+
+### Identity Discipline for Controller Verification
+
+Do not invent or override `user_id` for agent-scope writes unless the user explicitly tells you to test a different account. Use the active provider/default identity, and record the exact `user_id`, `session_id`, `scope`, marker, and visible case/skill id in the evidence file. A controller must verify using the same `user_id` and `session_id`; a case saved under `hermes-agent` will not be found by default `hermes_default` checks even when it is actually visible.
+
+When a subagent claims a memory write succeeded, require these fields before trusting it:
+
+- `scope` and exact `user_id` used for save/flush/search/get;
+- exact `session_id` and marker query;
+- `agent_visibility_status` plus `verification_user_id` / `verification_session_id` if returned;
+- visible `agent_case` or `agent_skill` id, or an explicit `not_visible` result;
+- controller-side recheck using that same identity.
 
 Known constraints:
 

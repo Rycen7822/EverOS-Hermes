@@ -385,6 +385,8 @@ def save_and_verify(
             agent_raw_queued=bool(save_payload.get("message_queued")),
             agent_flush=save_payload.get("flush"),
             checks=list(verification_visibility.get("agent_visibility_checks", [])),
+            user_id=user_id,
+            session_id=session_id,
         )
         status = _agent_workflow_status(agent_visibility, status)
     payload = success_envelope(
@@ -547,6 +549,8 @@ def import_and_verify(
             agent_raw_queued=queued_count > 0,
             agent_flush=flush_payload,
             checks=list(verification_visibility.get("agent_visibility_checks", [])),
+            user_id=user_id,
+            session_id=session_id,
         )
         status = _agent_workflow_status(agent_visibility, status)
     actions: list[str] = []

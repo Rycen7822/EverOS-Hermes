@@ -7,6 +7,8 @@ pub fn build_agent_visibility_report(
     agent_raw_queued: Option<bool>,
     agent_flush: Option<Value>,
     checks: Vec<Value>,
+    user_id: Option<&str>,
+    session_id: Option<&str>,
 ) -> Value {
     let hit_count = checks
         .iter()
@@ -28,13 +30,28 @@ pub fn build_agent_visibility_report(
         (Value::Bool(false), "not_visible")
     };
 
-    json!({
+    let mut report = json!({
         "agent_raw_queued": agent_raw_queued,
         "agent_flush": agent_flush,
         "agent_structured_visible": structured_visible,
         "agent_visibility_status": status,
         "agent_visibility_checks": checks,
-    })
+    });
+    if let Some(map) = report.as_object_mut() {
+        if let Some(user_id) = user_id {
+            map.insert(
+                "verification_user_id".to_string(),
+                Value::String(user_id.to_string()),
+            );
+        }
+        if let Some(session_id) = session_id {
+            map.insert(
+                "verification_session_id".to_string(),
+                Value::String(session_id.to_string()),
+            );
+        }
+    }
+    report
 }
 
 pub fn audit_agent_visibility(
@@ -55,6 +72,8 @@ pub fn audit_agent_visibility(
         let started = Instant::now();
         let mut check = json!({
             "kind": "search",
+            "user_id": user_id,
+            "session_id": session_id,
             "memory_types": ["agent_memory"],
             "query": query,
         });
@@ -92,7 +111,7 @@ pub fn audit_agent_visibility(
 
     for memory_type in ["agent_case", "agent_skill"] {
         let started = Instant::now();
-        let mut check = json!({"kind": "get", "memory_type": memory_type});
+        let mut check = json!({"kind": "get", "user_id": user_id, "session_id": session_id, "memory_type": memory_type});
         match client.get_memories(
             Some(user_id),
             None,
@@ -122,7 +141,7 @@ pub fn audit_agent_visibility(
         checks.push(check);
     }
 
-    build_agent_visibility_report(None, None, checks)
+    build_agent_visibility_report(None, None, checks, Some(user_id), session_id)
 }
 
 fn check_hit_count(check: &Value) -> u64 {

@@ -526,6 +526,8 @@ pub fn save_and_verify(
             save.get("message_queued").and_then(Value::as_bool),
             save.get("flush").cloned(),
             checks,
+            Some(user_id),
+            session_id,
         );
         status = agent_workflow_status(&visibility, &status);
         Some(visibility)
