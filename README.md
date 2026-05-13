@@ -71,6 +71,28 @@ EVEROS_BASE_URL=https://api.evermind.ai
 
 Restart Hermes CLI/WebUI/gateway after changing plugin, provider, or secret configuration. Already-running sessions do not retroactively reload plugin tools, bundled skills, or memory-provider hooks.
 
+## Agent Self-Install Prompts
+
+Copy one of these prompts into Hermes, Codex, Claude Code, or another coding agent when you want the agent to install EverOS-Hermes for its own Hermes environment. The default path is the single-plugin install; use the compatibility MCP surface only when explicitly needed.
+
+Python/source plugin install:
+
+```text
+Install EverOS-Hermes for this Hermes Agent from `https://github.com/Rycen7822/EverOS-Hermes`. Use the current single Hermes plugin setup, not a separate default MCP-only setup. Clone the repo into a stable local tools directory, run `python -m pip install -e .`, copy `integrations/hermes` to `${HERMES_HOME:-$HOME/.hermes}/plugins/everos`, run `hermes plugins enable everos`, and run `hermes config set memory.provider everos`. Keep secrets only in `${HERMES_HOME:-$HOME/.hermes}/.env` or process env: `EVEROS_API_KEY`, optional `EVEROS_USER_ID`, and optional `EVEROS_BASE_URL`. Verify the Python package version, plugin manifest version, plugin kind, the 8 `everos_memory_*` standalone tools, and the qualified bundled skill `everos:everos-memory-curation` with its thin `SKILL.md` plus `references/*.md`. Do not copy the bundled skill into ordinary `~/.hermes/skills/` unless the user explicitly wants a local fork. After installation and verification, tell the user to reload, reset, or restart Hermes Agent so plugin tools, bundled skills, and memory-provider hooks are loaded in a fresh session.
+```
+
+Rust prebuilt install, recommended for Linux x86_64 release packages:
+
+```text
+Install EverOS-Hermes for this Hermes Agent from `https://github.com/Rycen7822/EverOS-Hermes`. Prefer the latest matching Linux x86_64 Rust prebuilt release asset when available; verify its `.sha256` before extraction, install it under an absolute path such as `/home/<user>/.local/share/everos-hermes`, and use the absolute installed `bin/everos-hermes-rust` path in any provider or compatibility MCP configuration. Copy the packaged `integrations/hermes` directory to `${HERMES_HOME:-$HOME/.hermes}/plugins/everos`, set `EVEROS_HERMES_RUST_BIN` in `${HERMES_HOME:-$HOME/.hermes}/.env` to the absolute binary path, run `hermes plugins enable everos`, and run `hermes config set memory.provider everos`. Keep `EVEROS_API_KEY`, optional `EVEROS_USER_ID`, and optional `EVEROS_BASE_URL` in the Hermes secret file or process env; do not write `$HOME` or other shell variables into `.env` values because Hermes dotenv parsing does not expand them. Verify the binary `--help`, plugin manifest, provider availability, standalone `everos_memory_*` tools, and qualified skill `everos:everos-memory-curation`. After installation and verification, tell the user to reload, reset, or restart Hermes Agent so plugin tools, bundled skills, and memory-provider hooks are loaded in a fresh session.
+```
+
+Rust from source, for non-Linux-x86_64 hosts or native development:
+
+```text
+Build and install EverOS-Hermes Rust from source for this Hermes Agent from `https://github.com/Rycen7822/EverOS-Hermes`. Clone the repo, run `cd rust-version && cargo build --release && cargo test --tests --no-fail-fast`, copy `target/release/everos-hermes-rust` to an absolute stable path such as `/home/<user>/.local/share/everos-hermes/bin/everos-hermes-rust`, copy `rust-version/integrations/hermes` to `${HERMES_HOME:-$HOME/.hermes}/plugins/everos`, set `EVEROS_HERMES_RUST_BIN` in `${HERMES_HOME:-$HOME/.hermes}/.env` to the absolute binary path, run `hermes plugins enable everos`, and run `hermes config set memory.provider everos`. Keep EverOS credentials in the Hermes secret file or process env. Verify the binary, provider availability, plugin tools, and qualified bundled skill `everos:everos-memory-curation`. After installation and verification, tell the user to reload, reset, or restart Hermes Agent so plugin tools, bundled skills, and memory-provider hooks are loaded in a fresh session.
+```
+
 ## How Hermes loads it
 
 Hermes currently has two loader paths, and this plugin supports both from the same directory:

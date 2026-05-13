@@ -76,6 +76,21 @@ def test_readme_documents_provider_context_engine_and_rust_parity():
         assert required in text
 
 
+def test_readme_includes_agent_self_install_prompts_with_restart_reminder():
+    text = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "## Agent Self-Install Prompts" in text
+    assert "Copy one of these prompts into Hermes, Codex, Claude Code, or another coding agent" in text
+    for required in [
+        "Install EverOS-Hermes for this Hermes Agent from `https://github.com/Rycen7822/EverOS-Hermes`.",
+        "hermes plugins enable everos",
+        "hermes config set memory.provider everos",
+        "everos:everos-memory-curation",
+        "After installation and verification, tell the user to reload, reset, or restart Hermes Agent",
+    ]:
+        assert required in text
+
+
 def test_cloud_contract_keeps_out_of_scope_endpoint_blacklist():
     text = (ROOT / "docs" / "everos_cloud_v1_contract.md").read_text(encoding="utf-8")
 
