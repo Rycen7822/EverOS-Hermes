@@ -7,6 +7,7 @@ It provides:
 - `everos-hermes-rust`, a native binary used by the Python plugin shim.
 - `integrations/hermes/`, a Hermes plugin directory that can be copied to `$HERMES_HOME/plugins/everos`.
 - The bundled plugin skill `everos:everos-memory-curation` under `integrations/hermes/resources/skills/`.
+- A thin `SKILL.md` router plus detailed skill references under `integrations/hermes/resources/skills/everos-memory-curation/references/`.
 - Rust parity for provider behavior: structured agent trajectory capture, the budgeted context assembler, deterministic message ids, `prefetch_cache_enabled`, optional `include_recent_raw`, and hooks such as `agent_trajectory_on_session_end`, `agent_trajectory_on_pre_compress`, and delegation capture.
 - A stdio compatibility command surface with MCP-13 tools for callers that already depend on it. Normal Hermes installs should use the plugin path below.
 
@@ -42,6 +43,8 @@ EVEROS_HERMES_RUST_BIN=/home/you/.local/share/everos-hermes/bin/everos-hermes-ru
 EVEROS_BASE_URL=https://api.evermind.ai
 ```
 
+Do not write `$HOME`, `~`, or `$INSTALL_DIR` inside `.env` values; Hermes dotenv parsing does not shell-expand them.
+
 Enable both plugin roles:
 
 ```bash
@@ -55,7 +58,7 @@ Restart Hermes CLI/WebUI/gateway after changing plugin, provider, or secret conf
 
 Hermes has two loader paths, and the Rust shim supports both from the same plugin directory:
 
-- `plugins.enabled: [everos]` imports the standalone plugin, registers the `everos` toolset, and registers the bundled skill `everos:everos-memory-curation`.
+- `plugins.enabled: [everos]` imports the standalone plugin, registers the `everos` toolset, and registers the bundled skill as `everos:everos-memory-curation`.
 - `memory.provider: everos` loads the same directory as a memory provider and delegates provider operations to `everos-hermes-rust`.
 
 The standalone plugin registers tools only when the Rust binary can return schemas. If tools are missing, check `EVEROS_HERMES_RUST_BIN` and restart Hermes.
@@ -87,6 +90,14 @@ The skill is stored at:
 integrations/hermes/resources/skills/everos-memory-curation/SKILL.md
 ```
 
+The entry `SKILL.md` is intentionally small. It routes agents to the relevant reference file instead of loading all operator guidance every time. Current primary references are:
+
+- `references/user-intent-runbooks.md`
+- `references/memory-routing-policy.md`
+- `references/agent-case-visibility.md`
+- `references/plugin-triage-and-migration.md`
+- `references/cleanup-and-verification.md`
+
 ## Compatibility server
 
 The binary still includes the stdio compatibility server for existing automation and parity tests. That path is not the recommended Hermes setup path anymore; prefer the single plugin installation above so tools, automatic memory hooks, and the curation skill are co-located.
@@ -100,8 +111,9 @@ bin/everos-hermes-rust
 integrations/hermes/__init__.py
 integrations/hermes/plugin.yaml
 integrations/hermes/resources/skills/everos-memory-curation/SKILL.md
+integrations/hermes/resources/skills/everos-memory-curation/references/*.md
 README.md
 INSTALL.md
 ```
 
-Verify release packages by checking the archive checksum, running the binary `--help`, copying `integrations/hermes` to the Hermes plugin directory, enabling `everos`, selecting `memory.provider: everos`, and starting a fresh Hermes session.
+Verify release packages by checking the archive checksum, running the binary `--help`, copying `integrations/hermes` to the Hermes plugin directory, enabling `everos`, selecting `memory.provider: everos`, checking the thin skill references exist, and starting a fresh Hermes session.

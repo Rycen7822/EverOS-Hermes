@@ -39,7 +39,7 @@ Target: $TARGET
 ## Contents
 
 - bin/everos-hermes-rust — Rust provider helper and stdio compatibility binary
-- integrations/hermes — single Hermes plugin directory with provider shim, tools, and bundled skill
+- integrations/hermes — single Hermes plugin directory with provider shim, tools, and thin bundled skill plus references
 - README.md — Rust runtime documentation
 
 ## Quick install
@@ -69,7 +69,7 @@ hermes plugins enable everos
 hermes config set memory.provider everos
 \`\`\`
 
-Load the bundled runbook with \`/skill everos:everos-memory-curation\`. Restart Hermes CLI/WebUI/gateway after changing plugin, provider, or secret configuration.
+Load the bundled runbook with \`/skill everos:everos-memory-curation\`; its entry \`SKILL.md\` is a thin router that points to \`references/*.md\` for detailed guidance. Restart Hermes CLI/WebUI/gateway after changing plugin, provider, or secret configuration.
 EOF
 
 tar -C "$DIST_DIR" -czf "$ARCHIVE" "$PKG_NAME"

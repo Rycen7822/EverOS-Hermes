@@ -5,7 +5,7 @@ EverOS-Hermes targets EverOS Cloud v1 personal and agent memory workflows for He
 ## Base URL and auth
 
 - Base URL: `https://api.evermind.ai`
-- Auth: `Authorization: Bearer ...` (examples and smoke summaries redact real tokens as `Bearer ***`)
+- Auth: `Authorization: Bearer ***` (examples and smoke summaries redact real tokens as `Bearer ***`).
 - All supported Cloud endpoints are under `/api/v1`.
 - v0 endpoints are deprecated and must not be used by this integration.
 

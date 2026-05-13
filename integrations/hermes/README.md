@@ -5,7 +5,7 @@ Copy it to `$HERMES_HOME/plugins/everos` or `~/.hermes/plugins/everos`.
 
 It supports both Hermes loader paths from the same plugin directory:
 
-- Standalone plugin loading via `hermes plugins enable everos` registers the `everos` toolset and the bundled skill `everos:everos-memory-curation`.
+- Standalone plugin loading via `hermes plugins enable everos` registers the `everos` toolset and the bundled skill as `everos:everos-memory-curation`.
 - Memory-provider loading via `hermes config set memory.provider everos` registers automatic EverOS recall/capture hooks.
 
 Use both settings for normal operation.
@@ -16,9 +16,10 @@ Use both settings for normal operation.
 cd /path/to/EverOS-Hermes
 python -m pip install -e .
 
-mkdir -p "${HERMES_HOME:-$HOME/.hermes}/plugins"
-rm -rf "${HERMES_HOME:-$HOME/.hermes}/plugins/everos"
-cp -R integrations/hermes "${HERMES_HOME:-$HOME/.hermes}/plugins/everos"
+HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+mkdir -p "$HERMES_HOME/plugins"
+rm -rf "$HERMES_HOME/plugins/everos"
+cp -R integrations/hermes "$HERMES_HOME/plugins/everos"
 
 hermes plugins enable everos
 hermes config set memory.provider everos
@@ -52,19 +53,33 @@ If the memory provider is also active, Hermes skips duplicate tool schemas and r
 
 ## Bundled skill
 
-The operator/curation runbook is bundled at:
+The operator/curation skill is bundled at:
 
 ```text
 resources/skills/everos-memory-curation/SKILL.md
 ```
 
-Load it by qualified name:
+Hermes derives the plugin namespace automatically. Load it by qualified name:
 
 ```text
 /skill everos:everos-memory-curation
 ```
 
-Do not install it separately into `~/.hermes/skills/` unless you intentionally want a user-local fork outside this plugin.
+`SKILL.md` is a thin router. It points to heavier guides under:
+
+```text
+resources/skills/everos-memory-curation/references/
+```
+
+Current primary references:
+
+- `user-intent-runbooks.md`
+- `memory-routing-policy.md`
+- `agent-case-visibility.md`
+- `plugin-triage-and-migration.md`
+- `cleanup-and-verification.md`
+
+Do not install the skill separately into `~/.hermes/skills/` unless you intentionally want a user-local fork outside this plugin. If an old local copy exists, use the qualified plugin name above or sync/remove the local copy to avoid stale bare-name loads.
 
 ## Advanced config
 
@@ -80,7 +95,11 @@ Advanced non-secret settings live at `$HERMES_HOME/everos.json`. Common settings
   "search_method": "hybrid",
   "top_k": 2,
   "max_context_items": 2,
-  "max_context_chars": 3000
+  "max_context_chars": 3000,
+  "prefetch_cache_enabled": true,
+  "include_recent_raw": false,
+  "agent_trajectory_on_session_end": true,
+  "agent_trajectory_on_pre_compress": true
 }
 ```
 

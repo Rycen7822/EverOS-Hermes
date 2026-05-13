@@ -1,8 +1,8 @@
 [package]
 name = "everos-hermes-rust"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
-description = "Rust EverOS MCP server and Hermes memory provider core"
+description = "Rust EverOS Cloud memory provider/plugin helper with MCP compatibility"
 license = "MIT"
 
 [lib]

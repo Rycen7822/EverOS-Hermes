@@ -39,6 +39,24 @@ def test_readme_uses_current_mcp_13_badge_and_no_stale_mcp_9_wording():
     for pattern in stale_patterns:
         assert not re.search(pattern, text, flags=re.IGNORECASE), pattern
     assert "MCP-13%20tools" in text or "MCP-13 tools" in text
+    assert "Python package: `everos-hermes` `0.3.0`" in text
+    assert "Rust crate/binary: `everos-hermes-rust` `0.3.0`" in text
+
+
+def test_readme_documents_thin_plugin_skill_references():
+    text = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    for required in [
+        "everos:everos-memory-curation",
+        "SKILL.md` is intentionally thin",
+        "references/user-intent-runbooks.md",
+        "references/memory-routing-policy.md",
+        "references/agent-case-visibility.md",
+        "references/plugin-triage-and-migration.md",
+        "references/cleanup-and-verification.md",
+        "legacy ordinary skill",
+    ]:
+        assert required in text
 
 
 def test_readme_documents_provider_context_engine_and_rust_parity():

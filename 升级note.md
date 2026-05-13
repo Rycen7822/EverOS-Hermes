@@ -1,6 +1,6 @@
 # EverOS-Hermes 升级 note（压缩版）
 
-更新时间：2026-05-13 12:58 CST
+更新时间：2026-05-13 22:25 CST
 
 ## 历史结论
 
@@ -138,3 +138,9 @@
 - Hermes MCP：`hermes mcp test everos` 通过，stdio 指向 `/home/xu/.local/share/everos-hermes/bin/everos-hermes-rust`，tools discovered=13。
 - Installed fake-server smoke：`python scripts/everos_agent_visibility_smoke.py --binary /home/xu/.local/bin/everos-hermes-rust --mode installed --output .tmp_everos_visibility_smoke/installed_summary.json` 通过；22 assertions，`not_visible/partial/visible` 覆盖，transient retry attempts=1，summary authorization=`Bearer ***`。
 - 100% 信心复核：升级规划2的本地实现、文档、fake/real Cloud smoke、package/install 门禁均已完成；唯一保留项是 Cloud 侧 agent structured extraction/search 真实 contract 仍表现为 `not_visible`，本地已正确报告而不误判 visible。
+
+### 2026-05-13 22:25 CST — plugin 文档与版本收口
+- README、plugin README、Rust README 已更新为当前单 plugin 安装路径：`hermes plugins enable everos` 暴露 8 个 `everos_memory_*` standalone tools 与 qualified skill `everos:everos-memory-curation`，`hermes config set memory.provider everos` 启用自动 recall/capture hooks。
+- `everos-memory-curation` 已改为薄 `SKILL.md` router，详细 runbook 拆到 `references/user-intent-runbooks.md`、`memory-routing-policy.md`、`agent-case-visibility.md`、`plugin-triage-and-migration.md`、`cleanup-and-verification.md`。
+- Python package、Rust crate/binary、Hermes plugin manifest 版本统一到 `0.3.0`；历史 0.2.x package/install 记录保留为历史，不再代表当前安装说明。
+- 当前文档明确区分 provider explicit tools=8 与 stdio compatibility MCP-13 tools；旧 README badge/旧九工具说法不再代表当前状态。

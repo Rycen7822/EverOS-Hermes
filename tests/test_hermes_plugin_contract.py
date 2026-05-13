@@ -281,7 +281,24 @@ def test_install_docs_describe_one_plugin_not_separate_mcp_and_skill_setup():
     assert "One Hermes plugin" in root_readme
     assert "single Hermes plugin" in rust_readme
     assert "hermes plugins enable everos" in combined
+    assert "memory.provider everos" in combined
     assert "everos:everos-memory-curation" in combined
+    assert "thin" in combined
+    assert "references/user-intent-runbooks.md" in root_readme
+    assert "references/memory-routing-policy.md" in root_readme
+    assert "legacy ordinary skill" in root_readme
     assert "mcp_servers:" not in combined
     assert "Optional MCP server" not in combined
     assert "explicit MCP tools" not in root_readme
+
+
+def test_project_versions_match_plugin_manifest_version():
+    pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    cargo = (REPO_ROOT / "rust-version" / "Cargo.toml").read_text(encoding="utf-8")
+    py_manifest = yaml.safe_load(PLUGIN_MANIFEST.read_text(encoding="utf-8"))
+    rust_manifest = yaml.safe_load(RUST_PLUGIN_MANIFEST.read_text(encoding="utf-8"))
+
+    assert py_manifest["version"] == "0.3.0"
+    assert rust_manifest["version"] == "0.3.0"
+    assert 'version = "0.3.0"' in pyproject
+    assert 'version = "0.3.0"' in cargo
