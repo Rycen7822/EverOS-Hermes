@@ -39,6 +39,9 @@ def test_readme_uses_current_mcp_13_badge_and_no_stale_mcp_9_wording():
     for pattern in stale_patterns:
         assert not re.search(pattern, text, flags=re.IGNORECASE), pattern
     assert "MCP-13%20tools" in text or "MCP-13 tools" in text
+    assert "<p align=\"center\">" in text
+    assert "style=for-the-badge" in text
+    assert "Hermes-single%20plugin" in text
     assert "Python package: `everos-hermes` `0.3.0`" in text
     assert "Rust crate/binary: `everos-hermes-rust` `0.3.0`" in text
 
