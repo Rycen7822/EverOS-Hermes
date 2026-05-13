@@ -37,6 +37,12 @@ EXPECTED_PLUGIN_TOOL_NAMES = {
     "everos_memory_verify_session",
 }
 
+EXPECTED_SKILL_DESCRIPTION = (
+    "Use proactively when complex or iterative work may produce durable EverOS/Hermes memory: "
+    "recall, save, verify, clean, compress, or migrate reusable workflows, debugging "
+    "lessons, tool/API quirks, and agent cases without saving noisy task logs."
+)
+
 
 def _load_plugin_module(plugin_dir: Path = PLUGIN_DIR, module_name: str = "everos_hermes_plugin_contract_under_test"):
     init_path = plugin_dir / "__init__.py"
@@ -156,7 +162,7 @@ def test_standalone_register_exposes_tools_and_plugin_skill_without_memory_provi
         {
             "name": "everos-memory-curation",
             "path": PLUGIN_SKILL,
-            "description": "Operate and curate EverOS-Hermes memory safely.",
+            "description": EXPECTED_SKILL_DESCRIPTION,
         }
     ]
 
@@ -211,7 +217,12 @@ def test_skill_includes_agentmemory_style_operator_runbooks_and_guardrails():
         skill_text = skill_path.read_text(encoding="utf-8")
         bundle_text = _skill_bundle_text(skill_path)
         data = yaml.safe_load(skill_text.split("---", 2)[1])
-        assert data["version"] >= "1.0.7"
+        assert data["version"] >= "1.0.8"
+        assert data["description"] == EXPECTED_SKILL_DESCRIPTION
+        assert len(data["description"]) <= 1024
+        assert "## Post-task Proactive Curation" in skill_text
+        assert "Do not wait for the user to say" in skill_text
+        assert "references/memory-routing-policy.md" in skill_text
         assert len(skill_text) <= 6500
         for ref_name in EXPECTED_SKILL_REFERENCES:
             assert f"references/{ref_name}" in skill_text
@@ -257,7 +268,7 @@ def test_rust_standalone_register_exposes_plugin_skill_and_tools_when_binary_sur
         {
             "name": "everos-memory-curation",
             "path": RUST_PLUGIN_SKILL,
-            "description": "Operate and curate EverOS-Hermes memory safely.",
+            "description": EXPECTED_SKILL_DESCRIPTION,
         }
     ]
 

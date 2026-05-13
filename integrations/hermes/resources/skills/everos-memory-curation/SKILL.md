@@ -1,7 +1,7 @@
 ---
 name: everos-memory-curation
-description: Use when deciding whether to recall, save, verify, clean, compress, or migrate Hermes/EverOS memories; routes durable knowledge into skills, agent cases, personal memory, or skip decisions without saving noisy task logs.
-version: 1.0.7
+description: "Use proactively when complex or iterative work may produce durable EverOS/Hermes memory: recall, save, verify, clean, compress, or migrate reusable workflows, debugging lessons, tool/API quirks, and agent cases without saving noisy task logs."
+version: 1.0.8
 author: Hermes Agent
 license: MIT
 metadata:
@@ -30,10 +30,17 @@ Load this skill before:
 - Searching prior conversations or EverOS memory for cross-session context.
 - Saving, importing, cleaning, compressing, or deleting Hermes/EverOS memory.
 - Deciding whether a completed task produced a reusable case or skill.
+- Proactively curating after complex or iterative tool-using tasks, debugging sessions, plugin/config migrations, or reusable workflow discoveries.
 - Handling `scope="agent"`, `agent_case`, `agent_skill`, `agent_memory`, or `agent_visibility`.
 - Troubleshooting missing EverOS tools, inactive provider state, plugin installation, or memory migration.
 
 Do not use this for simple one-turn answers where no recall/write/cleanup is needed.
+
+## Post-task Proactive Curation
+
+Do not wait for the user to say "remember this" after complex/iterative tasks, debugging sessions, plugin/config migrations, or reusable workflow discoveries. Before the final response, decide whether a durable lesson belongs in a Hermes skill, an EverOS agent case/memory, personal memory, or an explicit skip decision.
+
+For agent-scope saves, prefer a compact reusable case and load `references/memory-routing-policy.md` plus `references/agent-case-visibility.md` when visibility matters. Skip task logs, SHAs, one-off test output, raw transcripts, and anything likely to become stale within a week.
 
 ## Reference Loading Rule
 

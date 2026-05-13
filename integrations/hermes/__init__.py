@@ -32,7 +32,7 @@ except Exception as exc:  # pragma: no cover - only hit in mis-installed Hermes 
 
 TOOLSET = "everos"
 SKILL_NAME = "everos-memory-curation"
-SKILL_DESCRIPTION = "Operate and curate EverOS-Hermes memory safely."
+SKILL_DESCRIPTION = "Use proactively when complex or iterative work may produce durable EverOS/Hermes memory: recall, save, verify, clean, compress, or migrate reusable workflows, debugging lessons, tool/API quirks, and agent cases without saving noisy task logs."
 _PLUGIN_TOOL_SESSION_ID = "everos-plugin-tools"
 _REQUIRED_ENV = ["EVEROS_API_KEY"]
 
