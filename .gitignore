@@ -24,7 +24,7 @@ agentmemory-main
 
 # External reference source snapshots; do not vendor into this repo
 everos-openclaw-plugin/
-
+evermind_api_reference/
 # Local scratch planning/evaluation directories
 .tmp_*/
 

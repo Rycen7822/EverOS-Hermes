@@ -1,7 +1,7 @@
 ---
 name: everos-memory-curation
 description: Use when deciding whether to recall, save, verify, clean, compress, or migrate Hermes/EverOS memories; routes durable knowledge into skills, agent cases, personal memory, or skip decisions without saving noisy task logs.
-version: 1.0.0
+version: 1.0.5
 author: Hermes Agent
 license: MIT
 metadata:
@@ -120,35 +120,58 @@ Patch loaded skills immediately if they are stale, incomplete, or wrong.
 
 ## EverOS Agent Memory Visibility
 
-Current EverOS-Hermes behavior may distinguish queued/raw storage from structured visibility.
+Current EverOS-Hermes behavior has three layers. Do not collapse them:
+
+1. **Queue/flush accepted** — the Cloud task can succeed and `flush` can report `extracted`.
+2. **Structured agent memory visible** — `agent_memory` search returns `cases` or `skills`, or `everos_get_memories(memory_type="agent_case")` / `agent_skill` returns rows.
+3. **Provider recall injected** — Hermes must also have agent recall enabled and may need a fresh session/gateway restart after config changes.
 
 For `scope="agent"` writes:
 
 1. A successful queue/flush response is not enough.
 2. Check `agent_visibility` when available.
 3. Treat `not_visible` as a real state, not a failure of local write.
-4. If structured agent memory is not visible but the content is important, use a fallback:
+4. Treat `partial` as useful: a visible `agent_case` with no `agent_skill` is still a successful reusable case.
+5. If structured agent memory is not visible but the content is important, use a fallback:
    - create/patch a Hermes skill for workflows;
    - save a compact local memory for stable facts/preferences;
    - or keep it in the session transcript if it is not durable.
 
+### Agent Case Trajectory Recipe
+
+When the user wants future agents or Cloud UI/search to see a case, prefer a real trajectory over a single compact assistant note:
+
+1. `user`: task intent or problem statement.
+2. `assistant`: diagnosis, action plan, or change made.
+3. `tool`: concise verification result with a stable `tool_call_id`.
+4. `assistant`: final fix/verification plus reusable lesson and pitfalls.
+
+If calling the Cloud API directly, every message needs an epoch-millisecond `timestamp`. The tool-role message requires `tool_call_id`. This shape was verified to produce a visible `agent_case`; single assistant notes can remain `not_visible`.
+
 Known constraints:
 
 - `role="tool"` in agent scope requires `tool_call_id`.
+- Agent-case extraction is more reliable with a real multi-message trajectory than with a single compact reference: send user intent, assistant diagnosis/action, tool result with `tool_call_id`, and assistant fix/verification/reusable lesson. Messages sent through the Cloud API need epoch-millisecond `timestamp` values. A single `scope="agent"` assistant note can remain `not_visible`, while this structured trajectory can produce a visible `agent_case`.
+- `agent_visibility_status="partial"` can still mean success for case curation when `agent_case` is visible but `agent_skill` is empty.
 - EverOS Cloud delete can return success while raw/profile residuals remain.
+- EverOS personal `profile` may behave as a Cloud-side aggregate: exact profile id delete, user-level delete, group delete, and even deletion of profile `processed_episode_ids` / `explicit_info[].sources` / `implicit_traits[].sources` can all return success while `Basic Information` / `Personality & Traits` remain unchanged. See `references/everos-profile-compaction-limits.md` before promising profile compression.
+- When auditing EverOS-Hermes against the official EverOS/Evermind API reference, use `references/everos-hermes-official-api-gap-audit.md` to distinguish implemented personal/agent memory surfaces from missing group/sender/multimodal/filter capabilities.
+- When USER PROFILE is near capacity or the user asks to move content to agent memories, use `references/user-profile-agent-memory-routing.md`: keep only short must-follow preferences in USER PROFILE, move reusable workflows/cases to agent memory or skills, and keep a fallback when agent visibility is `not_visible`.
 - Verify structured visibility after flush/delete when it matters.
-- Do not enable broad auto-capture just to get agent memories; it can pollute context.
+- Broad auto-capture can pollute context; for this user it is explicitly enabled, so compensate with aggressive post-task curation and cleanup of noisy captures.
 
 ## Recommended Default Policy
 
-Keep automatic capture conservative unless the user explicitly asks otherwise:
+Default for unknown users is conservative. For this user, the explicit current override is to enable automatic updates and agent memory capture/recall while keeping recall volume bounded:
 
 ```json
 {
-  "auto_capture": false,
-  "capture_agent_memory": false,
-  "agent_recall": false,
+  "auto_capture": true,
+  "capture_agent_memory": true,
+  "agent_recall": true,
+  "agent_flush_after_turn": true,
   "auto_recall": true,
+  "agent_memory_types": ["agent_memory"],
   "memory_types": ["episodic_memory"],
   "top_k": 2,
   "max_context_items": 2,
@@ -156,17 +179,25 @@ Keep automatic capture conservative unless the user explicitly asks otherwise:
 }
 ```
 
-Use deliberate post-task curation instead of blanket trajectory capture.
+Operational implications:
+
+- After changing these booleans, start a fresh Hermes session or restart the gateway so provider initialization sees the new config.
+- Keep saving reusable cases deliberately, but prefer the trajectory recipe above when visibility matters.
+- Monitor captures for noisy episodic/profile growth; delete task logs, SHAs, package hashes, pressure cycles, and raw transcripts when they appear.
+
+Use automatic capture plus deliberate post-task curation; do not rely on blanket capture alone to create high-quality agent cases.
 
 ## Post-Task Curation Checklist
 
 After a complex or iterative task, ask internally:
 
 - [ ] Did this produce a reusable workflow? If yes, create/patch a skill.
+- [ ] Did this produce a reusable solved-problem pattern, diagnostic path, migration pattern, or future-agent decision case? If yes, aggressively save a compact EverOS agent case; when Cloud visibility matters, use the multi-message trajectory recipe, then verify `agent_memory` search and `agent_case` get.
 - [ ] Did this reveal a stable API/tool/cloud quirk? If yes, save a compact fact or case.
-- [ ] Did the user state a durable preference or correction? If yes, save to user profile.
+- [ ] Did the user state a durable preference or correction? If yes, save to user profile only if it must be injected every session; otherwise prefer a skill/reference/agent case.
+- [ ] Is USER PROFILE carrying workflow detail better suited to skills/agent memories? If yes, migrate using `references/user-profile-agent-memory-routing.md` and keep only a short fallback.
 - [ ] Is this only task progress, a log, a SHA, or a one-off result? If yes, do not save.
-- [ ] If saved to EverOS agent scope, did structured visibility become `visible` or remain `not_visible`?
+- [ ] If saved to EverOS agent scope, did structured visibility become `visible`, `partial`, or `not_visible`? Treat visible `agent_case` plus empty `agent_skill` as useful `partial` success.
 - [ ] If visibility failed but the content is important, did you use a skill/local-memory fallback?
 
 ## Cleanup / Compression Checklist
@@ -177,6 +208,7 @@ Before deleting or compressing memory:
 - [ ] Back up structured memories or the specific target set.
 - [ ] Prefer exact `memory_id` or `session_id` deletes over broad deletes.
 - [ ] If broad delete is requested, require explicit user intent.
+- [ ] For profile section compression (`Basic Information`, `Personality & Traits`), load `references/everos-profile-compaction-limits.md` and verify provider prefetch behavior, not just Cloud UI/profile fields.
 - [ ] Verify counts and targeted searches after cleanup.
 - [ ] Expect raw/profile residuals; report them as Cloud limits, not as successful deletion.
 - [ ] Re-seed only compact durable facts, not old task logs.
@@ -185,7 +217,7 @@ Before deleting or compressing memory:
 
 1. **Saving everything after every task.** This recreates context bloat. Save only durable reusable knowledge.
 2. **Confusing transcript recall with durable memory.** Use `session_search` for old task details; do not promote them unless reusable.
-3. **Treating queued agent memory as visible.** Always distinguish raw/queued from structured `agent_case`/`agent_skill` visibility.
+3. **Treating queued agent memory as visible.** Always distinguish raw/queued from structured `agent_case`/`agent_skill` visibility; prefer the trajectory recipe when a visible `agent_case` is required.
 4. **Writing procedures into personal memory.** Procedures belong in skills; memory should hold compact facts/preferences.
 5. **Deleting without backup.** EverOS delete semantics can be surprising; always back up meaningful sets before cleanup.
 6. **Relying on stale memory for live state.** Re-check git, files, config, time, and system state with tools.
