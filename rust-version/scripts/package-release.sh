@@ -50,19 +50,22 @@ cp -R . ~/.local/share/everos-hermes/
 ~/.local/share/everos-hermes/bin/everos-hermes-rust --help
 \`\`\`
 
-Set secrets in ~/.hermes/.env, not in committed config:
+Set secrets in \`\${HERMES_HOME:-\$HOME/.hermes}/.env\`, not in committed config. Use an absolute path for \`EVEROS_HERMES_RUST_BIN\`; this package's dotenv parser does not expand \`~\`, \`\$HOME\`, or \`\$INSTALL_DIR\` inside values.
 
 \`\`\`bash
 EVEROS_API_KEY=your_everos_api_key
 EVEROS_USER_ID=hermes_default
-EVEROS_HERMES_RUST_BIN=~/.local/share/everos-hermes/bin/everos-hermes-rust
+EVEROS_HERMES_RUST_BIN=/home/you/.local/share/everos-hermes/bin/everos-hermes-rust
 \`\`\`
 
-For Hermes provider use, copy the plugin shim:
+For Hermes provider use, copy the plugin shim and select the provider:
 
 \`\`\`bash
-mkdir -p ~/.hermes/plugins
-cp -R ~/.local/share/everos-hermes/integrations/hermes ~/.hermes/plugins/everos
+HERMES_HOME="\${HERMES_HOME:-\$HOME/.hermes}"
+mkdir -p "\$HERMES_HOME/plugins"
+rm -rf "\$HERMES_HOME/plugins/everos"
+cp -R /home/you/.local/share/everos-hermes/integrations/hermes "\$HERMES_HOME/plugins/everos"
+hermes config set memory.provider everos
 \`\`\`
 EOF
 

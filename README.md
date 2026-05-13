@@ -73,28 +73,33 @@ See [`rust-version/README.md`](rust-version/README.md) for Rust MCP/provider con
 | Python version | Editing, debugging, or using the original FastMCP/provider implementation | Python 3.10+, `pip`, Hermes Agent, EverOS API key | Available |
 | Rust from source | Native local use on other platforms, development, and reproducible builds | Rust toolchain; Python only for the thin Hermes provider shim | Available |
 
-EverOS credentials are read from process env -> `$HERMES_HOME/.env` -> `~/.hermes/.env`. Do not duplicate secrets in MCP `env:` blocks unless you intentionally need a per-server override.
+EverOS-Hermes has two independent Hermes surfaces:
+
+- **MCP server**: exposes explicit EverOS tools under `mcp_servers.everos`; it does not change Hermes' memory provider.
+- **Memory provider**: enables automatic recall/capture hooks with `memory.provider: everos`; it does not register an MCP server by itself.
+
+You may enable MCP-only, provider-only, or both. EverOS credentials are read from process env -> `$HERMES_HOME/.env` -> `~/.hermes/.env`; keep secrets there instead of duplicating real keys inside MCP `env:` blocks.
 
 ### Agent Self-Install Prompts
 
-Copy the matching prompt into Hermes, Codex, or another coding agent when you want it to install EverOS-Hermes for itself.
+Copy exactly one matching prompt into Hermes, Codex, or another coding agent. The prompts deliberately use absolute paths for the installed binary and tell the agent to verify each surface separately.
 
 Rust prebuilt package, recommended on Linux x86_64:
 
 ```text
-Install EverOS-Hermes for Hermes Agent from repo `https://github.com/Rycen7822/EverOS-Hermes`. Prefer the latest Rust prebuilt release asset named like `everos-hermes-rust-<version>-x86_64-unknown-linux-gnu.tar.gz`; install it under `~/.local/share/everos-hermes`, put `EVEROS_API_KEY` and optional `EVEROS_USER_ID` in `~/.hermes/.env`, add MCP server `everos` with command `~/.local/share/everos-hermes/bin/everos-hermes-rust` and arg `mcp`, copy `~/.local/share/everos-hermes/integrations/hermes` to `~/.hermes/plugins/everos` if provider hooks are desired, set `EVEROS_HERMES_RUST_BIN` to the installed binary, set `memory.provider: everos`, and verify with `everos-hermes-rust --help`, `hermes mcp test everos`, and a fresh Hermes session. If the host is not Linux x86_64 or no matching prebuilt asset exists, use the Rust-from-source prompt instead.
+Install EverOS-Hermes for this Hermes Agent from `https://github.com/Rycen7822/EverOS-Hermes`. If `uname -s` is Linux and `uname -m` is x86_64/amd64, prefer the latest Rust prebuilt release asset named `everos-hermes-rust-<version>-x86_64-unknown-linux-gnu.tar.gz`; otherwise use the Rust-from-source path. Download both the `.tar.gz` and `.sha256`, verify with `sha256sum -c` before extracting, and install the extracted package directory to `$HOME/.local/share/everos-hermes`. Do not assume the binary is on PATH; use the absolute binary `$HOME/.local/share/everos-hermes/bin/everos-hermes-rust`. Put `EVEROS_API_KEY` and optional `EVEROS_USER_ID` only in `$HERMES_HOME/.env` or `~/.hermes/.env`; if the key is missing, ask the user rather than inventing one. If explicit MCP tools are desired, register `everos` with command `$HOME/.local/share/everos-hermes/bin/everos-hermes-rust` and arg `mcp` (for example `hermes mcp add everos --command "$HOME/.local/share/everos-hermes/bin/everos-hermes-rust" --args mcp`, or the equivalent YAML). If automatic memory-provider hooks are desired, copy `$HOME/.local/share/everos-hermes/integrations/hermes` to `$HERMES_HOME/plugins/everos` or `~/.hermes/plugins/everos`, set/update `EVEROS_HERMES_RUST_BIN` to an absolute path such as `/home/you/.local/share/everos-hermes/bin/everos-hermes-rust` (do not put `$HOME` in the `.env` value), then run `hermes config set memory.provider everos`. Memory-provider plugins are selected by `memory.provider`; do not rely on `plugins.enabled` for this provider. Verify with the absolute binary `--help`, `provider is-available --hermes-home <Hermes home>`, `hermes mcp test everos` if MCP was enabled, and a fresh Hermes session or restart for provider hooks.
 ```
 
-Python version, for editing or debugging the source implementation:
+Python/source version, for editing or debugging the source implementation:
 
 ```text
-Install the Python/source version of EverOS-Hermes from repo `https://github.com/Rycen7822/EverOS-Hermes`, not the Rust prebuilt package. Clone it to a stable local tools directory, run `python -m pip install -e .`, copy `integrations/hermes` to `~/.hermes/plugins/everos` if provider hooks are desired, set `memory.provider: everos`, add MCP server `everos` with `python -m everos_hermes.mcp_server`, put `EVEROS_API_KEY` and optional `EVEROS_USER_ID` in `~/.hermes/.env`, then verify with `python -m pytest -q`, `hermes mcp test everos`, and a fresh Hermes session.
+Install the Python/source version of EverOS-Hermes from `https://github.com/Rycen7822/EverOS-Hermes`, not the Rust prebuilt package. Clone it to a stable local tools directory and run `python -m pip install -e .` using the same Python environment Hermes will use; if Hermes resolves a different Python, use absolute interpreter paths in config. Put `EVEROS_API_KEY` and optional `EVEROS_USER_ID` only in `$HERMES_HOME/.env` or `~/.hermes/.env`; if the key is missing, ask the user. For explicit MCP tools, prefer the installed console script `everos-mcp` when it resolves to the same environment (`hermes mcp add everos --command everos-mcp`), otherwise configure YAML with an absolute Python command and args `-m everos_hermes.mcp_server`. For provider hooks, copy the repo's `integrations/hermes` directory to `$HERMES_HOME/plugins/everos` or `~/.hermes/plugins/everos` and run `hermes config set memory.provider everos`. Verify importability, `python -m pytest tests -q`, `hermes mcp test everos` if MCP was enabled, and a fresh Hermes session or restart for provider hooks.
 ```
 
 Rust from source, for platform-specific native builds:
 
 ```text
-Build EverOS-Hermes Rust from source by cloning `https://github.com/Rycen7822/EverOS-Hermes`, then running `cd rust-version && cargo build --release && cargo test --tests`. Install or copy `rust-version/target/release/everos-hermes-rust` under `~/.local/share/everos-hermes/bin`, copy `rust-version/integrations/hermes` under `~/.local/share/everos-hermes/integrations/hermes`, register MCP `everos` to the binary with arg `mcp`, set `EVEROS_HERMES_RUST_BIN` to the binary for Hermes provider use, keep secrets in `~/.hermes/.env`, and verify with `everos-hermes-rust --help`, `hermes mcp test everos`, and a fresh Hermes session.
+Build EverOS-Hermes Rust from source by cloning `https://github.com/Rycen7822/EverOS-Hermes`, then run `cd rust-version && cargo build --release && cargo test --tests --no-fail-fast`. Install `rust-version/target/release/everos-hermes-rust` to `$HOME/.local/share/everos-hermes/bin/everos-hermes-rust` and copy `rust-version/integrations/hermes` to `$HOME/.local/share/everos-hermes/integrations/hermes`. Use the absolute binary path for MCP (`hermes mcp add everos --command "$HOME/.local/share/everos-hermes/bin/everos-hermes-rust" --args mcp`) and set/update `EVEROS_HERMES_RUST_BIN` to the same absolute binary path before enabling `memory.provider: everos`; do not put `$HOME` or `$INSTALL_DIR` in the `.env` value. Keep secrets in `$HERMES_HOME/.env` or `~/.hermes/.env`. Verify the binary `--help`, `provider is-available --hermes-home <Hermes home>`, `hermes mcp test everos` if MCP was enabled, and a fresh Hermes session or restart for provider hooks.
 ```
 
 ### Rust Prebuilt Package
@@ -110,33 +115,47 @@ https://github.com/Rycen7822/EverOS-Hermes/releases/download/v<version>/everos-h
 Current Linux x86_64 asset:
 
 ```text
-everos-hermes-rust-0.2.0-x86_64-unknown-linux-gnu.tar.gz
+everos-hermes-rust-0.2.1-x86_64-unknown-linux-gnu.tar.gz
 ```
 
-Install flow:
+Verified install flow:
 
 ```bash
-VERSION=0.2.0
+VERSION=0.2.1
 TARGET=x86_64-unknown-linux-gnu
+PKG_NAME="everos-hermes-rust-${VERSION}-${TARGET}"
+ASSET="${PKG_NAME}.tar.gz"
 INSTALL_DIR="$HOME/.local/share/everos-hermes"
-ASSET="everos-hermes-rust-${VERSION}-${TARGET}.tar.gz"
+TMPDIR="$(mktemp -d)"
 
-mkdir -p "$INSTALL_DIR"
-curl -L -o "/tmp/$ASSET" \
+curl -fL -o "/tmp/$ASSET" \
   "https://github.com/Rycen7822/EverOS-Hermes/releases/download/v${VERSION}/${ASSET}"
-tar -xzf "/tmp/$ASSET" -C "$INSTALL_DIR" --strip-components=1
+curl -fL -o "/tmp/$ASSET.sha256" \
+  "https://github.com/Rycen7822/EverOS-Hermes/releases/download/v${VERSION}/${ASSET}.sha256"
+(cd /tmp && sha256sum -c "$ASSET.sha256")
+
+tar -xzf "/tmp/$ASSET" -C "$TMPDIR"
+rm -rf "$INSTALL_DIR"
+mkdir -p "$(dirname "$INSTALL_DIR")"
+mv "$TMPDIR/$PKG_NAME" "$INSTALL_DIR"
 "$INSTALL_DIR/bin/everos-hermes-rust" --help
 ```
 
-Optional checksum verification:
+Optional PATH convenience:
 
 ```bash
-curl -L -o "/tmp/$ASSET.sha256" \
-  "https://github.com/Rycen7822/EverOS-Hermes/releases/download/v${VERSION}/${ASSET}.sha256"
-(cd /tmp && sha256sum -c "$ASSET.sha256")
+mkdir -p "$HOME/.local/bin"
+ln -sfn "$INSTALL_DIR/bin/everos-hermes-rust" "$HOME/.local/bin/everos-hermes-rust"
 ```
 
-MCP registration snippet for Hermes:
+MCP registration for Hermes:
+
+```bash
+hermes mcp add everos --command "$INSTALL_DIR/bin/everos-hermes-rust" --args mcp
+hermes mcp test everos
+```
+
+Equivalent MCP YAML:
 
 ```yaml
 mcp_servers:
@@ -146,19 +165,28 @@ mcp_servers:
       - mcp
 ```
 
-Hermes memory provider snippet:
+Hermes memory provider setup:
 
 ```bash
-mkdir -p ~/.hermes/plugins
-cp -R "$INSTALL_DIR/integrations/hermes" ~/.hermes/plugins/everos
-printf '\nEVEROS_HERMES_RUST_BIN=%s\n' "$INSTALL_DIR/bin/everos-hermes-rust" >> ~/.hermes/.env
+mkdir -p "${HERMES_HOME:-$HOME/.hermes}/plugins"
+rm -rf "${HERMES_HOME:-$HOME/.hermes}/plugins/everos"
+cp -R "$INSTALL_DIR/integrations/hermes" "${HERMES_HOME:-$HOME/.hermes}/plugins/everos"
 ```
 
-Then set:
+Then add or update these settings:
 
-```yaml
-memory:
-  provider: everos
+```bash
+# In ${HERMES_HOME:-$HOME/.hermes}/.env:
+EVEROS_HERMES_RUST_BIN=/home/you/.local/share/everos-hermes/bin/everos-hermes-rust
+
+# Run this to update config.yaml:
+hermes config set memory.provider everos
+```
+
+Provider availability check:
+
+```bash
+"$INSTALL_DIR/bin/everos-hermes-rust" provider is-available --hermes-home "${HERMES_HOME:-$HOME/.hermes}"
 ```
 
 Restart Hermes CLI/WebUI/gateway after changing memory provider config. MCP tools and the memory provider are independent surfaces; you may enable either or both.
@@ -198,12 +226,18 @@ Provider context-engine knobs shared by the Python and Rust runtimes can be plac
 
 `include_recent_raw=true` is intentionally opt-in and session-scoped; without a session id, recent raw recall is skipped instead of running a global raw-message search.
 
-Fallback MCP registration:
+MCP registration after installing the Python package:
+
+```bash
+hermes mcp add everos --command everos-mcp
+```
+
+If `everos-mcp` would resolve to the wrong environment, use YAML with an absolute interpreter path:
 
 ```yaml
 mcp_servers:
   everos:
-    command: python
+    command: /absolute/path/to/python
     args:
       - -m
       - everos_hermes.mcp_server
@@ -246,6 +280,8 @@ EVEROS_USER_ID=hermes_default
 # Optional:
 EVEROS_BASE_URL=https://api.evermind.ai
 EVEROS_TIMEOUT=10
+# Required for the Rust provider shim unless the binary is discoverable on PATH:
+EVEROS_HERMES_RUST_BIN=/home/you/.local/share/everos-hermes/bin/everos-hermes-rust
 ```
 
 Credential lookup order:
@@ -258,23 +294,39 @@ The MCP config does not need an `env:` block unless you intentionally want per-s
 
 ## Use as Hermes Memory Provider
 
-Install the package, then copy the plugin entrypoint into Hermes' plugin directory:
+Install either the Rust prebuilt package or the Python package first, then place the matching plugin shim in Hermes' memory-provider plugin directory.
+
+Rust prebuilt provider shim:
+
+```bash
+INSTALL_DIR="$HOME/.local/share/everos-hermes"
+HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+mkdir -p "$HERMES_HOME/plugins"
+rm -rf "$HERMES_HOME/plugins/everos"
+cp -R "$INSTALL_DIR/integrations/hermes" "$HERMES_HOME/plugins/everos"
+# Add or update this line in "$HERMES_HOME/.env" with an absolute path
+# (dotenv values are not shell-expanded):
+# EVEROS_HERMES_RUST_BIN=/home/you/.local/share/everos-hermes/bin/everos-hermes-rust
+```
+
+Python/source provider shim:
 
 ```bash
 cd /path/to/EverOS-Hermes
 python -m pip install -e .
-mkdir -p ~/.hermes/plugins
-cp -r integrations/hermes ~/.hermes/plugins/everos
+HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+mkdir -p "$HERMES_HOME/plugins"
+rm -rf "$HERMES_HOME/plugins/everos"
+cp -R integrations/hermes "$HERMES_HOME/plugins/everos"
 ```
 
-Set the provider in `~/.hermes/config.yaml`:
+Select the provider:
 
-```yaml
-memory:
-  provider: everos
+```bash
+hermes config set memory.provider everos
 ```
 
-Restart Hermes CLI / WebUI / gateway, or start a fresh session after changing memory provider config.
+Memory-provider discovery scans `$HERMES_HOME/plugins/everos` for a provider selected by `memory.provider`; this provider does not need a `plugins.enabled` entry. Restart Hermes CLI / WebUI / gateway, or start a fresh session after changing memory provider config.
 
 ### Provider Behavior
 
@@ -356,26 +408,43 @@ Agent visibility options are intentionally off by default for provider hooks. Wh
 
 ## Use as MCP Server
 
-After installing the package, add this to `~/.hermes/config.yaml`. MCP-only mode does not run provider hooks; it only makes tools available for the model to call explicitly.
+After installing either runtime, register exactly one `mcp_servers.everos` command. MCP-only mode does not run provider hooks; it only makes tools available for the model to call explicitly.
+
+Rust prebuilt/source command, recommended when a Rust binary is installed:
+
+```bash
+INSTALL_DIR="$HOME/.local/share/everos-hermes"
+hermes mcp add everos --command "$INSTALL_DIR/bin/everos-hermes-rust" --args mcp
+```
+
+Equivalent Rust MCP YAML:
 
 ```yaml
 mcp_servers:
   everos:
-    command: python
+    command: /home/you/.local/share/everos-hermes/bin/everos-hermes-rust
+    args:
+      - mcp
+```
+
+Python/source console-script command after `python -m pip install -e .`:
+
+```bash
+hermes mcp add everos --command everos-mcp
+```
+
+Equivalent Python MCP YAML, useful when you need an absolute interpreter path:
+
+```yaml
+mcp_servers:
+  everos:
+    command: /absolute/path/to/python
     args:
       - -m
       - everos_hermes.mcp_server
 ```
 
-Equivalent console-script command after installation:
-
-```yaml
-mcp_servers:
-  everos:
-    command: everos-mcp
-```
-
-If `python` or `everos-mcp` would resolve to the wrong environment, use an absolute interpreter or executable path.
+If `python`, `everos-mcp`, or the Rust binary would resolve to the wrong environment, use an absolute command path. The MCP config does not need an `env:` block unless you intentionally want per-server overrides.
 
 Verify:
 
@@ -386,8 +455,8 @@ hermes mcp test everos
 Manual stdio launch for another MCP client:
 
 ```bash
-python -m everos_hermes.mcp_server
-# or
+/home/you/.local/share/everos-hermes/bin/everos-hermes-rust mcp
+# or, for the Python runtime:
 everos-mcp
 ```
 

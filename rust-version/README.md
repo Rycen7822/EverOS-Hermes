@@ -73,21 +73,27 @@ https://github.com/Rycen7822/EverOS-Hermes/releases/download/v<version>/everos-h
 Current Linux x86_64 asset:
 
 ```text
-everos-hermes-rust-0.2.0-x86_64-unknown-linux-gnu.tar.gz
+everos-hermes-rust-0.2.1-x86_64-unknown-linux-gnu.tar.gz
 ```
 
-Linux x86_64 install example:
+Verified Linux x86_64 install example:
 
 ```bash
-VERSION=0.2.0
+VERSION=0.2.1
 TARGET=x86_64-unknown-linux-gnu
+PKG_NAME="everos-hermes-rust-${VERSION}-${TARGET}"
+ASSET="${PKG_NAME}.tar.gz"
 INSTALL_DIR="$HOME/.local/share/everos-hermes"
-ASSET="everos-hermes-rust-${VERSION}-${TARGET}.tar.gz"
+TMPDIR="$(mktemp -d)"
 
-mkdir -p "$INSTALL_DIR"
-curl -L -o "/tmp/$ASSET" \
-  "https://github.com/Rycen7822/EverOS-Hermes/releases/download/v${VERSION}/${ASSET}"
-tar -xzf "/tmp/$ASSET" -C "$INSTALL_DIR" --strip-components=1
+curl -fL -o "/tmp/$ASSET"   "https://github.com/Rycen7822/EverOS-Hermes/releases/download/v${VERSION}/${ASSET}"
+curl -fL -o "/tmp/$ASSET.sha256"   "https://github.com/Rycen7822/EverOS-Hermes/releases/download/v${VERSION}/${ASSET}.sha256"
+(cd /tmp && sha256sum -c "$ASSET.sha256")
+
+tar -xzf "/tmp/$ASSET" -C "$TMPDIR"
+rm -rf "$INSTALL_DIR"
+mkdir -p "$(dirname "$INSTALL_DIR")"
+mv "$TMPDIR/$PKG_NAME" "$INSTALL_DIR"
 "$INSTALL_DIR/bin/everos-hermes-rust" --help
 ```
 
@@ -101,14 +107,25 @@ README.md
 INSTALL.md
 ```
 
-Optional checksum verification:
+MCP registration for Hermes:
 
 ```bash
-curl -L -o "/tmp/$ASSET.sha256" \
-  "https://github.com/Rycen7822/EverOS-Hermes/releases/download/v${VERSION}/${ASSET}.sha256"
-(cd /tmp && sha256sum -c "$ASSET.sha256")
+hermes mcp add everos --command "$INSTALL_DIR/bin/everos-hermes-rust" --args mcp
+hermes mcp test everos
 ```
 
+Memory-provider setup for Hermes:
+
+```bash
+HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+mkdir -p "$HERMES_HOME/plugins"
+rm -rf "$HERMES_HOME/plugins/everos"
+cp -R "$INSTALL_DIR/integrations/hermes" "$HERMES_HOME/plugins/everos"
+# Add to "$HERMES_HOME/.env" using an absolute path; dotenv values are not shell-expanded:
+# EVEROS_HERMES_RUST_BIN=/home/you/.local/share/everos-hermes/bin/everos-hermes-rust
+hermes config set memory.provider everos
+"$INSTALL_DIR/bin/everos-hermes-rust" provider is-available --hermes-home "$HERMES_HOME"
+```
 ### Rust From Source
 
 ```bash
@@ -206,31 +223,37 @@ Import workflows validate supplied `messages[].timestamp` values locally as inte
 
 Hermes currently loads memory-provider plugins through Python entrypoints. The Rust version therefore includes a minimal Python shim at `rust-version/integrations/hermes` that registers a provider and shells out to the Rust binary for all behavior.
 
-Build the Rust binary first:
+For a prebuilt install, use the package path:
 
 ```bash
-cd /home/xu/project/tools/EverOS-Hermes/rust-version
+INSTALL_DIR="$HOME/.local/share/everos-hermes"
+HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+mkdir -p "$HERMES_HOME/plugins"
+rm -rf "$HERMES_HOME/plugins/everos"
+cp -R "$INSTALL_DIR/integrations/hermes" "$HERMES_HOME/plugins/everos"
+```
+
+For a source checkout, build first and copy the source shim:
+
+```bash
+cd /path/to/EverOS-Hermes/rust-version
 cargo build --release
+HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+mkdir -p "$HERMES_HOME/plugins"
+rm -rf "$HERMES_HOME/plugins/everos"
+cp -R integrations/hermes "$HERMES_HOME/plugins/everos"
 ```
 
-Install/copy the plugin shim:
+If the binary is not on PATH, set this in `$HERMES_HOME/.env` or the Hermes process environment. Use an absolute path; the package dotenv parser does not expand `~`, `$HOME`, or `$INSTALL_DIR` inside values.
 
 ```bash
-mkdir -p ~/.hermes/plugins
-cp -r /home/xu/project/tools/EverOS-Hermes/rust-version/integrations/hermes ~/.hermes/plugins/everos
+EVEROS_HERMES_RUST_BIN=/home/you/.local/share/everos-hermes/bin/everos-hermes-rust
 ```
 
-If the binary is not on PATH, set this in `~/.hermes/.env` or the Hermes process environment:
+Then select the provider:
 
 ```bash
-EVEROS_HERMES_RUST_BIN=/home/xu/project/tools/EverOS-Hermes/rust-version/target/release/everos-hermes-rust
-```
-
-Then set the provider:
-
-```yaml
-memory:
-  provider: everos
+hermes config set memory.provider everos
 ```
 
 Restart Hermes CLI/WebUI/gateway after changing the provider. MCP tools and the memory provider are independent surfaces; you may enable either or both.
