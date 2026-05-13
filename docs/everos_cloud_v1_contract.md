@@ -5,7 +5,7 @@ EverOS-Hermes targets EverOS Cloud v1 personal and agent memory workflows for He
 ## Base URL and auth
 
 - Base URL: `https://api.evermind.ai`
-- Auth: `Authorization: Bearer ***`
+- Auth: `Authorization: Bearer ...` (examples and smoke summaries redact real tokens as `Bearer ***`)
 - All supported Cloud endpoints are under `/api/v1`.
 - v0 endpoints are deprecated and must not be used by this integration.
 
@@ -84,7 +84,7 @@ A structured agent trajectory write can preserve assistant tool calls and tool-r
 ]
 ```
 
-Response notes are the same as personal add.
+Response notes are the same as personal add. EverOS-Hermes wraps agent-scope primitive write responses with `agent_visibility.status="unchecked"` because raw queue acceptance is not structured visibility.
 
 ### POST /api/v1/memories/flush
 
@@ -111,7 +111,7 @@ Request body:
 {"user_id": "user_123", "session_id": "session_123"}
 ```
 
-Response notes match personal flush, but apply to agent memory.
+Response notes match personal flush, but apply to agent memory. EverOS-Hermes retries one transient request-send failure before returning an agent flush result; timeout responses remain retryable guidance rather than proof of failure.
 
 ### POST /api/v1/memories/search
 
@@ -244,6 +244,33 @@ Supported filter fields:
 - `AND` / `OR` arrays containing nested filter objects.
 
 Unknown fields are rejected even if Cloud would ignore them, because silent ignore would make Hermes believe a filter was applied when it was not. Top-level `user_id`/`session_id` parameters are merged with filters only when there is no conflict.
+
+## Agent visibility envelope
+
+Agent-scope helpers must distinguish four states:
+
+```json
+{
+  "agent_visibility_status": "not_visible",
+  "agent_raw_queued": true,
+  "agent_flush": {"ok": true, "status": "success"},
+  "agent_visibility_checks": [
+    {"surface": "personal_search", "visible": true},
+    {"surface": "agent_memory", "visible": false},
+    {"surface": "agent_case", "visible": false},
+    {"surface": "agent_skill", "visible": false}
+  ]
+}
+```
+
+Status meanings:
+
+- `unchecked`: primitive write/flush path did not probe structured visibility;
+- `not_visible`: raw/personal search may contain the text, but no agent structured surface was visible;
+- `partial`: at least one agent structured surface was visible, but expected surfaces were still missing;
+- `visible`: structured agent probes found data on the expected agent surfaces.
+
+This is a local EverOS-Hermes contract layered over Cloud v1 endpoints. It does not add Cloud endpoints and must not call out-of-scope group/sender/object/multimodal APIs.
 
 ## Lifecycle payload contract
 

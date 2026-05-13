@@ -4,10 +4,12 @@
 //! a small EverOS REST client, formatting helpers, Hermes memory-provider core,
 //! and a local stdio MCP server.
 
+pub mod agent_visibility;
 pub mod cli;
 pub mod client;
 pub mod context_assembler;
 pub mod env;
+pub mod flush_retry;
 pub mod formatting;
 pub mod mcp;
 pub mod policy;

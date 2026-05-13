@@ -6,8 +6,10 @@ from typing import Any, Literal, TypedDict
 
 from mcp.server.fastmcp import FastMCP
 
+from .agent_visibility import build_agent_visibility_report
 from .client import DEFAULT_BASE_URL, DEFAULT_MEMORY_TYPES, EverOSClient, EverOSError, EverOSTimeoutError
 from .env import get_env
+from .flush_retry import flush_memories_with_retry
 from .formatting import format_search_context, pretty_json, strip_vectors
 from .schemas import GetMemoryType, MemoryScope, SearchMemoryType, delete_confirm_text, normalize_scope
 from .workflows import import_and_verify, save_and_verify, verify_session_ingest
@@ -64,9 +66,11 @@ def _render(response: dict[str, Any], response_format: str = "json") -> str:
     return pretty_json(response)
 
 
-def _flush_result_payload(response: dict[str, Any]) -> WorkflowOutput:
+def _flush_result_payload(response: dict[str, Any], *, attempt_count: int | None = None) -> WorkflowOutput:
     data = response.get("data", {}) if isinstance(response, dict) else {}
     payload: dict[str, Any] = {"ok": True}
+    if attempt_count is not None:
+        payload["attempt_count"] = attempt_count
     if isinstance(data, dict):
         if data.get("status"):
             payload["status"] = data.get("status")
@@ -166,20 +170,31 @@ async def everos_save_memory(
     flush_error = None
     if flush:
         try:
-            flush_result = client.flush_memories(user_id=uid, session_id=session_id, scope=resolved_scope, timeout=flush_timeout)
+            flush_result, _attempt_count = flush_memories_with_retry(
+                client,
+                user_id=uid,
+                session_id=session_id,
+                scope=resolved_scope,
+                timeout=flush_timeout,
+            )
         except EverOSTimeoutError as exc:
             flush_error = exc
-    return pretty_json(
-        _save_result_payload(
-            result=result,
-            user_id=uid,
-            session_id=session_id,
-            scope=resolved_scope,
-            flush_requested=flush,
-            flush_result=flush_result,
-            flush_error=flush_error,
-        )
+    payload = _save_result_payload(
+        result=result,
+        user_id=uid,
+        session_id=session_id,
+        scope=resolved_scope,
+        flush_requested=flush,
+        flush_result=flush_result,
+        flush_error=flush_error,
     )
+    if resolved_scope == "agent":
+        payload["agent_visibility"] = build_agent_visibility_report(
+            agent_raw_queued=True,
+            agent_flush=payload.get("flush") if isinstance(payload.get("flush"), dict) else None,
+            checks=[],
+        )
+    return pretty_json(payload)
 
 
 @mcp.tool(
@@ -209,11 +224,27 @@ async def everos_add_memories(
     result = client.add_memories(user_id=uid, session_id=session_id, messages=messages, async_mode=async_mode, scope=resolved_scope)
     if flush:
         try:
-            flush_result = client.flush_memories(user_id=uid, session_id=session_id, scope=resolved_scope, timeout=flush_timeout)
-            return pretty_json({"ok": True, "add": result, "flush": _flush_result_payload(flush_result)})
+            flush_result, attempt_count = flush_memories_with_retry(
+                client,
+                user_id=uid,
+                session_id=session_id,
+                scope=resolved_scope,
+                timeout=flush_timeout,
+            )
+            payload: dict[str, Any] = {"ok": True, "add": result, "flush": _flush_result_payload(flush_result, attempt_count=attempt_count)}
         except EverOSTimeoutError as exc:
-            return pretty_json({"ok": True, "add": result, "flush": _timeout_payload("flush", exc)})
-    return pretty_json(result)
+            payload = {"ok": True, "add": result, "flush": _timeout_payload("flush", exc)}
+    elif resolved_scope == "agent":
+        payload = {"ok": True, "add": result}
+    else:
+        return pretty_json(result)
+    if resolved_scope == "agent":
+        payload["agent_visibility"] = build_agent_visibility_report(
+            agent_raw_queued=True,
+            agent_flush=payload.get("flush") if isinstance(payload.get("flush"), dict) else None,
+            checks=[],
+        )
+    return pretty_json(payload)
 
 
 @mcp.tool(
@@ -235,10 +266,26 @@ async def everos_flush_memories(
     """
     resolved_scope = normalize_scope(scope, agent)
     uid = user_id or default_user_id()
+    client = make_client()
     try:
-        return pretty_json(make_client().flush_memories(user_id=uid, session_id=session_id, scope=resolved_scope, timeout=timeout))
+        response, attempt_count = flush_memories_with_retry(
+            client,
+            user_id=uid,
+            session_id=session_id,
+            scope=resolved_scope,
+            timeout=timeout,
+        )
     except EverOSTimeoutError as exc:
         return pretty_json(_timeout_payload("flush", exc))
+    if resolved_scope == "agent":
+        flush_payload = _flush_result_payload(response, attempt_count=attempt_count)
+        return pretty_json(
+            {
+                "flush": flush_payload,
+                "agent_visibility": build_agent_visibility_report(agent_raw_queued=None, agent_flush=flush_payload, checks=[]),
+            }
+        )
+    return pretty_json(response)
 
 
 @mcp.tool(

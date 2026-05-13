@@ -1,6 +1,8 @@
+use crate::agent_visibility::{audit_agent_visibility, build_agent_visibility_report};
 use crate::client::{DEFAULT_BASE_URL, DEFAULT_MEMORY_TYPES, EverOSClient, EverOSError};
 use crate::context_assembler::{ContextAssemblyConfig, assemble_everos_context};
 use crate::env::get_env;
+use crate::flush_retry::flush_memories_with_retry;
 use crate::formatting::{format_search_context, pretty_json};
 use crate::policy::{should_skip_capture, should_skip_recall, stable_query_key};
 use crate::trajectory::{
@@ -32,6 +34,14 @@ pub struct ProviderConfig {
     pub agent_recall: bool,
     pub agent_memory_types: Vec<String>,
     pub agent_flush_after_turn: bool,
+    pub agent_visibility_verify_after_write: bool,
+    pub agent_visibility_verify_after_flush: bool,
+    pub agent_visibility_queries: Vec<String>,
+    pub agent_visibility_top_k: usize,
+    pub agent_visibility_timeout: f64,
+    pub agent_visibility_get_page_size: usize,
+    pub agent_visibility_retry_flush_attempts: usize,
+    pub agent_visibility_retry_flush_backoff_ms: u64,
     pub agentic_timeout: f64,
     pub max_context_items: u64,
     pub timeout: f64,
@@ -76,6 +86,14 @@ impl Default for ProviderConfig {
             agent_recall: false,
             agent_memory_types: vec!["agent_memory".to_string()],
             agent_flush_after_turn: true,
+            agent_visibility_verify_after_write: false,
+            agent_visibility_verify_after_flush: false,
+            agent_visibility_queries: Vec::new(),
+            agent_visibility_top_k: 5,
+            agent_visibility_timeout: 30.0,
+            agent_visibility_get_page_size: 20,
+            agent_visibility_retry_flush_attempts: 1,
+            agent_visibility_retry_flush_backoff_ms: 250,
             agentic_timeout: 60.0,
             max_context_items: 8,
             timeout: 10.0,
@@ -138,6 +156,7 @@ pub struct EverOSProvider {
     session_id: String,
     prefetch_cache: Mutex<HashMap<String, PrefetchCacheEntry>>,
     agent_saved_fingerprints: Mutex<VecDeque<String>>,
+    last_agent_visibility_status: Mutex<Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -186,6 +205,7 @@ impl EverOSProvider {
             session_id: init.session_id,
             prefetch_cache: Mutex::new(HashMap::new()),
             agent_saved_fingerprints: Mutex::new(VecDeque::new()),
+            last_agent_visibility_status: Mutex::new(Value::Object(Map::new())),
         })
     }
 
@@ -592,6 +612,43 @@ impl EverOSProvider {
         )
     }
 
+    fn agent_visibility_queries(
+        &self,
+        texts: Vec<String>,
+        session_id: &str,
+        markers: &[&str],
+    ) -> Vec<String> {
+        let configured = self
+            .config
+            .agent_visibility_queries
+            .iter()
+            .map(|query| query.trim().to_string())
+            .filter(|query| !query.is_empty())
+            .collect::<Vec<_>>();
+        if !configured.is_empty() {
+            return configured;
+        }
+        let mut queries = texts
+            .into_iter()
+            .map(|text| text.trim().chars().take(200).collect::<String>())
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>();
+        for marker in markers {
+            let marker = marker.trim();
+            if !marker.is_empty() {
+                queries.push(marker.to_string());
+            }
+        }
+        if !session_id.trim().is_empty() {
+            queries.push(format!("session:{session_id}"));
+        }
+        if queries.is_empty() {
+            queries.push("agent memory".to_string());
+        }
+        queries.truncate(2);
+        queries
+    }
+
     fn write_agent_trajectory(
         &self,
         result: &TrajectoryBuildResult,
@@ -613,8 +670,54 @@ impl EverOSProvider {
             "agent",
         )?;
         self.remember_agent_fingerprint(result.fingerprint.clone());
+        let mut flush_payload = None;
         if flush_allowed && self.config.agent_flush_after_turn {
-            client.flush_memories_scoped(&self.user_id, Some(session_id), "agent", None)?;
+            let (flush, attempt_count) = flush_memories_with_retry(
+                client,
+                &self.user_id,
+                Some(session_id),
+                "agent",
+                None,
+                2,
+            )?;
+            flush_payload = Some(flush_result_payload_with_attempt(
+                &flush,
+                Some(attempt_count),
+            ));
+        }
+        let should_audit = self.config.agent_visibility_verify_after_write
+            || (flush_payload.is_some() && self.config.agent_visibility_verify_after_flush);
+        if should_audit {
+            let texts = result
+                .messages
+                .iter()
+                .filter_map(|message| message.get("content").and_then(Value::as_str))
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            let queries = self.agent_visibility_queries(texts, session_id, &[_operation]);
+            let mut visibility = audit_agent_visibility(
+                client,
+                &self.user_id,
+                Some(session_id),
+                &queries,
+                self.config.agent_visibility_top_k as i64,
+                Some(self.config.agent_visibility_timeout),
+                self.config.agent_visibility_get_page_size as u64,
+            );
+            if let Some(map) = visibility.as_object_mut() {
+                map.insert("agent_raw_queued".to_string(), Value::Bool(true));
+                map.insert(
+                    "agent_flush".to_string(),
+                    flush_payload.clone().unwrap_or(Value::Null),
+                );
+            }
+            if let Ok(mut slot) = self.last_agent_visibility_status.lock() {
+                *slot = visibility;
+            }
+        } else if let Some(flush_payload) = flush_payload
+            && let Ok(mut slot) = self.last_agent_visibility_status.lock()
+        {
+            *slot = build_agent_visibility_report(Some(true), Some(flush_payload), vec![]);
         }
         Ok(true)
     }
@@ -689,28 +792,67 @@ impl EverOSProvider {
         )?;
         let flush_requested = as_bool(args.get("flush"), true);
         let flush_payload = if flush_requested {
-            match self.client.as_ref().expect("active").flush_memories_scoped(
+            match flush_memories_with_retry(
+                self.client.as_ref().expect("active"),
                 &self.user_id,
                 session_id_opt,
                 &scope,
                 None,
+                2,
             ) {
-                Ok(response) => Some(flush_result_payload(&response)),
+                Ok((response, attempt_count)) => Some(flush_result_payload_with_attempt(
+                    &response,
+                    Some(attempt_count),
+                )),
                 Err(err @ EverOSError::Timeout { .. }) => Some(timeout_payload("flush", &err)),
                 Err(err) => return Err(err),
             }
         } else {
             None
         };
-        Ok(serde_json::to_string(&save_result_payload(
+        let mut payload = save_result_payload(
             &result,
             &self.user_id,
             session_id_opt,
             &scope,
             flush_requested,
             flush_payload,
-        ))
-        .unwrap())
+        );
+        if scope == "agent" {
+            let flush_for_visibility = payload.get("flush").cloned();
+            let should_audit = self.config.agent_visibility_verify_after_write
+                || (flush_for_visibility.is_some()
+                    && self.config.agent_visibility_verify_after_flush);
+            if should_audit {
+                let queries = self.agent_visibility_queries(
+                    vec![content.clone()],
+                    session_id,
+                    &["tool_save"],
+                );
+                let mut visibility = audit_agent_visibility(
+                    self.client.as_ref().expect("active"),
+                    &self.user_id,
+                    session_id_opt,
+                    &queries,
+                    self.config.agent_visibility_top_k as i64,
+                    Some(self.config.agent_visibility_timeout),
+                    self.config.agent_visibility_get_page_size as u64,
+                );
+                if let Some(map) = visibility.as_object_mut() {
+                    map.insert("agent_raw_queued".to_string(), Value::Bool(true));
+                    map.insert(
+                        "agent_flush".to_string(),
+                        flush_for_visibility.unwrap_or(Value::Null),
+                    );
+                }
+                if let Some(map) = payload.as_object_mut() {
+                    map.insert("agent_visibility".to_string(), visibility);
+                }
+            } else {
+                add_agent_visibility(&mut payload, Some(true));
+            }
+        }
+        Ok(serde_json::to_string(&payload).unwrap())
     }
 
     fn tool_search(&self, args: &Value) -> Result<String, EverOSError> {
@@ -804,18 +946,27 @@ impl EverOSProvider {
             session_id.as_str()
         };
         let scope = normalize_scope_arg(&value_string(args, "scope"));
-        let response = match self.client.as_ref().expect("active").flush_memories_scoped(
+        let (response, attempt_count) = match flush_memories_with_retry(
+            self.client.as_ref().expect("active"),
             &self.user_id,
             if sid.is_empty() { None } else { Some(sid) },
             &scope,
             float_or_none(args.get("timeout")),
+            2,
         ) {
-            Ok(response) => response,
+            Ok(result) => result,
             Err(err @ EverOSError::Timeout { .. }) => {
                 return Ok(pretty_json(&timeout_payload("flush", &err)));
             }
             Err(err) => return Err(err),
         };
+        if scope == "agent" {
+            let flush_payload = flush_result_payload_with_attempt(&response, Some(attempt_count));
+            return Ok(pretty_json(&json!({
+                "flush": flush_payload.clone(),
+                "agent_visibility": build_agent_visibility_report(None, Some(flush_payload), vec![]),
+            })));
+        }
         Ok(pretty_json(&response))
     }
 
@@ -949,14 +1100,14 @@ impl EverOSProvider {
 
 pub fn provider_tool_schemas() -> Vec<Value> {
     vec![
-        json!({"name":"everos_memory_save","description":"Queue an explicit long-term memory message in EverOS and optionally request extraction; saved=true does not guarantee a structured memory is immediately searchable.","parameters":{"type":"object","properties":{"content":{"type":"string","description":"Memory content to store."},"session_id":{"type":"string","description":"Optional EverOS/Hermes session id."},"scope":{"type":"string","enum":["personal","agent"],"description":"Memory scope. Default personal."},"role":{"type":"string","enum":["user","assistant","tool","system"],"description":"Message role. role=tool is only valid with scope=agent and requires tool_call_id."},"tool_call_id":{"type":"string","description":"Required when role=tool for agent memory."},"flush":{"type":"boolean","description":"Trigger EverOS extraction immediately. Default true."}},"required":["content"]}}),
+        json!({"name":"everos_memory_save","description":"Queue an explicit long-term memory message in EverOS and optionally request extraction; saved=true does not guarantee a structured memory is immediately searchable. Agent scope returns agent_visibility=unchecked unless verification is enabled.","parameters":{"type":"object","properties":{"content":{"type":"string","description":"Memory content to store."},"session_id":{"type":"string","description":"Optional EverOS/Hermes session id."},"scope":{"type":"string","enum":["personal","agent"],"description":"Memory scope. Default personal."},"role":{"type":"string","enum":["user","assistant","tool","system"],"description":"Message role. role=tool is only valid with scope=agent and requires tool_call_id."},"tool_call_id":{"type":"string","description":"Required when role=tool for agent memory."},"flush":{"type":"boolean","description":"Trigger EverOS extraction immediately. Default true."}},"required":["content"]}}),
         json!({"name":"everos_memory_search","description":"Search EverOS long-term memory using keyword, vector, hybrid, or agentic retrieval.","parameters":{"type":"object","properties":{"query":{"type":"string","description":"Search query."},"limit":{"type":"integer","description":"Backward-compatible alias for top_k."},"top_k":{"type":"integer","description":"Cloud top_k; -1 requests all matching results."},"method":{"type":"string","enum":["keyword","vector","hybrid","agentic"],"description":"Retrieval method. Default hybrid."},"session_id":{"type":"string","description":"Optional session filter."},"filters":{"type":"object","description":"Optional Cloud v1 filters DSL."},"memory_types":{"type":"array","items":{"type":"string","enum":["episodic_memory","profile","raw_message","agent_memory"]},"description":"Optional EverOS search memory types."},"radius":{"type":"number","description":"Optional vector radius for vector/hybrid/agentic retrieval."},"include_original_data":{"type":"boolean","description":"Include Cloud original_data. Vectors remain stripped by default."},"include_vectors":{"type":"boolean","description":"Keep embedding/vector fields for debugging only."},"response_format":{"type":"string","enum":["json","markdown"],"description":"Output format."}},"required":["query"]}}),
         json!({"name":"everos_memory_get","description":"Get structured EverOS memories by type for the configured user.","parameters":{"type":"object","properties":{"memory_type":{"type":"string","enum":["episodic_memory","profile","agent_case","agent_skill"],"description":"Memory type to retrieve."},"page":{"type":"integer","description":"Page number starting at 1."},"page_size":{"type":"integer","description":"Items per page, 1-100."},"session_id":{"type":"string","description":"Optional session filter."},"filters":{"type":"object","description":"Optional Cloud v1 filters DSL."},"rank_by":{"type":"string","description":"Rank field. Default timestamp."},"rank_order":{"type":"string","enum":["asc","desc"],"description":"Rank order."}}}}),
-        json!({"name":"everos_memory_flush","description":"Force EverOS memory extraction for the configured user/session. Timeout errors are retryable; search/status checks should happen before retrying.","parameters":{"type":"object","properties":{"session_id":{"type":"string","description":"Optional session id."},"scope":{"type":"string","enum":["personal","agent"],"description":"Memory scope to flush."},"timeout":{"type":"number","description":"Optional per-call timeout in seconds."}}}}),
+        json!({"name":"everos_memory_flush","description":"Force EverOS memory extraction for the configured user/session. Timeout errors are retryable; search/status checks should happen before retrying. Agent scope reports flush separately from structured visibility and retries transient request-send failures once.","parameters":{"type":"object","properties":{"session_id":{"type":"string","description":"Optional session id."},"scope":{"type":"string","enum":["personal","agent"],"description":"Memory scope to flush."},"timeout":{"type":"number","description":"Optional per-call timeout in seconds."}}}}),
         json!({"name":"everos_memory_forget","description":"Delete an EverOS memory by id. Requires confirm=true because this is destructive.","parameters":{"type":"object","properties":{"memory_id":{"type":"string","description":"Exact EverOS memory id to delete."},"confirm":{"type":"boolean","description":"Must be true to delete."}},"required":["memory_id","confirm"]}}),
-        json!({"name":"everos_memory_save_and_verify","description":"Queue one memory message, optionally flush extraction, then verify searchability with sample queries.","parameters":{"type":"object","properties":{"content":{"type":"string","description":"Memory content to store."},"verification_query":{"type":"string","description":"Primary query used to verify recall."},"verification_queries":{"type":"array","items":{"type":"string"},"description":"Additional verification queries."},"session_id":{"type":"string","description":"Optional session id."},"scope":{"type":"string","enum":["personal","agent"],"description":"Memory scope."},"role":{"type":"string","enum":["user","assistant","tool","system"],"description":"Message role; role=tool requires tool_call_id."},"tool_call_id":{"type":"string","description":"Required when role=tool for agent memory."},"flush":{"type":"boolean","description":"Trigger extraction before verification. Default true."},"top_k":{"type":"integer","description":"Verification search top_k."}},"required":["content"]}}),
+        json!({"name":"everos_memory_save_and_verify","description":"Queue one memory message, optionally flush extraction, then verify searchability with sample queries. Agent scope returns structured agent_visibility status.","parameters":{"type":"object","properties":{"content":{"type":"string","description":"Memory content to store."},"verification_query":{"type":"string","description":"Primary query used to verify recall."},"verification_queries":{"type":"array","items":{"type":"string"},"description":"Additional verification queries."},"session_id":{"type":"string","description":"Optional session id."},"scope":{"type":"string","enum":["personal","agent"],"description":"Memory scope."},"role":{"type":"string","enum":["user","assistant","tool","system"],"description":"Message role; role=tool requires tool_call_id."},"tool_call_id":{"type":"string","description":"Required when role=tool for agent memory."},"flush":{"type":"boolean","description":"Trigger extraction before verification. Default true."},"top_k":{"type":"integer","description":"Verification search top_k."}},"required":["content"]}}),
         json!({"name":"everos_memory_import_and_verify","description":"Batch-import messages or a local file, with dry-run validation, optional flush, and verification report.","parameters":{"type":"object","properties":{"messages":{"type":"array","items":{"type":"object"},"description":"Messages to import."},"file_path":{"type":"string","description":"Optional local JSON/JSONL/Markdown file to import."},"verification_queries":{"type":"array","items":{"type":"string"},"description":"Queries used to verify recall."},"session_id":{"type":"string","description":"Optional session id."},"scope":{"type":"string","enum":["personal","agent"],"description":"Memory scope."},"dry_run":{"type":"boolean","description":"Validate and summarize without writing."},"batch_size":{"type":"integer","description":"Messages per add_memories call."},"flush":{"type":"boolean","description":"Flush after importing. Default true."},"top_k":{"type":"integer","description":"Verification search top_k."}}}}),
-        json!({"name":"everos_memory_verify_session","description":"Read-only verification for an existing user/session using sample search queries.","parameters":{"type":"object","properties":{"verification_queries":{"type":"array","items":{"type":"string"},"description":"Queries used to verify recall."},"session_id":{"type":"string","description":"Optional session id."},"scope":{"type":"string","enum":["personal","agent"],"description":"Memory scope."},"memory_types":{"type":"array","items":{"type":"string","enum":["episodic_memory","profile","raw_message","agent_memory"]}},"top_k":{"type":"integer","description":"Verification search top_k."}},"required":["verification_queries"]}}),
+        json!({"name":"everos_memory_verify_session","description":"Read-only verification for an existing user/session using sample search queries. Agent scope returns structured agent_visibility status.","parameters":{"type":"object","properties":{"verification_queries":{"type":"array","items":{"type":"string"},"description":"Queries used to verify recall."},"session_id":{"type":"string","description":"Optional session id."},"scope":{"type":"string","enum":["personal","agent"],"description":"Memory scope."},"memory_types":{"type":"array","items":{"type":"string","enum":["episodic_memory","profile","raw_message","agent_memory"]}},"top_k":{"type":"integer","description":"Verification search top_k."}},"required":["verification_queries"]}}),
     ]
 }
 
@@ -1012,6 +1163,14 @@ fn normalize_config_from_value(config: &mut ProviderConfig, value: &Value) {
         ("capture_agent_memory", &mut config.capture_agent_memory),
         ("agent_recall", &mut config.agent_recall),
         ("agent_flush_after_turn", &mut config.agent_flush_after_turn),
+        (
+            "agent_visibility_verify_after_write",
+            &mut config.agent_visibility_verify_after_write,
+        ),
+        (
+            "agent_visibility_verify_after_flush",
+            &mut config.agent_visibility_verify_after_flush,
+        ),
         ("include_recent_raw", &mut config.include_recent_raw),
         ("prefetch_cache_enabled", &mut config.prefetch_cache_enabled),
         (
@@ -1046,6 +1205,30 @@ fn normalize_config_from_value(config: &mut ProviderConfig, value: &Value) {
     }
     if let Some(value) = map.get("agentic_timeout").and_then(Value::as_f64) {
         config.agentic_timeout = value.clamp(1.0, 120.0);
+    }
+    if let Some(value) = map.get("agent_visibility_timeout").and_then(Value::as_f64) {
+        config.agent_visibility_timeout = value.clamp(1.0, 120.0);
+    }
+    if let Some(value) = map.get("agent_visibility_top_k").and_then(Value::as_u64) {
+        config.agent_visibility_top_k = (value as usize).clamp(1, 20);
+    }
+    if let Some(value) = map
+        .get("agent_visibility_get_page_size")
+        .and_then(Value::as_u64)
+    {
+        config.agent_visibility_get_page_size = (value as usize).clamp(1, 100);
+    }
+    if let Some(value) = map
+        .get("agent_visibility_retry_flush_attempts")
+        .and_then(Value::as_u64)
+    {
+        config.agent_visibility_retry_flush_attempts = (value as usize).clamp(1, 5);
+    }
+    if let Some(value) = map
+        .get("agent_visibility_retry_flush_backoff_ms")
+        .and_then(Value::as_u64)
+    {
+        config.agent_visibility_retry_flush_backoff_ms = value.clamp(0, 2_000);
     }
     if let Some(value) = map.get("max_context_chars").and_then(Value::as_u64) {
         config.max_context_chars = (value as usize).clamp(1_000, 200_000);
@@ -1133,6 +1316,9 @@ fn normalize_config_from_value(config: &mut ProviderConfig, value: &Value) {
             config.agent_memory_types = parsed;
         }
     }
+    if let Some(queries) = map.get("agent_visibility_queries") {
+        config.agent_visibility_queries = parse_string_list(queries);
+    }
 }
 
 fn resolve_user_id(
@@ -1216,10 +1402,13 @@ fn timeout_payload(operation: &str, err: &EverOSError) -> Value {
     })
 }
 
-fn flush_result_payload(response: &Value) -> Value {
+fn flush_result_payload_with_attempt(response: &Value, attempt_count: Option<usize>) -> Value {
     let data = response.get("data").unwrap_or(response);
     let mut payload = serde_json::Map::new();
     payload.insert("ok".to_string(), Value::Bool(true));
+    if let Some(attempt_count) = attempt_count.filter(|value| *value > 1) {
+        payload.insert("attempt_count".to_string(), json!(attempt_count));
+    }
     for key in ["status", "request_id", "task_id", "message"] {
         if let Some(value) = data.get(key).filter(|value| !value.is_null()) {
             payload.insert(key.to_string(), value.clone());
@@ -1265,6 +1454,16 @@ fn save_result_payload(
             }
         }),
     })
+}
+
+fn add_agent_visibility(payload: &mut Value, agent_raw_queued: Option<bool>) {
+    let flush = payload.get("flush").cloned();
+    if let Some(map) = payload.as_object_mut() {
+        map.insert(
+            "agent_visibility".to_string(),
+            build_agent_visibility_report(agent_raw_queued, flush, vec![]),
+        );
+    }
 }
 
 fn value_string(value: &Value, key: &str) -> String {

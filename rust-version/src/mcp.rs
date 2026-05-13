@@ -1,5 +1,7 @@
+use crate::agent_visibility::build_agent_visibility_report;
 use crate::client::{DEFAULT_MEMORY_TYPES, EverOSClient, EverOSError};
 use crate::env::get_env;
+use crate::flush_retry::flush_memories_with_retry;
 use crate::formatting::{format_search_context, pretty_json};
 use crate::workflows;
 use serde_json::{Value, json};
@@ -142,27 +144,33 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
                 &scope,
             )?;
             let flush_payload = if flush {
-                match client.flush_memories_scoped(
+                match flush_memories_with_retry(
+                    &client,
                     &uid,
                     session_id.as_deref(),
                     &scope,
                     flush_timeout,
+                    2,
                 ) {
-                    Ok(response) => Some(flush_result_payload(&response)),
+                    Ok((response, _attempt_count)) => Some(flush_result_payload(&response)),
                     Err(err @ EverOSError::Timeout { .. }) => Some(timeout_payload("flush", &err)),
                     Err(err) => return Err(err.into()),
                 }
             } else {
                 None
             };
-            Ok(pretty_json(&save_result_payload(
+            let mut payload = save_result_payload(
                 &result,
                 &uid,
                 session_id.as_deref(),
                 &scope,
                 flush,
                 flush_payload,
-            )))
+            );
+            if scope == "agent" {
+                add_agent_visibility(&mut payload, Some(true));
+            }
+            Ok(pretty_json(&payload))
         }
         "everos_add_memories" => {
             let messages = value
@@ -185,20 +193,38 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
                 &scope,
             )?;
             if flush {
-                match client.flush_memories_scoped(
+                match flush_memories_with_retry(
+                    &client,
                     &uid,
                     session_id.as_deref(),
                     &scope,
                     flush_timeout,
+                    2,
                 ) {
-                    Ok(response) => Ok(pretty_json(
-                        &json!({"ok": true, "add": result, "flush": flush_result_payload(&response)}),
-                    )),
-                    Err(err @ EverOSError::Timeout { .. }) => Ok(pretty_json(
-                        &json!({"ok": true, "add": result, "flush": timeout_payload("flush", &err)}),
-                    )),
+                    Ok((response, attempt_count)) => {
+                        let mut payload = json!({
+                            "ok": true,
+                            "add": result,
+                            "flush": flush_result_payload_with_attempt(&response, Some(attempt_count)),
+                        });
+                        if scope == "agent" {
+                            add_agent_visibility(&mut payload, Some(true));
+                        }
+                        Ok(pretty_json(&payload))
+                    }
+                    Err(err @ EverOSError::Timeout { .. }) => {
+                        let mut payload = json!({"ok": true, "add": result, "flush": timeout_payload("flush", &err)});
+                        if scope == "agent" {
+                            add_agent_visibility(&mut payload, Some(true));
+                        }
+                        Ok(pretty_json(&payload))
+                    }
                     Err(err) => Err(err.into()),
                 }
+            } else if scope == "agent" {
+                let mut payload = json!({"ok": true, "add": result});
+                add_agent_visibility(&mut payload, Some(true));
+                Ok(pretty_json(&payload))
             } else {
                 Ok(pretty_json(&result))
             }
@@ -208,9 +234,27 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
             let session_id = optional_string(&value, "session_id");
             let scope = scope_from_args(&value)?;
             let timeout = float_arg(&value, "timeout");
-            match make_client()?.flush_memories_scoped(&uid, session_id.as_deref(), &scope, timeout)
-            {
-                Ok(response) => Ok(pretty_json(&response)),
+            let client = make_client()?;
+            match flush_memories_with_retry(
+                &client,
+                &uid,
+                session_id.as_deref(),
+                &scope,
+                timeout,
+                2,
+            ) {
+                Ok((response, attempt_count)) => {
+                    if scope == "agent" {
+                        let flush_payload =
+                            flush_result_payload_with_attempt(&response, Some(attempt_count));
+                        Ok(pretty_json(&json!({
+                            "flush": flush_payload.clone(),
+                            "agent_visibility": build_agent_visibility_report(None, Some(flush_payload), vec![]),
+                        })))
+                    } else {
+                        Ok(pretty_json(&response))
+                    }
+                }
                 Err(err @ EverOSError::Timeout { .. }) => {
                     Ok(pretty_json(&timeout_payload("flush", &err)))
                 }
@@ -545,9 +589,16 @@ fn render(response: &Value, response_format: &str) -> String {
 }
 
 fn flush_result_payload(response: &Value) -> Value {
+    flush_result_payload_with_attempt(response, None)
+}
+
+fn flush_result_payload_with_attempt(response: &Value, attempt_count: Option<usize>) -> Value {
     let data = response.get("data").unwrap_or(response);
     let mut payload = serde_json::Map::new();
     payload.insert("ok".to_string(), Value::Bool(true));
+    if let Some(attempt_count) = attempt_count.filter(|value| *value > 1) {
+        payload.insert("attempt_count".to_string(), json!(attempt_count));
+    }
     for key in ["status", "request_id", "task_id", "message"] {
         if let Some(value) = data.get(key).filter(|value| !value.is_null()) {
             payload.insert(key.to_string(), value.clone());
@@ -607,6 +658,16 @@ fn save_result_payload(
             }
         }),
     })
+}
+
+fn add_agent_visibility(payload: &mut Value, agent_raw_queued: Option<bool>) {
+    let flush = payload.get("flush").cloned();
+    if let Some(map) = payload.as_object_mut() {
+        map.insert(
+            "agent_visibility".to_string(),
+            build_agent_visibility_report(agent_raw_queued, flush, vec![]),
+        );
+    }
 }
 
 fn required_string(value: &Value, key: &str) -> anyhow::Result<String> {

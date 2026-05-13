@@ -1,6 +1,41 @@
 import json
 
 
+def test_provider_agent_visibility_config_normalizes_defaults_and_overrides():
+    from everos_hermes.provider import _normalize_config
+
+    defaults = _normalize_config({})
+    assert defaults["agent_visibility_verify_after_write"] is False
+    assert defaults["agent_visibility_verify_after_flush"] is False
+    assert defaults["agent_visibility_queries"] == []
+    assert defaults["agent_visibility_top_k"] == 5
+    assert defaults["agent_visibility_timeout"] == 30.0
+    assert defaults["agent_visibility_get_page_size"] == 20
+    assert defaults["agent_visibility_retry_flush_attempts"] == 1
+    assert defaults["agent_visibility_retry_flush_backoff_ms"] == 250
+
+    custom = _normalize_config(
+        {
+            "agent_visibility_verify_after_write": "true",
+            "agent_visibility_verify_after_flush": "yes",
+            "agent_visibility_queries": "alpha, beta",
+            "agent_visibility_top_k": 99,
+            "agent_visibility_timeout": 0,
+            "agent_visibility_get_page_size": 200,
+            "agent_visibility_retry_flush_attempts": 9,
+            "agent_visibility_retry_flush_backoff_ms": 5000,
+        }
+    )
+    assert custom["agent_visibility_verify_after_write"] is True
+    assert custom["agent_visibility_verify_after_flush"] is True
+    assert custom["agent_visibility_queries"] == ["alpha", "beta"]
+    assert custom["agent_visibility_top_k"] == 20
+    assert custom["agent_visibility_timeout"] == 1.0
+    assert custom["agent_visibility_get_page_size"] == 100
+    assert custom["agent_visibility_retry_flush_attempts"] == 5
+    assert custom["agent_visibility_retry_flush_backoff_ms"] == 2000
+
+
 def test_provider_availability_requires_api_key(monkeypatch, tmp_path):
     from everos_hermes.provider import EverOSMemoryProvider
 
@@ -490,3 +525,97 @@ def test_provider_verify_session_tool_is_read_only(monkeypatch, tmp_path):
     assert result["status"] == "not_yet_searchable"
     assert result["verified"] is False
     assert calls[0]["session_id"] == "sess-verify"
+
+
+def test_provider_agent_save_returns_unchecked_visibility(monkeypatch, tmp_path):
+    from everos_hermes.provider import EverOSMemoryProvider
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def add_memories(self, **kwargs):
+            return {"data": {"status": "queued", "task_id": "task-agent"}}
+
+        def flush_memories(self, **kwargs):
+            return {"data": {"status": "success", "task_id": "flush-agent"}}
+
+    monkeypatch.setenv("EVEROS_API_KEY", "sk-test")
+    monkeypatch.setenv("EVEROS_USER_ID", "u1")
+    monkeypatch.setattr("everos_hermes.provider.EverOSClient", FakeClient)
+    provider = EverOSMemoryProvider()
+    provider.initialize(session_id="sess-1", hermes_home=str(tmp_path), platform="cli")
+
+    result = json.loads(provider.handle_tool_call("everos_memory_save", {"content": "agent note", "scope": "agent", "flush": True}))
+
+    assert result["agent_visibility"]["agent_raw_queued"] is True
+    assert result["agent_visibility"]["agent_structured_visible"] is None
+    assert result["agent_visibility"]["agent_visibility_status"] == "unchecked"
+    assert result["agent_visibility"]["agent_flush"]["status"] == "success"
+
+
+def test_provider_sync_turn_records_agent_visibility_gap_when_enabled(monkeypatch, tmp_path):
+    from everos_hermes.provider import EverOSMemoryProvider
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def add_memories(self, **kwargs):
+            return {"data": {"status": "queued", "task_id": f"task-{kwargs['scope']}"}}
+
+        def flush_memories(self, **kwargs):
+            return {"data": {"status": "success", "task_id": f"flush-{kwargs['scope']}"}}
+
+        def search_memories(self, **kwargs):
+            return {"data": {"agent_memory": []}}
+
+        def get_memories(self, **kwargs):
+            return {"data": {"items": []}}
+
+    (tmp_path / "everos.json").write_text(
+        '{"capture_agent_memory": true, "agent_summary_after_turn": true, "agent_flush_after_turn": true, "agent_visibility_verify_after_flush": true}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("EVEROS_API_KEY", "sk-test")
+    monkeypatch.setenv("EVEROS_USER_ID", "u1")
+    monkeypatch.setattr("everos_hermes.provider.EverOSClient", FakeClient)
+    provider = EverOSMemoryProvider()
+    provider.initialize(session_id="sess-1", hermes_home=str(tmp_path), platform="cli")
+
+    provider.sync_turn("please debug agent memories", "queued and flushed agent trajectory", session_id="sess-agent")
+    provider.shutdown()
+
+    assert provider._last_agent_visibility_status["agent_visibility_status"] == "not_visible"
+    assert provider._last_agent_visibility_status["agent_structured_visible"] is False
+    assert [check["kind"] for check in provider._last_agent_visibility_status["agent_visibility_checks"]] == ["search", "search", "get", "get"]
+
+
+def test_provider_flush_agent_transient_request_failure_retries_once(monkeypatch, tmp_path):
+    from everos_hermes.client import EverOSError
+    from everos_hermes.provider import EverOSMemoryProvider
+
+    calls = []
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def flush_memories(self, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise EverOSError("EverOS request failed: error sending request")
+            return {"data": {"status": "success", "task_id": "flush-agent"}}
+
+    monkeypatch.setenv("EVEROS_API_KEY", "sk-test")
+    monkeypatch.setenv("EVEROS_USER_ID", "u1")
+    monkeypatch.setattr("everos_hermes.provider.EverOSClient", FakeClient)
+    provider = EverOSMemoryProvider()
+    provider.initialize(session_id="sess-1", hermes_home=str(tmp_path), platform="cli")
+
+    result = json.loads(provider.handle_tool_call("everos_memory_flush", {"scope": "agent", "session_id": "sess-agent", "timeout": 45}))
+
+    assert len(calls) == 2
+    assert result["flush"]["ok"] is True
+    assert result["flush"]["attempt_count"] == 2
+    assert result["agent_visibility"]["agent_visibility_status"] == "unchecked"

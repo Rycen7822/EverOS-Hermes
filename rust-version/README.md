@@ -239,7 +239,7 @@ Restart Hermes CLI/WebUI/gateway after changing the provider. MCP tools and the 
 
 | Tool | Purpose |
 | --- | --- |
-| `everos_memory_save` | Queue an explicit personal or agent scoped memory message and optionally request extraction; `saved=true` does not guarantee immediate structured/profile recall. For agent scope, `role=tool` requires `tool_call_id`; default agent role is non-tool. |
+| `everos_memory_save` | Queue an explicit personal or agent scoped memory message and optionally request extraction; `saved=true` does not guarantee immediate structured/profile recall. For agent scope, `role=tool` requires `tool_call_id`; default agent role is non-tool, and primitive agent writes report unchecked visibility until a workflow probes structured agent surfaces. |
 | `everos_memory_search` | Search EverOS memory for the configured user with `filters`, `radius`, `top_k`, optional vector inclusion, and Markdown/JSON output. |
 | `everos_memory_get` | Retrieve structured memories by type, page, optional filters, and ranking. |
 | `everos_memory_flush` | Force personal or agent extraction for the user/session; accepts per-call `timeout` and returns retryable timeout guidance. |
@@ -248,7 +248,9 @@ Restart Hermes CLI/WebUI/gateway after changing the provider. MCP tools and the 
 | `everos_memory_import_and_verify` | Dry-run or execute batched message/file import with warnings, per-batch status, optional flush, and verification queries. |
 | `everos_memory_verify_session` | Read-only verification helper for an existing user/session/scope using sample search queries. |
 
-Advanced non-secret provider settings remain compatible with the Python version and live in `$HERMES_HOME/everos.json`. Context-engine fields shared with Python include `max_context_chars`, `include_recent_raw`, `recent_raw_top_k`, `profile_max_items`, `agent_skills_max_items`, `agent_cases_max_items`, `episodic_max_items`, `min_score`, `min_recall_query_chars`, `prefetch_cache_enabled`, `prefetch_cache_ttl_seconds`, `agent_trajectory_on_session_end`, `agent_trajectory_on_pre_compress`, `agent_trajectory_on_delegation`, `agent_summary_after_turn`, `agent_max_messages`, `agent_max_message_chars`, `agent_max_tool_result_chars`, `agent_max_payload_chars`, and `agent_dedupe_entries`.
+Advanced non-secret provider settings remain compatible with the Python version and live in `$HERMES_HOME/everos.json`. Context-engine fields shared with Python include `max_context_chars`, `include_recent_raw`, `recent_raw_top_k`, `profile_max_items`, `agent_skills_max_items`, `agent_cases_max_items`, `episodic_max_items`, `min_score`, `min_recall_query_chars`, `prefetch_cache_enabled`, `prefetch_cache_ttl_seconds`, `agent_trajectory_on_session_end`, `agent_trajectory_on_pre_compress`, `agent_trajectory_on_delegation`, `agent_summary_after_turn`, `agent_memory_types`, `agent_visibility_verify_after_write`, `agent_visibility_verify_after_flush`, `agent_visibility_queries`, `agent_visibility_top_k`, `agent_visibility_timeout`, `agent_visibility_get_page_size`, `agent_visibility_retry_flush_attempts`, `agent_visibility_retry_flush_backoff_ms`, `agent_max_messages`, `agent_max_message_chars`, `agent_max_tool_result_chars`, `agent_max_payload_chars`, and `agent_dedupe_entries`.
+
+Agent visibility config is off by default for provider hooks. If enabled, Rust and Python both distinguish raw queue/flush success from structured visibility on `agent_memory`, `agent_case`, and `agent_skill`; possible statuses are `unchecked`, `not_visible`, `partial`, and `visible`.
 
 ## Provider CLI helpers
 
@@ -296,7 +298,8 @@ The test suite includes:
 - provider prefetch cache, session-scoped recent raw recall, deterministic `message_id`, `on_pre_compress`, `on_session_end`, and `on_delegation` parity;
 - provider CLI hook routing for `--messages-json` and delegation child session ids;
 - vector stripping / `include_vectors` parity for search;
-- real binary stdio MCP initialize + tools/list smoke test.
+- real binary stdio MCP initialize + tools/list smoke test;
+- fake EverOS Cloud smoke via `../scripts/everos_agent_visibility_smoke.py`, covering agent visibility states, unchecked primitive agent writes, local `role=tool` validation, and transient agent-flush retry.
 
 ## Security notes
 

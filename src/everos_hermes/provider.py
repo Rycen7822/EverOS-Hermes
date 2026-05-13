@@ -9,9 +9,11 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Optional
 
+from .agent_visibility import audit_agent_visibility, build_agent_visibility_report
 from .client import DEFAULT_BASE_URL, DEFAULT_MEMORY_TYPES, EverOSClient, EverOSError, EverOSTimeoutError
 from .context_assembler import assemble_everos_context
 from .env import get_env
+from .flush_retry import flush_memories_with_retry
 from .formatting import format_search_context, pretty_json
 from .policy import should_skip_capture, should_skip_recall, stable_query_key
 from .schemas import normalize_scope
@@ -85,6 +87,14 @@ _DEFAULT_CONFIG = {
     "agent_recall": False,
     "agent_memory_types": ["agent_memory"],
     "agent_flush_after_turn": True,
+    "agent_visibility_verify_after_write": False,
+    "agent_visibility_verify_after_flush": False,
+    "agent_visibility_queries": [],
+    "agent_visibility_top_k": 5,
+    "agent_visibility_timeout": 30.0,
+    "agent_visibility_get_page_size": 20,
+    "agent_visibility_retry_flush_attempts": 1,
+    "agent_visibility_retry_flush_backoff_ms": 250,
     "agentic_timeout": 60.0,
     "max_context_items": 8,
     "timeout": 10.0,
@@ -115,7 +125,7 @@ _CONTEXT_STRIP_RE = re.compile(r"<memory-context>[\s\S]*?</memory-context>|<ever
 
 SAVE_SCHEMA = {
     "name": "everos_memory_save",
-    "description": "Queue an explicit long-term memory message in EverOS and optionally request extraction; saved=true does not guarantee a structured memory is immediately searchable.",
+    "description": "Queue an explicit long-term memory message in EverOS and optionally request extraction; saved=true does not guarantee a structured memory is immediately searchable. Agent scope returns agent_visibility=unchecked unless verification is enabled.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -171,7 +181,7 @@ GET_SCHEMA = {
 
 FLUSH_SCHEMA = {
     "name": "everos_memory_flush",
-    "description": "Force EverOS memory extraction for the configured user/session. Timeout errors are retryable; search/status checks should happen before retrying.",
+    "description": "Force EverOS memory extraction for the configured user/session. Timeout errors are retryable; search/status checks should happen before retrying. Agent scope reports flush separately from structured visibility and retries transient request-send failures once.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -197,7 +207,7 @@ FORGET_SCHEMA = {
 
 SAVE_AND_VERIFY_SCHEMA = {
     "name": "everos_memory_save_and_verify",
-    "description": "Queue one memory message, optionally flush extraction, then verify searchability with sample queries.",
+    "description": "Queue one memory message, optionally flush extraction, then verify searchability with sample queries. Agent scope returns structured agent_visibility status.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -236,7 +246,7 @@ IMPORT_AND_VERIFY_SCHEMA = {
 
 VERIFY_SESSION_SCHEMA = {
     "name": "everos_memory_verify_session",
-    "description": "Read-only verification for an existing user/session using sample search queries.",
+    "description": "Read-only verification for an existing user/session using sample search queries. Agent scope returns structured agent_visibility status.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -288,6 +298,8 @@ def _normalize_config(config: dict[str, Any]) -> dict[str, Any]:
         "capture_agent_memory",
         "agent_recall",
         "agent_flush_after_turn",
+        "agent_visibility_verify_after_write",
+        "agent_visibility_verify_after_flush",
         "include_recent_raw",
         "prefetch_cache_enabled",
         "agent_trajectory_on_session_end",
@@ -309,6 +321,10 @@ def _normalize_config(config: dict[str, Any]) -> dict[str, Any]:
     except Exception:
         out["agentic_timeout"] = 60.0
     try:
+        out["agent_visibility_timeout"] = max(1.0, min(120.0, float(out.get("agent_visibility_timeout", 30.0))))
+    except Exception:
+        out["agent_visibility_timeout"] = 30.0
+    try:
         out["max_context_items"] = max(1, min(50, int(out.get("max_context_items", 8))))
     except Exception:
         out["max_context_items"] = 8
@@ -326,6 +342,10 @@ def _normalize_config(config: dict[str, Any]) -> dict[str, Any]:
         ("agent_max_tool_result_chars", 100, 20000),
         ("agent_max_payload_chars", 1000, 200000),
         ("agent_dedupe_entries", 16, 4096),
+        ("agent_visibility_top_k", 1, 20),
+        ("agent_visibility_get_page_size", 1, 100),
+        ("agent_visibility_retry_flush_attempts", 1, 5),
+        ("agent_visibility_retry_flush_backoff_ms", 0, 2000),
     ):
         try:
             out[key] = max(low, min(high, int(out.get(key, _DEFAULT_CONFIG[key]))))
@@ -349,6 +369,12 @@ def _normalize_config(config: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(agent_memory_types, list) or not agent_memory_types:
         agent_memory_types = ["agent_memory"]
     out["agent_memory_types"] = [str(item) for item in agent_memory_types]
+    visibility_queries = out.get("agent_visibility_queries")
+    if isinstance(visibility_queries, str):
+        visibility_queries = [part.strip() for part in visibility_queries.split(",") if part.strip()]
+    if not isinstance(visibility_queries, list):
+        visibility_queries = []
+    out["agent_visibility_queries"] = [str(item) for item in visibility_queries if str(item).strip()]
     mode = str(out.get("agent_capture_mode", "parallel")).strip().lower()
     out["agent_capture_mode"] = mode if mode in {"parallel", "agent_only", "off"} else "parallel"
     out["base_url"] = str(out.get("base_url") or DEFAULT_BASE_URL).strip() or DEFAULT_BASE_URL
@@ -382,9 +408,11 @@ def _timeout_payload(operation: str, exc: EverOSTimeoutError) -> dict[str, Any]:
     }
 
 
-def _flush_result_payload(response: dict[str, Any]) -> dict[str, Any]:
+def _flush_result_payload(response: dict[str, Any], *, attempt_count: int | None = None) -> dict[str, Any]:
     data = response.get("data", {}) if isinstance(response, dict) else {}
     payload: dict[str, Any] = {"ok": True}
+    if attempt_count is not None:
+        payload["attempt_count"] = attempt_count
     if isinstance(data, dict):
         for key in ("status", "request_id", "task_id", "message"):
             if data.get(key):
@@ -454,6 +482,7 @@ class EverOSMemoryProvider(MemoryProvider):
         self._last_agent_flush_status: dict[str, Any] = {}
         self._last_recall_status: dict[str, Any] = {}
         self._last_agent_trajectory_status: dict[str, Any] = {}
+        self._last_agent_visibility_status: dict[str, Any] = {}
         self._prefetch_cache: dict[str, dict[str, Any]] = {}
         self._prefetch_inflight: set[str] = set()
         self._prefetch_lock = threading.Lock()
@@ -511,6 +540,7 @@ class EverOSMemoryProvider(MemoryProvider):
             self._prefetch_cache.clear()
             self._prefetch_inflight.clear()
         self._last_recall_status = {}
+        self._last_agent_visibility_status = {}
         self._agent_saved_fingerprints.clear()
         if self._active:
             self._client = EverOSClient(api_key=self._api_key, base_url=self._base_url, timeout=self._config["timeout"])
@@ -764,21 +794,47 @@ class EverOSMemoryProvider(MemoryProvider):
         flush_requested = _as_bool(args.get("flush", True), True)
         if flush_requested:
             try:
-                flush_result = self._client.flush_memories(user_id=self._user_id, session_id=session_id, scope=scope)
+                flush_result, _attempt_count = flush_memories_with_retry(
+                    self._client,
+                    user_id=self._user_id,
+                    session_id=session_id,
+                    scope=scope,
+                )
             except EverOSTimeoutError as exc:
                 flush_error = exc
-        return json.dumps(
-            _save_result_payload(
-                result=result,
-                user_id=self._user_id,
-                session_id=session_id,
-                scope=scope,
-                flush_requested=flush_requested,
-                flush_result=flush_result,
-                flush_error=flush_error,
-            ),
-            ensure_ascii=False,
+        payload = _save_result_payload(
+            result=result,
+            user_id=self._user_id,
+            session_id=session_id,
+            scope=scope,
+            flush_requested=flush_requested,
+            flush_result=flush_result,
+            flush_error=flush_error,
         )
+        if scope == "agent":
+            should_audit = bool(self._config.get("agent_visibility_verify_after_write")) or (
+                flush_result is not None and bool(self._config.get("agent_visibility_verify_after_flush"))
+            )
+            if should_audit:
+                visibility = audit_agent_visibility(
+                    client=self._client,
+                    user_id=self._user_id,
+                    session_id=session_id,
+                    queries=self._agent_visibility_queries([content], session_id=session_id, markers=["tool_save"]),
+                    top_k=int(self._config.get("agent_visibility_top_k", 5)),
+                    timeout=float(self._config.get("agent_visibility_timeout", 30.0)),
+                    get_page_size=int(self._config.get("agent_visibility_get_page_size", 20)),
+                )
+                visibility["agent_raw_queued"] = True
+                visibility["agent_flush"] = payload.get("flush") if isinstance(payload.get("flush"), dict) else None
+                payload["agent_visibility"] = visibility
+            else:
+                payload["agent_visibility"] = build_agent_visibility_report(
+                    agent_raw_queued=True,
+                    agent_flush=payload.get("flush") if isinstance(payload.get("flush"), dict) else None,
+                    checks=[],
+                )
+        return json.dumps(payload, ensure_ascii=False)
 
     def _tool_search(self, args: dict[str, Any]) -> str:
         query = str(args.get("query") or "").strip()
@@ -822,15 +878,26 @@ class EverOSMemoryProvider(MemoryProvider):
         return pretty_json(response)
 
     def _tool_flush(self, args: dict[str, Any]) -> str:
+        session_id = str(args.get("session_id") or self._session_id or "") or None
+        scope = normalize_scope(str(args.get("scope") or "personal"))
         try:
-            response = self._client.flush_memories(
+            response, attempt_count = flush_memories_with_retry(
+                self._client,
                 user_id=self._user_id,
-                session_id=str(args.get("session_id") or self._session_id or "") or None,
-                scope=normalize_scope(str(args.get("scope") or "personal")),
+                session_id=session_id,
+                scope=scope,
                 timeout=_float_or_none(args.get("timeout")),
             )
         except EverOSTimeoutError as exc:
             return pretty_json(_timeout_payload("flush", exc))
+        if scope == "agent":
+            flush_payload = _flush_result_payload(response, attempt_count=attempt_count)
+            return pretty_json(
+                {
+                    "flush": flush_payload,
+                    "agent_visibility": build_agent_visibility_report(agent_raw_queued=None, agent_flush=flush_payload, checks=[]),
+                }
+            )
         return pretty_json(response)
 
     def _tool_forget(self, args: dict[str, Any]) -> str:
@@ -951,6 +1018,21 @@ class EverOSMemoryProvider(MemoryProvider):
             max_payload_chars=self._config["agent_max_payload_chars"],
         )
 
+    def _agent_visibility_queries(self, texts: list[str], *, session_id: str | None, markers: list[str] | None = None) -> list[str]:
+        configured = self._config.get("agent_visibility_queries")
+        if isinstance(configured, list):
+            queries = [str(query).strip() for query in configured if str(query).strip()]
+            if queries:
+                return queries
+        queries = [str(text).strip()[:200] for text in texts if str(text).strip()]
+        for marker in markers or []:
+            marker = str(marker).strip()
+            if marker:
+                queries.append(marker)
+        if session_id:
+            queries.append(f"session:{session_id}")
+        return queries[:2] or ["agent memory"]
+
     def _write_agent_trajectory(self, result: TrajectoryBuildResult, *, session_id: str, flush_allowed: bool, operation: str) -> bool:
         if not result.messages or not self._client:
             return False
@@ -969,9 +1051,44 @@ class EverOSMemoryProvider(MemoryProvider):
                 "warnings": result.warnings,
             }
             self._last_agent_trajectory_status = dict(self._last_agent_write_status)
+            flush_payload: dict[str, Any] | None = None
             if flush_allowed and self._config.get("agent_flush_after_turn"):
-                flush = self._client.flush_memories(user_id=self._user_id, session_id=session_id, scope="agent")
+                flush, attempt_count = flush_memories_with_retry(
+                    self._client,
+                    user_id=self._user_id,
+                    session_id=session_id,
+                    scope="agent",
+                    include_timeout=False,
+                )
+                flush_payload = _flush_result_payload(flush, attempt_count=attempt_count)
                 self._last_agent_flush_status = {"ok": True, "scope": "agent", "status": _status(flush), "operation": operation}
+            should_audit = bool(self._config.get("agent_visibility_verify_after_write")) or (
+                flush_payload is not None and bool(self._config.get("agent_visibility_verify_after_flush"))
+            )
+            if should_audit:
+                queries = self._agent_visibility_queries(
+                    [str(message.get("content") or "") for message in result.messages],
+                    session_id=session_id,
+                    markers=[operation],
+                )
+                visibility = audit_agent_visibility(
+                    client=self._client,
+                    user_id=self._user_id,
+                    session_id=session_id,
+                    queries=queries,
+                    top_k=int(self._config.get("agent_visibility_top_k", 5)),
+                    timeout=float(self._config.get("agent_visibility_timeout", 30.0)),
+                    get_page_size=int(self._config.get("agent_visibility_get_page_size", 20)),
+                )
+                visibility["agent_raw_queued"] = True
+                visibility["agent_flush"] = flush_payload
+                self._last_agent_visibility_status = visibility
+            elif flush_payload is not None:
+                self._last_agent_visibility_status = build_agent_visibility_report(
+                    agent_raw_queued=True,
+                    agent_flush=flush_payload,
+                    checks=[],
+                )
             return True
         except Exception as exc:
             self._agent_saved_fingerprints.pop(result.fingerprint, None)

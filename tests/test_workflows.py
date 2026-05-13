@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from everos_hermes.client import EverOSError
-from everos_hermes.workflows import import_and_verify
+from everos_hermes.workflows import import_and_verify, save_and_verify, verify_session_ingest
 
 
 class NoWriteClient:
@@ -91,3 +91,69 @@ def test_import_splits_cloud_403_batches_until_small_subbatches_queue():
     assert max(size for size in calls if size <= 5) <= 5
     assert any(batch.get("split_from") is not None for batch in result["batches"])
     assert any("split" in action for action in result["suggested_next_actions"])
+
+class AgentVisibilityClient:
+    def __init__(self):
+        self.calls = []
+
+    def add_memories(self, **kwargs):
+        self.calls.append(("add", kwargs))
+        return {"data": {"status": "queued", "task_id": "task-agent"}}
+
+    def flush_memories(self, **kwargs):
+        self.calls.append(("flush", kwargs))
+        return {"data": {"status": "success", "task_id": "flush-agent"}}
+
+    def search_memories(self, **kwargs):
+        self.calls.append(("search", kwargs))
+        return {"data": {"agent_memory": []}}
+
+    def get_memories(self, **kwargs):
+        self.calls.append(("get", kwargs))
+        return {"data": {"items": []}}
+
+
+def test_save_and_verify_agent_reports_not_visible_separately_from_queue():
+    client = AgentVisibilityClient()
+
+    result = save_and_verify(
+        client=client,
+        content="agent marker",
+        user_id="u1",
+        session_id="s1",
+        scope="agent",
+        verification_query="agent marker",
+        flush=True,
+    )
+
+    assert result["save"]["saved"] is True
+    assert result["save"]["scope"] == "agent"
+    assert result["agent_visibility"]["agent_raw_queued"] is True
+    assert result["agent_visibility"]["agent_flush"]["status"] == "success"
+    assert result["agent_visibility"]["agent_structured_visible"] is False
+    assert result["agent_visibility"]["agent_visibility_status"] == "not_visible"
+    assert result["status"] == "agent_not_visible"
+    assert result["verification"]["status"] == "agent_not_visible"
+
+
+def test_verify_session_ingest_agent_scope_returns_visibility_checks():
+    client = AgentVisibilityClient()
+
+    result = verify_session_ingest(
+        client=client,
+        user_id="u1",
+        session_id="s1",
+        verification_queries=["agent marker"],
+        memory_types=["agent_memory"],
+        scope="agent",
+        top_k=5,
+    )
+
+    assert result["status"] == "agent_not_visible"
+    assert result["verified"] is False
+    visibility = result["agent_visibility"]
+    assert visibility["agent_raw_queued"] is None
+    assert visibility["agent_structured_visible"] is False
+    assert visibility["agent_visibility_status"] == "not_visible"
+    assert [check["kind"] for check in visibility["agent_visibility_checks"]] == ["search", "get", "get"]
+    assert visibility["agent_visibility_checks"][0]["memory_types"] == ["agent_memory"]

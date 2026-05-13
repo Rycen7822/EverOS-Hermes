@@ -609,3 +609,68 @@ def test_mcp_verify_session_ingest_is_read_only_and_reports_misses(monkeypatch):
     assert result["verified"] is False
     assert [call["session_id"] for call in calls] == ["sess-readonly", "sess-readonly"]
     assert [query["status"] for query in result["queries"]] == ["hit", "miss"]
+
+
+def test_mcp_agent_save_and_add_return_unchecked_visibility(monkeypatch):
+    from everos_hermes import mcp_server
+
+    class FakeClient:
+        def add_memories(self, **kwargs):
+            return {"data": {"status": "queued", "task_id": "task-agent"}}
+
+        def flush_memories(self, **kwargs):
+            return {"data": {"status": "success", "task_id": "flush-agent"}}
+
+    monkeypatch.setenv("EVEROS_API_KEY", "sk-test")
+    monkeypatch.setenv("EVEROS_USER_ID", "u1")
+    monkeypatch.setattr(mcp_server, "make_client", lambda: FakeClient())
+
+    save_raw = asyncio.run(mcp_server.everos_save_memory(
+        content="Agent trajectory summary",
+        scope="agent",
+        session_id="sess-agent",
+        flush=True,
+    ))
+    save = json.loads(save_raw)
+    assert save["agent_visibility"]["agent_raw_queued"] is True
+    assert save["agent_visibility"]["agent_structured_visible"] is None
+    assert save["agent_visibility"]["agent_visibility_status"] == "unchecked"
+    assert save["agent_visibility"]["agent_flush"]["status"] == "success"
+
+    add_raw = asyncio.run(mcp_server.everos_add_memories(
+        messages=[{"role": "assistant", "timestamp": 1711900000000, "content": "agent note"}],
+        scope="agent",
+        session_id="sess-agent",
+        flush=False,
+    ))
+    add = json.loads(add_raw)
+    assert add["agent_visibility"]["agent_raw_queued"] is True
+    assert add["agent_visibility"]["agent_structured_visible"] is None
+    assert add["agent_visibility"]["agent_visibility_status"] == "unchecked"
+
+
+def test_mcp_flush_agent_transient_request_failure_retries_once_and_reports_unchecked_visibility(monkeypatch):
+    from everos_hermes import mcp_server
+    from everos_hermes.client import EverOSError
+
+    calls = []
+
+    class FakeClient:
+        def flush_memories(self, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise EverOSError("EverOS request failed: error sending request")
+            return {"data": {"status": "success", "task_id": "flush-agent"}}
+
+    monkeypatch.setenv("EVEROS_API_KEY", "sk-test")
+    monkeypatch.setenv("EVEROS_USER_ID", "u1")
+    monkeypatch.setattr(mcp_server, "make_client", lambda: FakeClient())
+
+    raw = asyncio.run(mcp_server.everos_flush_memories(scope="agent", session_id="sess-agent", timeout=45))
+    result = json.loads(raw)
+
+    assert len(calls) == 2
+    assert result["flush"]["ok"] is True
+    assert result["flush"]["attempt_count"] == 2
+    assert result["agent_visibility"]["agent_visibility_status"] == "unchecked"
+    assert result["agent_visibility"]["agent_structured_visible"] is None

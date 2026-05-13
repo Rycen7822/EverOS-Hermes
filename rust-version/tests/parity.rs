@@ -4,7 +4,7 @@ use everos_hermes_rust::env::{get_env, read_dotenv};
 use everos_hermes_rust::formatting::{format_search_context, strip_vectors};
 use everos_hermes_rust::mcp::TOOL_NAMES;
 use everos_hermes_rust::policy::{should_skip_capture, should_skip_recall, stable_query_key};
-use everos_hermes_rust::provider::{EverOSProvider, ProviderInit};
+use everos_hermes_rust::provider::{EverOSProvider, ProviderConfig, ProviderInit, load_config};
 use everos_hermes_rust::trajectory::build_agent_trajectory_messages;
 use serde_json::{Value, json};
 use std::fs;
@@ -173,6 +173,29 @@ fn sequenced_status_request_server(
                 Err(err) => panic!("test server accept failed: {err}"),
             }
         }
+        requests
+    });
+    (format!("http://{addr}"), handle)
+}
+
+fn dropped_then_response_server(response: Value) -> (String, thread::JoinHandle<Vec<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = thread::spawn(move || {
+        let mut requests = Vec::new();
+        let (mut first, _) = listener.accept().unwrap();
+        requests.push(read_http_request(&mut first));
+        drop(first);
+
+        let (mut second, _) = listener.accept().unwrap();
+        requests.push(read_http_request(&mut second));
+        let body = response.to_string();
+        let reply = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        second.write_all(reply.as_bytes()).unwrap();
         requests
     });
     (format!("http://{addr}"), handle)
@@ -378,6 +401,45 @@ fn formatting_renders_episode_and_profile_context() {
 }
 
 #[test]
+fn provider_agent_visibility_config_defaults_and_load_overrides() {
+    let defaults = ProviderConfig::default();
+    assert!(!defaults.agent_visibility_verify_after_write);
+    assert!(!defaults.agent_visibility_verify_after_flush);
+    assert!(defaults.agent_visibility_queries.is_empty());
+    assert_eq!(defaults.agent_visibility_top_k, 5);
+    assert_eq!(defaults.agent_visibility_timeout, 30.0);
+    assert_eq!(defaults.agent_visibility_get_page_size, 20);
+    assert_eq!(defaults.agent_visibility_retry_flush_attempts, 1);
+    assert_eq!(defaults.agent_visibility_retry_flush_backoff_ms, 250);
+
+    let home = temp_home("provider_visibility_config");
+    fs::write(
+        home.join("everos.json"),
+        json!({
+            "agent_visibility_verify_after_write": true,
+            "agent_visibility_verify_after_flush": true,
+            "agent_visibility_queries": "alpha, beta",
+            "agent_visibility_top_k": 99,
+            "agent_visibility_timeout": 0.1,
+            "agent_visibility_get_page_size": 200,
+            "agent_visibility_retry_flush_attempts": 9,
+            "agent_visibility_retry_flush_backoff_ms": 5000
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let loaded = load_config(&home);
+    assert!(loaded.agent_visibility_verify_after_write);
+    assert!(loaded.agent_visibility_verify_after_flush);
+    assert_eq!(loaded.agent_visibility_queries, vec!["alpha", "beta"]);
+    assert_eq!(loaded.agent_visibility_top_k, 20);
+    assert_eq!(loaded.agent_visibility_timeout, 1.0);
+    assert_eq!(loaded.agent_visibility_get_page_size, 100);
+    assert_eq!(loaded.agent_visibility_retry_flush_attempts, 5);
+    assert_eq!(loaded.agent_visibility_retry_flush_backoff_ms, 2000);
+}
+
+#[test]
 fn provider_availability_user_resolution_and_tool_schemas_match_python_surface() {
     let _guard = ENV_LOCK.lock().unwrap();
     let home = temp_home("provider");
@@ -543,6 +605,176 @@ fn mcp_save_tool_returns_queue_semantics_when_flush_disabled() {
     remove_env("EVEROS_API_KEY");
     remove_env("EVEROS_BASE_URL");
     remove_env("EVEROS_USER_ID");
+}
+
+#[test]
+fn mcp_agent_save_add_flush_return_unchecked_visibility_and_retry_transient_flush() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let (base_url, handle) = sequenced_request_server(
+        vec![
+            json!({"data":{"status":"queued","task_id":"task-save-agent"}}),
+            json!({"data":{"status":"queued","task_id":"task-add-agent"}}),
+            json!({"data":{"status":"success","task_id":"task-flush-agent"}}),
+        ],
+        500,
+    );
+    set_env("EVEROS_API_KEY", "test-key");
+    set_env("EVEROS_BASE_URL", &base_url);
+    set_env("EVEROS_USER_ID", "u1");
+
+    let save_raw = everos_hermes_rust::mcp::call_tool(
+        "everos_save_memory",
+        json!({"content":"agent raw event","session_id":"sess-agent","scope":"agent","flush":false}),
+    )
+    .unwrap();
+    let add_raw = everos_hermes_rust::mcp::call_tool(
+        "everos_add_memories",
+        json!({
+            "messages":[{"role":"assistant","timestamp":1,"content":"agent batch event"}],
+            "session_id":"sess-agent",
+            "scope":"agent",
+            "flush":true
+        }),
+    )
+    .unwrap();
+    let requests = handle.join().unwrap();
+    let save: Value = serde_json::from_str(&save_raw).unwrap();
+    let add: Value = serde_json::from_str(&add_raw).unwrap();
+    let paths: Vec<&str> = requests
+        .iter()
+        .map(|raw| raw.lines().next().unwrap_or(""))
+        .collect();
+
+    assert_eq!(
+        save["agent_visibility"]["agent_visibility_status"],
+        "unchecked"
+    );
+    assert_eq!(save["agent_visibility"]["agent_raw_queued"], true);
+    assert_eq!(
+        add["agent_visibility"]["agent_visibility_status"],
+        "unchecked"
+    );
+    assert_eq!(add["agent_visibility"]["agent_flush"]["status"], "success");
+    assert_eq!(
+        paths,
+        vec![
+            "POST /api/v1/memories/agent HTTP/1.1",
+            "POST /api/v1/memories/agent HTTP/1.1",
+            "POST /api/v1/memories/agent/flush HTTP/1.1",
+        ]
+    );
+
+    remove_env("EVEROS_API_KEY");
+    remove_env("EVEROS_BASE_URL");
+    remove_env("EVEROS_USER_ID");
+}
+
+#[test]
+fn mcp_agent_flush_retries_transient_send_error_and_reports_visibility() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let (base_url, handle) =
+        dropped_then_response_server(json!({"data":{"status":"success","task_id":"task-flush"}}));
+    set_env("EVEROS_API_KEY", "test-key");
+    set_env("EVEROS_BASE_URL", &base_url);
+    set_env("EVEROS_USER_ID", "u1");
+
+    let raw = everos_hermes_rust::mcp::call_tool(
+        "everos_flush_memories",
+        json!({"session_id":"sess-agent","scope":"agent","timeout":2.0}),
+    )
+    .unwrap();
+    let response: Value = serde_json::from_str(&raw).unwrap();
+    let requests = handle.join().unwrap();
+
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests
+            .iter()
+            .all(|raw| raw.starts_with("POST /api/v1/memories/agent/flush "))
+    );
+    assert_eq!(response["flush"]["ok"], true);
+    assert_eq!(response["flush"]["attempt_count"], 2);
+    assert_eq!(
+        response["agent_visibility"]["agent_visibility_status"],
+        "unchecked"
+    );
+
+    remove_env("EVEROS_API_KEY");
+    remove_env("EVEROS_BASE_URL");
+    remove_env("EVEROS_USER_ID");
+}
+
+#[test]
+fn mcp_save_and_verify_agent_scope_reports_structured_visibility() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let (base_url, handle) = sequenced_request_server(
+        vec![
+            json!({"data":{"status":"queued","task_id":"task-save"}}),
+            json!({"data":{"status":"success","task_id":"task-flush"}}),
+            json!({"data":{"episodes":[{"id":"ep1","summary":"agent note mirrored as personal search"}]}}),
+            json!({"data":{"agent_memory":[]}}),
+            json!({"data":{"agent_cases":[]}}),
+            json!({"data":{"agent_skills":[]}}),
+        ],
+        500,
+    );
+    set_env("EVEROS_API_KEY", "test-key");
+    set_env("EVEROS_USER_ID", "u1");
+    set_env("EVEROS_BASE_URL", &base_url);
+
+    let raw = everos_hermes_rust::mcp::call_tool(
+        "everos_save_and_verify",
+        json!({
+            "content":"agent note",
+            "session_id":"sess-agent",
+            "scope":"agent",
+            "verification_query":"agent note",
+            "flush":true,
+            "top_k":3
+        }),
+    )
+    .unwrap();
+    let response: Value = serde_json::from_str(&raw).unwrap();
+    let requests = handle.join().unwrap();
+    let paths: Vec<&str> = requests
+        .iter()
+        .map(|raw| raw.lines().next().unwrap_or(""))
+        .collect();
+
+    assert_eq!(response["status"], "agent_not_visible");
+    assert_eq!(
+        response["agent_visibility"]["agent_visibility_status"],
+        "not_visible"
+    );
+    assert_eq!(response["agent_visibility"]["agent_raw_queued"], true);
+    assert_eq!(
+        response["agent_visibility"]["agent_visibility_checks"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    assert_eq!(
+        paths,
+        vec![
+            "POST /api/v1/memories/agent HTTP/1.1",
+            "POST /api/v1/memories/agent/flush HTTP/1.1",
+            "POST /api/v1/memories/search HTTP/1.1",
+            "POST /api/v1/memories/search HTTP/1.1",
+            "POST /api/v1/memories/get HTTP/1.1",
+            "POST /api/v1/memories/get HTTP/1.1",
+        ]
+    );
+    assert_eq!(
+        parse_http_body(&requests[3])["memory_types"],
+        json!(["agent_memory"])
+    );
+    assert_eq!(parse_http_body(&requests[4])["memory_type"], "agent_case");
+    assert_eq!(parse_http_body(&requests[5])["memory_type"], "agent_skill");
+
+    remove_env("EVEROS_API_KEY");
+    remove_env("EVEROS_USER_ID");
+    remove_env("EVEROS_BASE_URL");
 }
 
 #[test]
@@ -1409,6 +1641,11 @@ fn provider_save_tool_scope_agent_posts_agent_endpoint() {
     let response: Value = serde_json::from_str(&raw).unwrap();
     assert!(request.starts_with("POST /api/v1/memories/agent HTTP/1.1"));
     assert_eq!(response["scope"], "agent");
+    assert_eq!(
+        response["agent_visibility"]["agent_visibility_status"],
+        "unchecked"
+    );
+    assert_eq!(response["agent_visibility"]["agent_raw_queued"], true);
 
     remove_env("HERMES_HOME");
 }

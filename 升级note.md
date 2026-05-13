@@ -1,62 +1,140 @@
-# EverOS-Hermes 升级 note
+# EverOS-Hermes 升级 note（压缩版）
 
-更新时间：2026-05-13 01:13:39 CST
+更新时间：2026-05-13 12:58 CST
 
-## 本轮目标
+## 历史结论
 
-依据 `problems.md` 与 `.tmp_everos_pressure/report_large_20260513_001736.md` 修复/改进真实 Cloud 压测暴露的问题，优先 Python，再同步 Rust。
+上一轮升级已完成并验证：Python/Rust workflow 已统一处理 `messages[].timestamp` epoch-ms 校验、dry-run warning、执行前 `validation_failed`、payload metrics、`split_count`、Cloud 403 adaptive split。README、Rust README、Cloud v1 contract、`problems.md` 与 Hermes skill pressure reference 已同步。
 
-## 硬约束
+## 已收敛能力
 
-- 先测试后实现；每组变更按 RED -> GREEN -> REFACTOR。
-- 及时记录读取结论、代码改动、测试命令、信心缺口。
-- 小 patch；不回滚既有未提交改动。
-- 不引入过度设计；只修当前问题。
-- 保持目录整洁，临时材料放 `.tmp_everos_pressure/` 或本 note。
+- Python full tests：95 passed。
+- Rust gates：`cargo fmt --all --check`、`cargo clippy --all-targets --all-features -- -D warnings`、`cargo test --tests --no-fail-fast` 均通过；Rust tests 39 passed。
+- prebuilt package 已构建并安装到本地 Hermes：installed MCP `tools/list` 为 13 tools，provider schemas 为 8 tools，`hermes mcp test everos` 通过。
+- 低层 primitive client 行为保持稳定，workflow helper 负责 timestamp/metrics/split-on-403。
 
-## 已读关键事实
+## 当前升级焦点
 
-- `problems.md` 活跃项：P2-04 raw_message delete/filter Cloud limitation；P2-05 flush-heavy 后异步 extraction 可能晚到；P2-06 长消息 batch_size 15/20 可能 Cloud 403，batch_size=5 成功；P2-07 workflow dry-run 未校验 timestamp epoch-ms。
-- 大规模成功压测：已有非默认 user `hermes_mcp_stress_main_20260512_125809`；成功 session `stress-session-existing-user-large-20260513_001736`；约 289 条 synthetic messages；13/13 MCP tools；27/27 passed；structured cleanup 空；raw residual 仍存在。
-- `hermes-agent` skill 参考要求：Python 与 Rust surfaces 语义一致；batch/import workflow 应处理 timestamp epoch-ms、长消息 Cloud 403、小 batch 建议；真实 Cloud raw cleanup 只能报告。
-- 当前 git 状态已有既有未提交改动（README、Rust context parity、tests、升级note 等）；本轮不得误回滚。
+下一阶段不再重复已收敛的 timestamp / split-on-403 修复。当前核心问题转向 Agent Memories 可见性与 Cloud raw residual 语义：
 
-## 当前计划
+1. `scope="agent"` 写入、provider hooks capture/sync/flush 返回成功或 queued，但 `memory_types=["agent_memory"]` 检索持续 0 命中，`agent_case` / `agent_skill` 也为 0。
+2. all-types hybrid search 同时保持 27-29 hits，说明 agent-scope raw/queued 数据或 personal/episodic 路径存在，但 Agent Memories structured visibility 未建立。
+3. delete 后 structured memories 可清空；raw_message 仍可能保留或被 raw search 命中，后续执行必须区分 structured cleanup 与 raw residual。
+4. `flush agent` 存在低频 transient request send failure，需要 retry/reporting 明确化。
 
-1. Python RED：给 workflow dry-run timestamp 校验、payload metrics、adaptive split-on-403 写失败测试。
-2. Python GREEN：实现最小 helper/validator/分批重试逻辑；更新 schemas/tool 描述。
-3. Python 反思/补洞：运行相关测试，检查边界。
-4. Rust RED/GREEN：同步 timestamp 校验、payload metrics、split-on-403，保持 Python parity。
-5. 文档/问题台账：更新 `problems.md` 状态和本 note。
-6. 验证：Python targeted/full；Rust fmt/clippy/tests；diff check；清理临时噪声。
+## 执行纪律
 
-## 进展日志
+- 使用已有非默认 user id 做真实 Cloud 压测；禁止新建 user id；禁止触碰 `hermes_default`。
+- 小 patch、先 RED 后 GREEN、Python 与 Rust surfaces 同步。
+- 每个阶段写入临时工作日志；遇到长文件先摘要到临时文档。
+- 不把 `.tmp_*`、`dist/`、`target/`、`__pycache__`、`.pytest_cache` 等临时/构建产物纳入提交。
 
-- 00:41:48 创建本轮 note；尚未改代码。
-- 00:46:06 读取 Python `workflows.py`/`client.py`/`schemas.py` 与 provider/MCP tests：
-  - `schemas.validate_messages()` 已要求 `timestamp` 为非 bool 整数 epoch-ms，真实 `client.add_memories()` 会在 HTTP 前拒绝 ISO timestamp。
-  - workflow 缺口：`normalize_import_messages()` 只把 timestamp 原样保留；`dry_run` 不调用 `validate_messages()`，因此不会提前暴露 ISO timestamp。
-  - workflow 缺口：`import_and_verify()` 遇到 `client.add_memories()` 403/Forbidden 只记录整批失败，不会 split-on-403。
-  - provider/MCP 的 `batch_ingest` 复用 `import_and_verify(workflow="batch_ingest")`，Python 修该 helper 即可覆盖 provider 与 MCP。
-- 00:48:23 Python RED 完成：新增 `tests/test_workflows.py` 三个失败测试，分别覆盖 dry-run timestamp warning+metrics、真实写入前 timestamp validation_failed、Cloud 403 batch adaptive split。失败原因均为预期功能缺失。
-- 00:54:09 Python GREEN 完成：`workflows.py` 增加 timestamp warning、metrics、validation_failed、403 adaptive split；`python -m pytest -q tests/test_workflows.py tests/test_schemas.py tests/test_everos_client.py tests/test_everos_provider.py tests/test_everos_mcp_server.py` 通过 59 passed。
-- 00:56:58 读取 Rust `workflows.rs`/`client.rs`/`parity.rs`：
-  - Rust client 已在 `validate_messages()` 中要求 timestamp 为 integer epoch-ms，底层 HTTP 前会拒绝 ISO timestamp。
-  - Rust workflow 与旧 Python 一样：`normalize_import_messages()` 不 warning 非整数 timestamp，dry-run 不调用 validation，不输出 metrics。
-  - Rust `import_and_verify()` 遇到 403 只把整批记 failed，不 split；输出也没有 `split_count`/`metrics`/`payload_bytes`。
-  - 可改点集中在 `rust-version/src/workflows.rs`，现有 MCP/provider workflow tests 在 `rust-version/tests/parity.rs`。
-- 01:01:11 Rust RED 完成：增强 dry-run workflow test，新增 `mcp_batch_ingest_splits_cloud_403_batches`；两者分别失败于 metrics 缺失与 403 不 split。
-- 01:06:40 Rust GREEN targeted 完成：`workflows.rs` 增加 timestamp warning、metrics、validation_failed timestamp blocking、403 adaptive split；两个目标 Rust tests 均通过。
-- 01:07:29 验证：`cargo fmt --all --check`、`cargo clippy --all-targets --all-features -- -D warnings`、`cargo test --tests --no-fail-fast` 通过（39 Rust tests）；`python -m pytest tests -q` 通过 95 passed。
-- 01:13:39 文档/台账/skill 参考已同步：README、rust-version README、Cloud v1 contract、`problems.md`、`hermes-agent` skill pressure reference。最终仓库级检查 `git diff --check`、Python py_compile、Rust fmt check 均通过。
+## 升级规划2执行日志
 
-## 信心循环
+### 2026-05-13 13:25 CST — 执行启动
 
-- 当前信心：100%。已完成 Python 优先、Rust 同步、文档台账同步与最终验证；当前剩余的 P2-04/P2-05 是 EverOS Cloud/API 或压测流程语义，不适合在客户端过度设计。
-- 已执行修复闭环：
-  - Python/Rust workflow dry-run 对非整数 timestamp 给 warning；真实执行前返回 `validation_failed`，不再把 ISO timestamp 送到 Cloud。
-  - Python/Rust import workflows 输出 `metrics`、`payload_bytes`、`split_count`，遇到 multi-message Cloud 403 自动二分 split 并重试。
-  - primitive client 行为未改，避免对低层 API 造成副作用。
-  - `problems.md` 已把 P2-07 标为已解决、P2-06 标为 Cloud limitation + Hermes mitigation。
-  - README/contract/skill 参考均已更新。
-- 验证证据：Python full 95 passed；Rust fmt/clippy/39 tests passed；py_compile passed；git diff --check passed。
+- 状态：实际代码升级开始；`升级规划2.md` 的代码、测试、文档、smoke、release/install 内容尚未完成。
+- 当前工作区：仅已有 `升级note.md` 修改与 `升级规划2.md` 新增；临时摘录目录保持 ignored。
+- 执行顺序：先 Python RED tests，再 Python GREEN；之后 Rust parity、文档、smoke、package/install。
+- 当前信心：对规划文件 100% 有信心；对实现尚未开始，必须通过每阶段 RED/GREEN 与复核建立事实信心。
+
+### 2026-05-13 13:28 CST — P-A1/P-A2 RED 完成
+
+- 新增 `tests/test_agent_visibility.py`，覆盖 report not_visible、partial、audit 独立 search/get、nested hit count。
+- 已运行：`python -m pytest -p no:cacheprovider tests/test_agent_visibility.py -q`。
+- RED 结果：按预期失败，`ModuleNotFoundError: No module named 'everos_hermes.agent_visibility'`。
+- 反思：测试初稿曾错误使用非规划状态 `partial_error`；已修正为允许值 `error`。当前对 RED 测试 100% 有信心，可以进入 P-B1。
+
+### 2026-05-13 13:30 CST — P-B1/P-B2 GREEN 完成
+
+- 新增 `src/everos_hermes/agent_visibility.py`。
+- 实现 `build_agent_visibility_report()` 与 `audit_agent_visibility()`。
+- 核心行为：query trim、每个 check 独立捕获 `EverOSError`/`EverOSTimeoutError`、每个 check 记录 `latency_ms`、使用 `workflows.count_hits()` 统计 nested hit shapes。
+- 已运行：`python -m pytest -p no:cacheprovider tests/test_agent_visibility.py -q`，结果 `4 passed`。
+- 反思：当前核心 helper 对规划 2.1/2.3 的 Python 部分达到 100% 信心；后续风险在 workflow/provider/MCP 集成，不在 helper 单元行为。
+
+### 2026-05-13 13:32 CST — P-A3 workflow RED 完成
+
+- 在 `tests/test_workflows.py` 新增 agent workflow RED tests。
+- 已运行 targeted pytest，2 个测试按预期失败：
+  - `save_and_verify(scope="agent")` 缺少 top-level `agent_visibility`。
+  - `verify_session_ingest(scope="agent")` 仍返回 `not_yet_searchable`，而不是规划固定的 `agent_not_visible`。
+- 当前信心：RED 测试准确覆盖 P2-08 workflow 语义缺口，可以进入 P-B3。
+
+### 2026-05-13 13:35 CST — P-B3 workflow GREEN 完成
+
+- 修改 `src/everos_hermes/workflows.py`：
+  - `verify_session_ingest(scope="agent")` 追加 `agent_visibility` audit。
+  - `save_and_verify(scope="agent")` 返回 top-level `agent_visibility`，并把 queued/flush 与 structured visible 分开。
+  - `import_and_verify(scope="agent")` 在显式 verification_queries 存在时同步 top-level `agent_visibility`。
+  - 新增 `_agent_workflow_status()`，将 `not_visible` 固定映射为 `agent_not_visible`。
+- 已运行：
+  - `python -m pytest -p no:cacheprovider tests/test_agent_visibility.py tests/test_workflows.py::test_save_and_verify_agent_reports_not_visible_separately_from_queue tests/test_workflows.py::test_verify_session_ingest_agent_scope_returns_visibility_checks -q`，`6 passed`。
+  - `python -m pytest -p no:cacheprovider tests/test_workflows.py -q`，`5 passed`。
+- 反思：当前 Python workflow 语义对规划 B2 达到 100% 信心；下一风险是 MCP/provider primitive 与 flush retry 尚未接入。
+
+### 2026-05-13 13:40 CST — P-A4/P-A5 provider/MCP RED 完成
+
+- RED targeted command 覆盖 5 个测试：MCP save/add unchecked visibility、MCP agent flush transient retry、provider save unchecked visibility、provider sync_turn visibility gap status、provider agent flush transient retry。
+- 失败原因符合预期：`agent_visibility` 缺失、`EverOSError("error sending request")` 未 retry、`_last_agent_visibility_status` 未定义。
+- 根因定位：primitive save/add/flush 仍直接返回旧 payload；flush helper 只处理 timeout；agent trajectory 写入后未在配置开启时执行 structured visibility audit。
+- 当前信心：100% 确认 RED 有效，可以进入 P-B5-P-B9 最小实现。
+
+### 2026-05-13 13:48 CST — P-B5/P-B9 Python provider/MCP GREEN 完成
+
+- 新增 `src/everos_hermes/flush_retry.py`：仅对 `EverOSError` 中的 `error sending request` 做一次 retry；`EverOSTimeoutError` 不自动 retry，保留“先 search/status 再 retry”的语义。
+- MCP primitive：`everos_save_memory`、`everos_add_memories`、`everos_flush_memories` 在 `scope=agent` 时返回 unchecked `agent_visibility`。
+- Provider primitive：`everos_memory_save`、`everos_memory_flush` 在 `scope=agent` 时返回 unchecked `agent_visibility`。
+- Provider auto trajectory：新增 `agent_visibility_verify_after_flush` 配置，开启后 flush 成功立即执行 `audit_agent_visibility()`，并记录 `_last_agent_visibility_status`。
+- 回归修复：内部 trajectory flush 不传 `timeout=None`，避免改变既有 capture 调用形状；工具/MCP primitive 仍保留 timeout 参数。
+- 验证：provider/MCP targeted 5 tests passed；provider/MCP/workflows/visibility 49 tests passed；Python 全量 `tests` 106 passed；`git diff --check` 已运行。
+- 阶段反思：对 Python provider/MCP 当前实现 100% 有信心。已覆盖 RED 失败点、旧调用形状回归、full Python suite。下一步进入 Rust parity。
+
+### 2026-05-13 13:51 CST — R-A Rust parity RED 完成
+
+- 新增/扩展 `rust-version/tests/parity.rs`：
+  - `mcp_agent_save_add_flush_return_unchecked_visibility_and_retry_transient_flush`
+  - `mcp_agent_flush_retries_transient_send_error_and_reports_visibility`
+  - `mcp_save_and_verify_agent_scope_reports_structured_visibility`
+  - `provider_save_tool_scope_agent_posts_agent_endpoint` 追加 unchecked visibility 断言
+- RED 结果：`cargo test --test parity mcp_agent -- --nocapture` 失败，错误为 agent flush transient request-send failure 未 retry，以及 primitive agent visibility envelope 缺失。
+- 下一步：实现 Rust `agent_visibility`、`flush_retry`，同步 MCP/provider/workflows 接入。
+
+### 2026-05-13 14:05 CST — R-B Rust parity GREEN 完成
+
+- Rust 侧补齐 `agent_visibility` 与 `flush_retry` helper，并在 MCP/provider/workflows 中对齐 Python agent scope 语义。
+- 新增/扩展 Rust parity tests 覆盖：
+  - MCP `everos_save_memory`/`everos_add_memories` agent scope 返回 unchecked `agent_visibility`；
+  - MCP `everos_flush_memories` agent scope 对 transient send error 执行 retry，并返回 `attempt_count` 与 unchecked visibility；
+  - MCP `save_and_verify` agent scope 使用 agent_memory/case/skill 可见性检查并报告 `agent_not_visible`；
+  - provider `everos_memory_save` scope=agent POST `/api/v1/memories/agent` 并返回 unchecked visibility。
+- Rust provider 同步新增 `agent_visibility_verify_after_flush` 配置、agent trajectory flush retry 与可选 post-flush audit 状态记录。
+- 验证：`cargo fmt --check` 通过；`cargo test --all-targets` 42 passed；`cargo clippy --all-targets -- -D warnings` 通过；Python `python -m pytest -p no:cacheprovider tests -q` 106 passed。
+- 信心复核：R-B 经过 targeted RED/GREEN、Rust 全量、Python 全量、fmt/clippy 后，对 Rust parity 当前实现达到事实上的 100% 自信；下一步进入 D/S docs-smoke。
+
+### 2026-05-13 14:22 CST — D/S 前置复核：补齐 agent_visibility 配置实现
+
+- 在进入 README/contract 同步前复核 `升级规划2.md` 2.2 配置清单，发现 Python/Rust provider 只落了 `agent_visibility_verify_after_flush`，文档若直接更新会超前实现。
+- 新增 RED：Python `_normalize_config` 与 Rust `ProviderConfig/load_config` 的 `agent_visibility_*` 默认值、覆盖值、边界 clamp 测试。
+- GREEN：补齐 `agent_visibility_verify_after_write`、`agent_visibility_queries`、`agent_visibility_top_k`、`agent_visibility_timeout`、`agent_visibility_get_page_size`、`agent_visibility_retry_flush_attempts`、`agent_visibility_retry_flush_backoff_ms` 的 Python/Rust 配置默认值与规范化；provider 自动 audit 改为使用 queries/top_k/timeout/get_page_size 与 verify_after_write/verify_after_flush。
+- 验证：`python -m pytest -p no:cacheprovider tests -q` = 107 passed；`cargo test --all-targets` = 43 passed；`cargo fmt --check` = pass；`cargo clippy --all-targets -- -D warnings` = pass。
+- 信心复核：此前不能 100% 自信，因为配置文档会暴露未实现字段；补 RED/GREEN 与双端回归后，对配置/默认行为/门禁一致性达到事实 100% 自信，继续 D/S 文档与 smoke。
+
+### 2026-05-13 14:55 CST — D/S 文档与 smoke 完成
+- 文档同步：更新 `README.md`、`rust-version/README.md`、`docs/everos_cloud_v1_contract.md`、`problems.md`，补充 agent visibility envelope、配置项、primitive unchecked 语义、flush transient retry、fake/real smoke 说明；`problems.md` 更新时间更新为 2026-05-13 14:40 CST。
+- 新增 smoke 脚本：
+  - `scripts/everos_agent_visibility_smoke.py`：本地 fake EverOS Cloud + Rust MCP stdio；覆盖 tools/list=13、`not_visible/partial/visible`、primitive unchecked save/add、`role=tool` 缺 `tool_call_id` 本地拒绝、agent flush transient retry；summary 脱敏 `authorization`/`Authorization`。
+  - `scripts/everos_real_cloud_smoke.py`：真实 EverOS Cloud smoke；强制拒绝 `hermes_default`，默认使用非默认 user `hermes_mcp_stress_main_20260512_125809`，写入唯一 session 后 session-scoped cleanup。
+- Fake-server smoke：`python scripts/everos_agent_visibility_smoke.py --binary rust-version/target/debug/everos-hermes-rust --mode build-tree --output .tmp_everos_visibility_smoke/build_tree_summary.json` 通过；22 assertions，visibility=`not_visible/partial/visible`，transient retry attempts=1，summary authorization 已复核为 `Bearer ***`。
+- Real Cloud smoke：`python scripts/everos_real_cloud_smoke.py --binary rust-version/target/debug/everos-hermes-rust --output .tmp_everos_visibility_smoke/real_cloud_summary.json` 通过；user_id=`hermes_mcp_stress_main_20260512_125809`，session_id=`eh_real_cloud_smoke_20260513_145229_2095607`，`save_status=agent_not_visible`，`agent_visibility_status=not_visible`，cleanup 204，post-cleanup agent_memory search empty。未触碰 `hermes_default`。
+- 100% 信心复核：docs-smoke 对本地实现和真实 Cloud 的可见性语义有信心；仍明确保留 Cloud 行为限制：agent structured visibility 真实 Cloud 当前仍可能 `not_visible`，因此本地只报告状态，不把 queued/flush 当成 structured visible。
+
+### 2026-05-13 15:13 CST — V/C/P/I release-install 完成
+- Full pre-commit gate：`python -m pytest -p no:cacheprovider tests -q` = 107 passed；`python -m py_compile src/everos_hermes/*.py integrations/hermes/__init__.py scripts/everos_agent_visibility_smoke.py scripts/everos_real_cloud_smoke.py` 通过；`cargo fmt --all --check && cargo clippy --all-targets --all-features -- -D warnings && cargo test --tests --no-fail-fast` 通过（Rust 43 tests）；`git diff --check` 与 staged secret scan 通过。
+- Commit：初始提交 `fb6d19b Add agent memory visibility reporting`；package/install 结果写入 note 后执行 amend，最终 SHA 以后续 `git rev-parse --short HEAD` 为准。
+- Package：`/home/xu/project/tools/EverOS-Hermes/rust-version/dist/everos-hermes-rust-0.2.0-x86_64-unknown-linux-gnu.tar.gz`；SHA256 `d252a95a9cec9cd52e797906b80d6da4d184499ce21456eb2027bb5b62729108`；`sha256sum -c` OK。
+- Archive 内容：`bin/everos-hermes-rust` 可执行，`integrations/hermes/__init__.py` / `plugin.yaml` 存在，`README.md` / `INSTALL.md` 存在；binary version `everos-hermes-rust 0.2.0`，plugin version `0.2.0`，provider tool schemas=8 且含 visibility 文案。
+- Installed：binary `/home/xu/.local/bin/everos-hermes-rust` -> `/home/xu/.local/share/everos-hermes/bin/everos-hermes-rust`；plugin `/home/xu/.hermes/plugins/everos`；`provider is-available --hermes-home /home/xu/.hermes` 返回 available=true。
+- Hermes MCP：`hermes mcp test everos` 通过，stdio 指向 `/home/xu/.local/share/everos-hermes/bin/everos-hermes-rust`，tools discovered=13。
+- Installed fake-server smoke：`python scripts/everos_agent_visibility_smoke.py --binary /home/xu/.local/bin/everos-hermes-rust --mode installed --output .tmp_everos_visibility_smoke/installed_summary.json` 通过；22 assertions，`not_visible/partial/visible` 覆盖，transient retry attempts=1，summary authorization=`Bearer ***`。
+- 100% 信心复核：升级规划2的本地实现、文档、fake/real Cloud smoke、package/install 门禁均已完成；唯一保留项是 Cloud 侧 agent structured extraction/search 真实 contract 仍表现为 `not_visible`，本地已正确报告而不误判 visible。

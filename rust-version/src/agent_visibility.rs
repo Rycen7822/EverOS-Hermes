@@ -1,0 +1,163 @@
+use crate::client::{EverOSClient, EverOSError};
+use crate::workflows::count_hits;
+use serde_json::{Value, json};
+use std::time::Instant;
+
+pub fn build_agent_visibility_report(
+    agent_raw_queued: Option<bool>,
+    agent_flush: Option<Value>,
+    checks: Vec<Value>,
+) -> Value {
+    let hit_count = checks
+        .iter()
+        .filter(|check| check_hit_count(check) > 0)
+        .count();
+    let error_count = checks
+        .iter()
+        .filter(|check| check.get("status").and_then(Value::as_str) == Some("error"))
+        .count();
+    let (structured_visible, status) = if checks.is_empty() {
+        (Value::Null, "unchecked")
+    } else if hit_count == checks.len() {
+        (Value::Bool(true), "visible")
+    } else if hit_count > 0 {
+        (Value::Bool(true), "partial")
+    } else if error_count > 0 {
+        (Value::Bool(false), "error")
+    } else {
+        (Value::Bool(false), "not_visible")
+    };
+
+    json!({
+        "agent_raw_queued": agent_raw_queued,
+        "agent_flush": agent_flush,
+        "agent_structured_visible": structured_visible,
+        "agent_visibility_status": status,
+        "agent_visibility_checks": checks,
+    })
+}
+
+pub fn audit_agent_visibility(
+    client: &EverOSClient,
+    user_id: &str,
+    session_id: Option<&str>,
+    queries: &[String],
+    top_k: i64,
+    timeout: Option<f64>,
+    get_page_size: u64,
+) -> Value {
+    let mut checks = Vec::new();
+    for query in queries
+        .iter()
+        .map(|query| query.trim())
+        .filter(|query| !query.is_empty())
+    {
+        let started = Instant::now();
+        let mut check = json!({
+            "kind": "search",
+            "memory_types": ["agent_memory"],
+            "query": query,
+        });
+        match client.search_memories(
+            query,
+            Some(user_id),
+            None,
+            session_id,
+            None,
+            "hybrid",
+            Some(vec!["agent_memory".to_string()]),
+            top_k,
+            None,
+            false,
+            false,
+            timeout,
+        ) {
+            Ok(response) => {
+                let hit_count = count_hits(&response);
+                set_check_fields(
+                    &mut check,
+                    if hit_count > 0 { "hit" } else { "miss" },
+                    hit_count,
+                    Some(response),
+                    None,
+                );
+            }
+            Err(err) => {
+                set_check_fields(&mut check, "error", 0, None, Some(err));
+            }
+        }
+        set_latency(&mut check, started);
+        checks.push(check);
+    }
+
+    for memory_type in ["agent_case", "agent_skill"] {
+        let started = Instant::now();
+        let mut check = json!({"kind": "get", "memory_type": memory_type});
+        match client.get_memories(
+            Some(user_id),
+            None,
+            session_id,
+            None,
+            memory_type,
+            1,
+            get_page_size,
+            "timestamp",
+            "desc",
+        ) {
+            Ok(response) => {
+                let hit_count = count_hits(&response);
+                set_check_fields(
+                    &mut check,
+                    if hit_count > 0 { "hit" } else { "miss" },
+                    hit_count,
+                    Some(response),
+                    None,
+                );
+            }
+            Err(err) => {
+                set_check_fields(&mut check, "error", 0, None, Some(err));
+            }
+        }
+        set_latency(&mut check, started);
+        checks.push(check);
+    }
+
+    build_agent_visibility_report(None, None, checks)
+}
+
+fn check_hit_count(check: &Value) -> u64 {
+    check
+        .get("hit_count")
+        .and_then(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_i64().map(|num| num.max(0) as u64))
+        })
+        .unwrap_or(0)
+}
+
+fn set_check_fields(
+    check: &mut Value,
+    status: &str,
+    hit_count: usize,
+    response: Option<Value>,
+    error: Option<EverOSError>,
+) {
+    if let Some(map) = check.as_object_mut() {
+        map.insert("status".to_string(), Value::String(status.to_string()));
+        map.insert("hit_count".to_string(), json!(hit_count));
+        if let Some(response) = response {
+            map.insert("response".to_string(), response);
+        }
+        if let Some(error) = error {
+            map.insert("error".to_string(), Value::String(error.to_string()));
+        }
+    }
+}
+
+fn set_latency(check: &mut Value, started: Instant) {
+    if let Some(map) = check.as_object_mut() {
+        let elapsed_ms = (started.elapsed().as_secs_f64() * 1000.0 * 1000.0).round() / 1000.0;
+        map.insert("latency_ms".to_string(), json!(elapsed_ms));
+    }
+}

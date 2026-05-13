@@ -1,10 +1,11 @@
+use crate::agent_visibility::{audit_agent_visibility, build_agent_visibility_report};
 use crate::client::{DEFAULT_MEMORY_TYPES, EverOSClient, EverOSError};
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const SEARCH_KEYS: [&str; 10] = [
+const SEARCH_KEYS: [&str; 11] = [
     "episodes",
     "profiles",
     "raw_messages",
@@ -15,6 +16,7 @@ const SEARCH_KEYS: [&str; 10] = [
     "skills",
     "items",
     "results",
+    "memories",
 ];
 
 pub fn success_envelope(workflow: &str, status: &str) -> serde_json::Map<String, Value> {
@@ -40,10 +42,17 @@ pub fn error_envelope(workflow: &str, error_code: &str, message: &str) -> Value 
 }
 
 pub fn flush_result_payload(response: &Value) -> Value {
+    flush_result_payload_with_attempt(response, None)
+}
+
+pub fn flush_result_payload_with_attempt(response: &Value, attempt_count: Option<usize>) -> Value {
     let data = response.get("data").unwrap_or(response);
     let mut payload = serde_json::Map::new();
     payload.insert("ok".to_string(), Value::Bool(true));
     payload.insert("status".to_string(), Value::String("success".to_string()));
+    if let Some(attempt_count) = attempt_count.filter(|value| *value > 1) {
+        payload.insert("attempt_count".to_string(), json!(attempt_count));
+    }
     for key in ["status", "request_id", "task_id", "message"] {
         if let Some(value) = data.get(key).filter(|value| !value.is_null()) {
             payload.insert(key.to_string(), value.clone());
@@ -340,13 +349,14 @@ pub fn verify_session_ingest(
             .collect()
     });
     let mut queries = Vec::new();
-    for query in verification_queries
+    let clean_queries: Vec<String> = verification_queries
         .into_iter()
         .map(|query| query.trim().to_string())
         .filter(|query| !query.is_empty())
-    {
+        .collect();
+    for query in &clean_queries {
         let response = client.search_memories(
-            &query,
+            query,
             Some(user_id),
             None,
             session_id,
@@ -367,28 +377,56 @@ pub fn verify_session_ingest(
             "response": response,
         }));
     }
-    let (status, verified) = if queries.is_empty() {
-        ("verification_skipped", Value::Null)
+    let (mut status, mut verified) = if queries.is_empty() {
+        ("verification_skipped".to_string(), Value::Null)
     } else if queries
         .iter()
         .all(|query| query["hit_count"].as_u64().unwrap_or(0) > 0)
     {
-        ("verified", Value::Bool(true))
+        ("verified".to_string(), Value::Bool(true))
     } else if queries
         .iter()
         .any(|query| query["hit_count"].as_u64().unwrap_or(0) > 0)
     {
-        ("partially_verified", Value::Bool(false))
+        ("partially_verified".to_string(), Value::Bool(false))
     } else {
-        ("not_yet_searchable", Value::Bool(false))
+        ("not_yet_searchable".to_string(), Value::Bool(false))
     };
-    let mut payload = success_envelope("verify_session_ingest", status);
+    let agent_visibility = if scope == "agent" {
+        let visibility = audit_agent_visibility(
+            client,
+            user_id,
+            session_id,
+            &clean_queries,
+            top_k,
+            timeout,
+            20,
+        );
+        status = agent_workflow_status(&visibility, &status).to_string();
+        verified = if status == "verified" {
+            Value::Bool(true)
+        } else if matches!(
+            status.as_str(),
+            "agent_not_visible" | "partially_verified" | "agent_visibility_error"
+        ) {
+            Value::Bool(false)
+        } else {
+            verified
+        };
+        Some(visibility)
+    } else {
+        None
+    };
+    let mut payload = success_envelope("verify_session_ingest", &status);
     payload.insert("verified".to_string(), verified.clone());
     payload.insert("scope".to_string(), Value::String(scope));
     payload.insert("user_id".to_string(), Value::String(user_id.to_string()));
     payload.insert("session_id".to_string(), json!(session_id));
     payload.insert("memory_types".to_string(), json!(memory_types));
     payload.insert("queries".to_string(), Value::Array(queries));
+    if let Some(visibility) = agent_visibility {
+        payload.insert("agent_visibility".to_string(), visibility);
+    }
     if verified != Value::Bool(true) {
         payload.insert(
             "suggested_next_actions".to_string(),
@@ -399,6 +437,19 @@ pub fn verify_session_ingest(
         );
     }
     Ok(Value::Object(payload))
+}
+
+fn agent_workflow_status(agent_visibility: &Value, fallback: &str) -> String {
+    match agent_visibility
+        .get("agent_visibility_status")
+        .and_then(Value::as_str)
+    {
+        Some("visible") => "verified".to_string(),
+        Some("partial") => "partially_verified".to_string(),
+        Some("not_visible") => "agent_not_visible".to_string(),
+        Some("error") => "agent_visibility_error".to_string(),
+        _ => fallback.to_string(),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -460,13 +511,33 @@ pub fn save_and_verify(
         top_k,
         timeout,
     )?;
-    let status = verification["status"]
+    let mut status = verification["status"]
         .as_str()
         .unwrap_or("queued")
         .to_string();
+    let agent_visibility = if scope == "agent" {
+        let checks = verification
+            .get("agent_visibility")
+            .and_then(|value| value.get("agent_visibility_checks"))
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let visibility = build_agent_visibility_report(
+            save.get("message_queued").and_then(Value::as_bool),
+            save.get("flush").cloned(),
+            checks,
+        );
+        status = agent_workflow_status(&visibility, &status);
+        Some(visibility)
+    } else {
+        None
+    };
     let mut payload = success_envelope("save_and_verify", &status);
     payload.insert("save".to_string(), save);
     payload.insert("verification".to_string(), verification.clone());
+    if let Some(visibility) = agent_visibility {
+        payload.insert("agent_visibility".to_string(), visibility);
+    }
     if let Some(actions) = verification.get("suggested_next_actions") {
         payload.insert("suggested_next_actions".to_string(), actions.clone());
     }

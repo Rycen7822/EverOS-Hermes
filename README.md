@@ -43,7 +43,7 @@ Secrets stay in the normal Hermes secret file, so users can edit `~/.hermes/.env
 
 - **Optional Hermes memory provider**: set `memory.provider: everos` when you want automatic recall/capture hooks.
 - **Thirteen explicit MCP tools**: the nine Cloud v1 primitives plus batch/import/verify workflow helpers for safer migration and searchability checks.
-- **Provider context engine**: both Python and Rust provider runtimes include structured agent trajectory capture, a budgeted context assembler, deterministic message ids, prefetch caching, and opt-in session-scoped recent raw recall.
+- **Provider context engine**: both Python and Rust provider runtimes include structured agent trajectory capture, a budgeted context assembler, deterministic message ids, prefetch caching, opt-in session-scoped recent raw recall, and agent-scope visibility reports that distinguish raw queue/flush success from structured `agent_memory`/`agent_case`/`agent_skill` visibility.
 - **Dotenv fallback**: credential lookup is `process env` -> `$HERMES_HOME/.env` -> `~/.hermes/.env`.
 - **Two runtimes**: Python/FastMCP source implementation plus a Rust binary with a prebuilt Linux x86_64 package.
 - **Cloud v1 contract**: personal and agent memory are supported; group, sender, and multimodal object storage endpoints are explicitly out of scope. See [`docs/everos_cloud_v1_contract.md`](docs/everos_cloud_v1_contract.md).
@@ -327,12 +327,20 @@ Advanced non-secret provider settings live in `$HERMES_HOME/everos.json`:
   "prefetch_cache_ttl_seconds": 120,
   "capture_agent_memory": false,
   "agent_recall": false,
-  "agent_summary_after_turn": false,
+  "agent_summary_after_turn": true,
   "agent_trajectory_on_session_end": true,
   "agent_trajectory_on_pre_compress": true,
   "agent_trajectory_on_delegation": true,
-  "agent_flush_after_turn": false,
+  "agent_flush_after_turn": true,
   "agent_memory_types": ["agent_memory"],
+  "agent_visibility_verify_after_write": false,
+  "agent_visibility_verify_after_flush": false,
+  "agent_visibility_queries": [],
+  "agent_visibility_top_k": 5,
+  "agent_visibility_timeout": 30.0,
+  "agent_visibility_get_page_size": 20,
+  "agent_visibility_retry_flush_attempts": 1,
+  "agent_visibility_retry_flush_backoff_ms": 250,
   "agent_max_messages": 80,
   "agent_max_message_chars": 8000,
   "agent_max_tool_result_chars": 6000,
@@ -343,6 +351,8 @@ Advanced non-secret provider settings live in `$HERMES_HOME/everos.json`:
 ```
 
 `EVEROS_USER_ID` overrides `everos.json`. Templates can use `{user_id}`, `{user_name}`, `{identity}`, and `{platform}`.
+
+Agent visibility options are intentionally off by default for provider hooks. When `agent_visibility_verify_after_write` or `agent_visibility_verify_after_flush` is enabled, the provider probes personal search plus agent structured surfaces and records `agent_visibility_status` as `unchecked`, `not_visible`, `partial`, or `visible`; raw queue/flush success alone is not treated as structured visibility.
 
 ## Use as MCP Server
 
@@ -389,9 +399,9 @@ The MCP server exposes thirteen tools:
 
 | Tool | Purpose | Read-only? |
 | --- | --- | --- |
-| `everos_save_memory` | Queue one explicit text memory message, then optionally flush; response separates queue/extraction/searchability state. For agent scope, `role=tool` requires `tool_call_id`; default agent role is non-tool. | No |
-| `everos_add_memories` | Add one or more messages to personal or agent scope; optional `message_id` is preserved for idempotent retries; legacy `agent` alias remains supported but conflicts with `scope`. | No |
-| `everos_flush_memories` | Trigger personal or agent extraction immediately; supports per-call `timeout` and retryable timeout responses. | No |
+| `everos_save_memory` | Queue one explicit text memory message, then optionally flush; response separates queue/extraction/searchability state. For agent scope, `role=tool` requires `tool_call_id`; default agent role is non-tool, and the response includes `agent_visibility` with `unchecked` unless a workflow performs structured verification. | No |
+| `everos_add_memories` | Add one or more messages to personal or agent scope; optional `message_id` is preserved for idempotent retries; legacy `agent` alias remains supported but conflicts with `scope`. Agent-scope primitive responses include unchecked visibility metadata. | No |
+| `everos_flush_memories` | Trigger personal or agent extraction immediately; supports per-call `timeout`, retryable timeout responses, and one retry for transient request-send failures. Agent flush returns flush status plus unchecked visibility metadata. | No |
 | `everos_search_memories` | Search with keyword, vector, hybrid, or agentic retrieval; exposes `filters`, `radius`, `top_k=-1`, `timeout`, and agentic fallback; vector fields are stripped unless `include_vectors=true`. | Yes |
 | `everos_get_memories` | Retrieve structured memories with `filters`, pagination, `rank_by`, and `rank_order`. | Yes |
 | `everos_delete_memories` | Delete exactly one `memory_id` or a confirmed user/session batch; batch delete requires `confirm_scope_text`. | No, destructive |
@@ -431,6 +441,15 @@ Settings updates are restricted to the documented settings whitelist and return 
 
 Workflow import helpers validate `messages[].timestamp` locally: when supplied, it must be an integer epoch-millisecond value such as `1712052000000`, not an ISO datetime string. Dry-run reports `warnings` plus `metrics` (`total_messages`, batch counts, content length, and estimated payload bytes). During execution, if EverOS Cloud returns `403 Forbidden` for a multi-message batch, the helper records the failed oversized batch, splits it in half, retries the child batches, and returns `split_count`, `payload_bytes`, `split_reason`, and a small-batch recommendation in `suggested_next_actions`.
 
+Agent-scope workflow helpers (`everos_save_and_verify`, `everos_verify_session_ingest`, and import/batch verification when `scope="agent"`) return an `agent_visibility` object. The status values are:
+
+- `unchecked`: raw message queueing/flush was attempted, but no structured visibility probe was run;
+- `not_visible`: personal/raw search may show the queued content, but agent structured surfaces are still empty;
+- `partial`: at least one agent structured probe returned data, but not all expected agent surfaces are visible;
+- `visible`: agent structured probes found the memory on the expected agent surfaces.
+
+This distinction avoids treating a successful queue or flush response as proof that `agent_memory`, `agent_case`, or `agent_skill` is already searchable.
+
 ## Runtime Modes
 
 | Mode | Enable with | Automatic behavior | Use when |
@@ -455,6 +474,7 @@ For lower latency or stricter control, keep `auto_capture=true` but set `auto_re
 | `src/everos_hermes/workflows.py` | Shared batch/import/save-and-verify workflow helpers used by MCP and provider tools. |
 | `src/everos_hermes/provider.py` | Hermes `MemoryProvider` implementation. |
 | `integrations/hermes/` | Thin plugin entrypoint and Hermes-specific install notes. |
+| `scripts/` | Release packaging and smoke-test helpers, including `everos_agent_visibility_smoke.py` for MCP fake-server visibility checks. |
 | `tests/` | Client, provider, and MCP tool tests with fake clients / HTTP. |
 | `agentmemory-main/` | Local reference checkout; intentionally ignored and not vendored. |
 
@@ -474,6 +494,18 @@ python -m everos_hermes.mcp_server
 # from an MCP client: initialize, then tools/list; expect the thirteen EverOS tools above
 ```
 
+Agent visibility fake-server smoke for the Rust MCP binary:
+
+```bash
+cd /home/xu/project/tools/EverOS-Hermes
+python scripts/everos_agent_visibility_smoke.py \
+  --binary rust-version/target/debug/everos-hermes-rust \
+  --mode build-tree \
+  --output .tmp_everos_visibility_smoke/build_tree_summary.json
+```
+
+The smoke script drives MCP stdio, uses a local fake EverOS Cloud, redacts authorization headers in its JSON summary, and verifies `not_visible`/`partial`/`visible`, unchecked primitive agent saves, local `role=tool` validation, and transient agent-flush retry behavior.
+
 Repository hygiene before commits:
 
 ```bash
@@ -484,7 +516,7 @@ git diff --check
 ## Security Notes
 
 - Do not commit EverOS API keys, `.env`, MCP `env:` blocks with real credentials, or generated cache directories.
-- The client sends `Authorization: Bearer <token>` only at request time; examples use placeholders only.
+- The client sends `Authorization: Bearer ...` only at request time; examples use placeholders only, and smoke summaries redact it as `Bearer ***`.
 - `everos_delete_memories` and `everos_memory_forget` are destructive and require explicit confirmation flags.
 - EverOS extraction is asynchronous by default; flushing makes newly added messages searchable sooner but can add API work.
 

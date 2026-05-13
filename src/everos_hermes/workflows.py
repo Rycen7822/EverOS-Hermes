@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .agent_visibility import audit_agent_visibility, build_agent_visibility_report
 from .client import DEFAULT_MEMORY_TYPES, EverOSClient, EverOSTimeoutError
 from .schemas import normalize_scope, validate_messages
 
@@ -232,6 +233,20 @@ def _count_hits_value(value: Any) -> int:
     return total
 
 
+def _agent_workflow_status(agent_visibility: dict[str, Any], fallback: str) -> str:
+    status = agent_visibility.get("agent_visibility_status")
+    if status == "visible":
+        return "verified"
+    if status == "partial":
+        return "partially_verified"
+    if status == "not_visible":
+        return "agent_not_visible"
+    if status == "error":
+        return "agent_visibility_error"
+    return fallback
+
+
+
 def verify_session_ingest(
     *,
     client: EverOSClient,
@@ -277,8 +292,22 @@ def verify_session_ingest(
     else:
         status = "not_yet_searchable"
         verified = False
+    agent_visibility = None
+    if resolved_scope == "agent":
+        agent_visibility = audit_agent_visibility(
+            client=client,
+            user_id=user_id,
+            session_id=session_id,
+            queries=list(verification_queries or []),
+            top_k=top_k,
+            timeout=timeout,
+        )
+        status = _agent_workflow_status(agent_visibility, status)
+        verified = status == "verified"
+        if status in {"agent_not_visible", "partially_verified", "agent_visibility_error"}:
+            verified = False
     actions = [] if verified else ["wait for extraction and retry verification", "check user_id/session_id/scope and adjust verification queries"]
-    return success_envelope(
+    payload = success_envelope(
         workflow="verify_session_ingest",
         status=status,
         verified=verified,
@@ -289,6 +318,9 @@ def verify_session_ingest(
         queries=queries,
         suggested_next_actions=actions,
     )
+    if agent_visibility is not None:
+        payload["agent_visibility"] = agent_visibility
+    return payload
 
 
 def save_and_verify(
@@ -346,13 +378,25 @@ def save_and_verify(
         timeout=timeout,
     )
     status = verification["status"] if verification.get("verified") is not None else "queued"
-    return success_envelope(
+    agent_visibility = None
+    if resolved_scope == "agent":
+        verification_visibility = verification.get("agent_visibility", {}) if isinstance(verification, dict) else {}
+        agent_visibility = build_agent_visibility_report(
+            agent_raw_queued=bool(save_payload.get("message_queued")),
+            agent_flush=save_payload.get("flush"),
+            checks=list(verification_visibility.get("agent_visibility_checks", [])),
+        )
+        status = _agent_workflow_status(agent_visibility, status)
+    payload = success_envelope(
         workflow="save_and_verify",
         status=status,
         save=save_payload,
         verification=verification,
         suggested_next_actions=verification.get("suggested_next_actions", []),
     )
+    if agent_visibility is not None:
+        payload["agent_visibility"] = agent_visibility
+    return payload
 
 
 def import_and_verify(
@@ -496,6 +540,15 @@ def import_and_verify(
         status = "failed"
     else:
         status = "queued"
+    agent_visibility = None
+    if resolved_scope == "agent" and isinstance(verification, dict) and verification.get("agent_visibility"):
+        verification_visibility = verification.get("agent_visibility", {})
+        agent_visibility = build_agent_visibility_report(
+            agent_raw_queued=queued_count > 0,
+            agent_flush=flush_payload,
+            checks=list(verification_visibility.get("agent_visibility_checks", [])),
+        )
+        status = _agent_workflow_status(agent_visibility, status)
     actions: list[str] = []
     if split_count:
         actions.append("Cloud 403 triggered adaptive batch splitting; keep batch_size small for long messages")
@@ -503,7 +556,7 @@ def import_and_verify(
         actions.append("retry only failed batches using the batch report")
     if verification.get("verified") is False:
         actions.extend(["wait for extraction and rerun verify_session_ingest", "adjust verification queries if extraction consolidated memories"])
-    return success_envelope(
+    payload = success_envelope(
         workflow=workflow,
         status=status,
         input_count=len(normalized),
@@ -520,3 +573,6 @@ def import_and_verify(
         verification=verification,
         suggested_next_actions=actions,
     )
+    if agent_visibility is not None:
+        payload["agent_visibility"] = agent_visibility
+    return payload
