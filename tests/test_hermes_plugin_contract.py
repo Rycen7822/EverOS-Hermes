@@ -18,6 +18,14 @@ RUST_PLUGIN_MANIFEST = RUST_PLUGIN_DIR / "plugin.yaml"
 RUST_PLUGIN_SKILL = RUST_PLUGIN_DIR / "resources" / "skills" / "everos-memory-curation" / "SKILL.md"
 LEGACY_REPO_SKILL = REPO_ROOT / "skills" / "software-development" / "everos-memory-curation" / "SKILL.md"
 
+EXPECTED_SKILL_REFERENCES = [
+    "user-intent-runbooks.md",
+    "memory-routing-policy.md",
+    "agent-case-visibility.md",
+    "plugin-triage-and-migration.md",
+    "cleanup-and-verification.md",
+]
+
 EXPECTED_PLUGIN_TOOL_NAMES = {
     "everos_memory_save",
     "everos_memory_search",
@@ -41,6 +49,14 @@ def _load_plugin_module(plugin_dir: Path = PLUGIN_DIR, module_name: str = "evero
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _skill_bundle_text(skill_path: Path) -> str:
+    ref_dir = skill_path.parent / "references"
+    parts = [skill_path.read_text(encoding="utf-8")]
+    for ref_name in EXPECTED_SKILL_REFERENCES:
+        parts.append((ref_dir / ref_name).read_text(encoding="utf-8"))
+    return "\n\n".join(parts)
 
 
 class StandalonePluginCtx:
@@ -109,7 +125,14 @@ def test_plugin_bundles_curation_skill_instead_of_shipping_repo_level_skill():
     assert PLUGIN_SKILL.exists()
     text = PLUGIN_SKILL.read_text(encoding="utf-8")
     assert "name: everos-memory-curation" in text
-    assert "Agent Case Trajectory Recipe" in text
+    assert "## Reference Map" in text
+    assert len(text) <= 6500, "SKILL.md must stay thin; heavy guidance belongs in references/*.md."
+    for ref_name in EXPECTED_SKILL_REFERENCES:
+        assert f"references/{ref_name}" in text
+        ref_path = PLUGIN_SKILL.parent / "references" / ref_name
+        assert ref_path.exists()
+        assert len(ref_path.read_text(encoding="utf-8")) > 500
+    assert "### Agent Case Trajectory Recipe" not in text
     assert not LEGACY_REPO_SKILL.exists(), "EverOS curation guidance must be plugin-bundled, not a separate repo skill."
 
 
@@ -163,6 +186,43 @@ def test_plugin_tool_handler_lazy_initializes_provider_and_returns_json(monkeypa
     assert payload["error"] == "content is required"
 
 
+def test_skill_includes_agentmemory_style_operator_runbooks_and_guardrails():
+    expected_sections = [
+        "## User-Intent Runbooks",
+        "### Remember / save this",
+        "### Recall / what did we do",
+        "### Forget / delete memory",
+        "### Session history / recent memory timeline",
+        "## Tool Unavailable / Plugin Not Loaded Triage",
+        "## Search Result Presentation Contract",
+    ]
+    expected_terms = [
+        "everos_memory_save_and_verify",
+        "everos_memory_search",
+        "everos_memory_get",
+        "everos_memory_forget",
+        "memory.provider: everos",
+        "plugins.enabled",
+        "agent_visibility",
+        "Do not make up memories",
+    ]
+
+    for skill_path in [PLUGIN_SKILL, RUST_PLUGIN_SKILL]:
+        skill_text = skill_path.read_text(encoding="utf-8")
+        bundle_text = _skill_bundle_text(skill_path)
+        data = yaml.safe_load(skill_text.split("---", 2)[1])
+        assert data["version"] >= "1.0.7"
+        assert len(skill_text) <= 6500
+        for ref_name in EXPECTED_SKILL_REFERENCES:
+            assert f"references/{ref_name}" in skill_text
+        for heavy_marker in ["### Remember / save this", "### Agent Case Trajectory Recipe", "## Cleanup / Compression Checklist"]:
+            assert heavy_marker not in skill_text, f"{skill_path} kept heavy section {heavy_marker} in SKILL.md"
+        for section in expected_sections:
+            assert section in bundle_text, f"{skill_path} missing {section}"
+        for term in expected_terms:
+            assert term in bundle_text, f"{skill_path} missing {term}"
+
+
 def test_rust_plugin_manifest_and_resources_match_single_plugin_contract():
     data = yaml.safe_load(RUST_PLUGIN_MANIFEST.read_text(encoding="utf-8"))
 
@@ -176,7 +236,7 @@ def test_rust_plugin_manifest_and_resources_match_single_plugin_contract():
         "on_pre_compress",
     ]
     assert RUST_PLUGIN_SKILL.exists()
-    assert "Agent Case Trajectory Recipe" in RUST_PLUGIN_SKILL.read_text(encoding="utf-8")
+    assert "### Agent Case Trajectory Recipe" in _skill_bundle_text(RUST_PLUGIN_SKILL)
 
 
 def test_rust_standalone_register_exposes_plugin_skill_and_tools_when_binary_surface_is_available(monkeypatch):
