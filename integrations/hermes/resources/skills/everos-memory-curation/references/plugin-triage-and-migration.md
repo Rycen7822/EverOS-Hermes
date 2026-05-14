@@ -11,8 +11,9 @@ If an EverOS tool is missing, returns "provider is not active", or the skill is 
 3. Confirm automatic memory provider selection: `memory.provider: everos`.
 4. Confirm secrets: `EVEROS_API_KEY` is in `$HERMES_HOME/.env`, profile `.env`, or process environment; do not print the key value.
 5. Restart or start a fresh Hermes session after config/plugin/secret changes. Plugin discovery and memory-provider initialization are not retroactive inside an already-running conversation.
-6. For Rust packages, verify `EVEROS_HERMES_RUST_BIN` is an absolute path to the binary; Hermes dotenv values are not shell-expanded.
-7. Distinguish surfaces in the report:
+6. If `plugins.enabled` includes `everos` but `skill_view("everos:everos-memory-curation")` fails or `hermes plugins list` shows an older EverOS description/version, inspect `$HERMES_HOME/plugins/` for backup/sibling directories whose `plugin.yaml` also declares `name: everos`. Hermes PluginManager keys flat user plugins by manifest name, so later-sorted backup directories such as `everos.backup_*` can shadow `$HERMES_HOME/plugins/everos`; old memory-provider-only backups may be auto-coerced to `kind="exclusive"` and therefore never register plugin skills.
+7. For Rust packages, verify `EVEROS_HERMES_RUST_BIN` is an absolute path to the binary; Hermes dotenv values are not shell-expanded.
+8. Distinguish surfaces in the report:
    - standalone plugin enabled -> explicit tools and `everos:everos-memory-curation` skill;
    - `memory.provider: everos` -> automatic recall/capture hooks;
    - compatibility MCP server -> legacy/advanced stdio surface, not the default plugin path.

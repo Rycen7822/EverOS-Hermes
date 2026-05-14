@@ -136,6 +136,7 @@ integrations/hermes/resources/skills/everos-memory-curation/SKILL.md
 - `references/user-intent-runbooks.md` — remember/recall/forget/session-history runbooks.
 - `references/memory-routing-policy.md` — personal memory vs agent case vs skill routing.
 - `references/agent-case-visibility.md` — `scope="agent"`, trajectories, `tool_call_id`, and `agent_visibility` checks.
+- `references/agent-visibility-contract-audits.md` — Python/Rust identity parity, installed plugin sync, and runtime import-path audit pattern.
 - `references/plugin-triage-and-migration.md` — install, provider/plugin/MCP triage, migration pointers.
 - `references/cleanup-and-verification.md` — cleanup, destructive delete verification, and final checklists.
 

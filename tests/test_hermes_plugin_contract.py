@@ -22,6 +22,7 @@ EXPECTED_SKILL_REFERENCES = [
     "user-intent-runbooks.md",
     "memory-routing-policy.md",
     "agent-case-visibility.md",
+    "agent-visibility-contract-audits.md",
     "plugin-triage-and-migration.md",
     "cleanup-and-verification.md",
 ]
@@ -142,6 +143,35 @@ def test_plugin_bundles_curation_skill_instead_of_shipping_repo_level_skill():
     assert not LEGACY_REPO_SKILL.exists(), "EverOS curation guidance must be plugin-bundled, not a separate repo skill."
 
 
+def test_rust_plugin_skill_resources_are_byte_identical_to_python_canonical_tree():
+    canonical_skill_dir = PLUGIN_SKILL.parent
+    rust_skill_dir = RUST_PLUGIN_SKILL.parent
+
+    canonical_files = {
+        path.relative_to(canonical_skill_dir): path
+        for path in canonical_skill_dir.rglob("*")
+        if path.is_file() and "__pycache__" not in path.parts
+    }
+    rust_files = {
+        path.relative_to(rust_skill_dir): path
+        for path in rust_skill_dir.rglob("*")
+        if path.is_file() and "__pycache__" not in path.parts
+    }
+
+    assert sorted(canonical_files) == sorted(rust_files)
+    for rel_path in sorted(canonical_files):
+        assert canonical_files[rel_path].read_bytes() == rust_files[rel_path].read_bytes(), rel_path
+
+
+def test_rust_prebuild_package_script_uses_python_skill_resources_as_canonical_source():
+    script = (REPO_ROOT / "rust-version" / "scripts" / "package-release.sh").read_text(encoding="utf-8")
+
+    assert "CANONICAL_SKILL_DIR" in script
+    assert "../integrations/hermes/resources/skills/everos-memory-curation" in script
+    assert "rm -rf \"$STAGE/integrations/hermes/resources/skills/everos-memory-curation\"" in script
+    assert "cp -R \"$CANONICAL_SKILL_DIR\"" in script
+
+
 def test_standalone_register_exposes_tools_and_plugin_skill_without_memory_provider_method(monkeypatch):
     monkeypatch.setenv("EVEROS_API_KEY", "sk-test")
     monkeypatch.setenv("EVEROS_USER_ID", "u1")
@@ -220,7 +250,7 @@ def test_skill_includes_agentmemory_style_operator_runbooks_and_guardrails():
         skill_text = skill_path.read_text(encoding="utf-8")
         bundle_text = _skill_bundle_text(skill_path)
         data = yaml.safe_load(skill_text.split("---", 2)[1])
-        assert data["version"] >= "1.0.8"
+        assert tuple(map(int, data["version"].split("."))) >= (1, 0, 8)
         assert data["description"] == EXPECTED_SKILL_DESCRIPTION
         assert len(data["description"]) <= 1024
         assert "## Post-task Proactive Curation" in skill_text

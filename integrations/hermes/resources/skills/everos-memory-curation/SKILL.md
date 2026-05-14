@@ -1,7 +1,7 @@
 ---
 name: everos-memory-curation
 description: "Use proactively when complex or iterative work may produce durable EverOS/Hermes memory: recall, save, verify, clean, compress, or migrate reusable workflows, debugging lessons, tool/API quirks, and agent cases without saving noisy task logs."
-version: 1.0.9
+version: 1.0.11
 author: Hermes Agent
 license: MIT
 metadata:
@@ -49,8 +49,9 @@ Pick the smallest reference that answers the current question:
 1. Plain-language memory actions (`remember`, `recall`, `forget`, `session history`) -> `references/user-intent-runbooks.md`.
 2. Whether/where to save information -> `references/memory-routing-policy.md`.
 3. Agent memory visibility, trajectories, agent cases, or `tool_call_id` rules -> `references/agent-case-visibility.md`.
-4. Missing tools, plugin/provider setup, imports, exports, or migrations -> `references/plugin-triage-and-migration.md`.
-5. Cleanup, compaction, destructive delete verification, or final checklists -> `references/cleanup-and-verification.md`.
+4. Agent visibility contract audits, especially Python/Rust identity parity or installed plugin runtime import-path checks -> `references/agent-visibility-contract-audits.md`.
+5. Missing tools, plugin/provider setup, imports, exports, or migrations -> `references/plugin-triage-and-migration.md`.
+6. Cleanup, compaction, destructive delete verification, or final checklists -> `references/cleanup-and-verification.md`.
 
 If the task spans multiple areas, load multiple references deliberately and say why.
 
@@ -63,6 +64,7 @@ If the task spans multiple areas, load multiple references deliberately and say 
 | "forget/delete memory" | Search exact candidates first; delete only exact ids with explicit confirmation. | `references/user-intent-runbooks.md` |
 | "should this be memory or a skill?" | Route to personal memory, agent case, skill, or skip. | `references/memory-routing-policy.md` |
 | `scope="agent"` or agent case visibility | Use trajectory recipe and verify `agent_visibility`. | `references/agent-case-visibility.md` |
+| agent visibility identity/parity/install audit | Inspect implementation, installed plugin sync/config/import path, and targeted Python/Rust contract tests; write evidence and curation decision. | `references/agent-visibility-contract-audits.md` |
 | EverOS tools missing/inactive | Check plugin install, `plugins.enabled`, `memory.provider: everos`, secrets, restart. | `references/plugin-triage-and-migration.md` |
 | noisy memory/cleanup | Back up ids, delete only high-confidence noise, verify after cleanup. | `references/cleanup-and-verification.md` |
 
@@ -71,6 +73,7 @@ If the task spans multiple areas, load multiple references deliberately and say 
 - `references/user-intent-runbooks.md` — concise remember/recall/forget/session-history runbooks and grounded result presentation.
 - `references/memory-routing-policy.md` — recall/write decision rules, target selection, reusable case format, skill patching, and default policy.
 - `references/agent-case-visibility.md` — `scope="agent"`, `agent_case`, `agent_skill`, `agent_memory`, `tool_call_id`, trajectory, and visibility checks.
+- `references/agent-visibility-contract-audits.md` — audit pattern for Python/Rust `agent_visibility` identity contracts, installed plugin resource sync, runtime import paths, and evidence-file memory-curation notes.
 - `references/plugin-triage-and-migration.md` — plugin/provider/MCP surface triage plus links to deeper API/profile/migration references.
 - `references/cleanup-and-verification.md` — cleanup/compression checklist, common pitfalls, and final verification checklist.
 

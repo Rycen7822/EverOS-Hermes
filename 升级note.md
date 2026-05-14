@@ -141,6 +141,6 @@
 
 ### 2026-05-13 22:25 CST — plugin 文档与版本收口
 - README、plugin README、Rust README 已更新为当前单 plugin 安装路径：`hermes plugins enable everos` 暴露 8 个 `everos_memory_*` standalone tools 与 qualified skill `everos:everos-memory-curation`，`hermes config set memory.provider everos` 启用自动 recall/capture hooks。
-- `everos-memory-curation` 已改为薄 `SKILL.md` router，详细 runbook 拆到 `references/user-intent-runbooks.md`、`memory-routing-policy.md`、`agent-case-visibility.md`、`plugin-triage-and-migration.md`、`cleanup-and-verification.md`。
+- `everos-memory-curation` 已改为薄 `SKILL.md` router，详细 runbook 拆到 `references/user-intent-runbooks.md`、`memory-routing-policy.md`、`agent-case-visibility.md`、`agent-visibility-contract-audits.md`、`plugin-triage-and-migration.md`、`cleanup-and-verification.md`。
 - Python package、Rust crate/binary、Hermes plugin manifest 版本统一到 `0.3.0`；历史 0.2.x package/install 记录保留为历史，不再代表当前安装说明。
 - 当前文档明确区分 provider explicit tools=8 与 stdio compatibility MCP-13 tools；旧 README badge/旧九工具说法不再代表当前状态。

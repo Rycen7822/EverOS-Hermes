@@ -28,6 +28,13 @@ rm -rf "$STAGE"
 mkdir -p "$STAGE/bin" "$STAGE/integrations"
 install -m 0755 "$ROOT/target/release/everos-hermes-rust" "$STAGE/bin/everos-hermes-rust"
 cp -R "$ROOT/integrations/hermes" "$STAGE/integrations/hermes"
+CANONICAL_SKILL_DIR="$ROOT/../integrations/hermes/resources/skills/everos-memory-curation"
+STAGED_SKILL_DIR="$STAGE/integrations/hermes/resources/skills/everos-memory-curation"
+test -d "$CANONICAL_SKILL_DIR"
+rm -rf "$STAGE/integrations/hermes/resources/skills/everos-memory-curation"
+mkdir -p "$(dirname "$STAGED_SKILL_DIR")"
+cp -R "$CANONICAL_SKILL_DIR" "$STAGED_SKILL_DIR"
+find "$STAGE" \( -type d -name '__pycache__' -o -type f \( -name '*.pyc' -o -name '*.pyo' \) \) -prune -exec rm -rf {} +
 cp "$ROOT/README.md" "$STAGE/README.md"
 
 cat > "$STAGE/INSTALL.md" <<EOF

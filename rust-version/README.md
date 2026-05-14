@@ -95,6 +95,7 @@ The entry `SKILL.md` is intentionally small. It routes agents to the relevant re
 - `references/user-intent-runbooks.md`
 - `references/memory-routing-policy.md`
 - `references/agent-case-visibility.md`
+- `references/agent-visibility-contract-audits.md`
 - `references/plugin-triage-and-migration.md`
 - `references/cleanup-and-verification.md`
 

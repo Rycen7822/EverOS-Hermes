@@ -76,6 +76,7 @@ Current primary references:
 - `user-intent-runbooks.md`
 - `memory-routing-policy.md`
 - `agent-case-visibility.md`
+- `agent-visibility-contract-audits.md`
 - `plugin-triage-and-migration.md`
 - `cleanup-and-verification.md`
 
