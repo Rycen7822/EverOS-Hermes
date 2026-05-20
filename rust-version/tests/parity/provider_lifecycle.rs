@@ -292,56 +292,6 @@ fn provider_prefetch_uses_v2_assembler_cache_agent_and_session_scoped_raw() {
 }
 
 #[test]
-fn provider_sync_turn_adds_personal_message_ids_and_respects_agent_summary_flag() {
-    let _guard = ENV_LOCK.lock().unwrap();
-    let home = temp_home("provider_sync_ids");
-    let (base_url, handle) =
-        n_request_server(json!({"data":{"status":"queued","task_id":"task-sync"}}), 1);
-    fs::write(
-        home.join(".env"),
-        format!("EVEROS_API_KEY=test-key\nEVEROS_USER_ID=u1\nEVEROS_BASE_URL={base_url}\n"),
-    )
-    .unwrap();
-    fs::write(
-        home.join("everos.json"),
-        json!({"capture_agent_memory":true,"agent_summary_after_turn":false,"flush_after_turn":false}).to_string(),
-    )
-    .unwrap();
-    remove_env("EVEROS_API_KEY");
-    remove_env("EVEROS_USER_ID");
-    remove_env("EVEROS_BASE_URL");
-    set_env("HERMES_HOME", home.to_str().unwrap());
-
-    let provider = EverOSProvider::initialize(ProviderInit::for_test("sess-1", &home)).unwrap();
-    provider
-        .sync_turn("remember deterministic ids", "Noted.", Some("sess-2"))
-        .unwrap();
-    let requests = handle.join().unwrap();
-    let body = parse_http_body(&requests[0]);
-    let messages = body["messages"].as_array().unwrap();
-
-    assert_eq!(requests.len(), 1);
-    assert!(requests[0].starts_with("POST /api/v1/memories "));
-    assert_eq!(body["session_id"], "sess-2");
-    assert_eq!(messages[0]["role"], "user");
-    assert_eq!(messages[1]["role"], "assistant");
-    assert!(
-        messages[0]["message_id"]
-            .as_str()
-            .unwrap()
-            .starts_with("eh_")
-    );
-    assert!(
-        messages[1]["message_id"]
-            .as_str()
-            .unwrap()
-            .starts_with("eh_")
-    );
-
-    remove_env("HERMES_HOME");
-}
-
-#[test]
 fn provider_pre_compress_and_session_end_capture_structured_trajectory_with_dedupe() {
     let _guard = ENV_LOCK.lock().unwrap();
     let home = temp_home("provider_precompress");

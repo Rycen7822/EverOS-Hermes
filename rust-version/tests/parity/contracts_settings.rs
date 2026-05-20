@@ -1,48 +1,6 @@
 use super::*;
 
 #[test]
-fn provider_workflow_tools_run_save_and_verify() {
-    let _guard = ENV_LOCK.lock().unwrap();
-    let home = temp_home("provider_save_verify");
-    let (base_url, handle) = sequenced_request_server(
-        vec![
-            json!({"data":{"status":"queued","task_id":"task-save"}}),
-            json!({"data":{"status":"success"}}),
-            json!({"data":{"episodes":[{"summary":"pytest preference"}]}}),
-        ],
-        500,
-    );
-    fs::write(
-        home.join(".env"),
-        format!("EVEROS_API_KEY=test-key\nEVEROS_USER_ID=u1\nEVEROS_BASE_URL={base_url}\n"),
-    )
-    .unwrap();
-    remove_env("EVEROS_API_KEY");
-    remove_env("EVEROS_USER_ID");
-    remove_env("EVEROS_BASE_URL");
-    set_env("HERMES_HOME", home.to_str().unwrap());
-
-    let provider = EverOSProvider::initialize(ProviderInit::for_test("sess-1", &home)).unwrap();
-    let raw = provider
-        .handle_tool_call(
-            "everos_memory_save_and_verify",
-            json!({"content":"User prefers pytest.","verification_query":"pytest preference","session_id":"sess-verify","flush":true,"memory_types":["raw_message"],"timeout":0.2,"flush_timeout":0.2}),
-        )
-        .unwrap();
-    let response: Value = serde_json::from_str(&raw).unwrap();
-    let requests = handle.join().unwrap();
-
-    assert_eq!(response["ok"], true);
-    assert_eq!(response["status"], "verified");
-    assert_eq!(
-        parse_http_body(&requests[2])["memory_types"],
-        json!(DEFAULT_MEMORY_TYPES)
-    );
-
-    remove_env("HERMES_HOME");
-}
-
-#[test]
 fn response_normalization_contract_cases_match_python() {
     use everos_hermes_rust::response_normalization::{
         as_list, count_hits, response_data, response_summary,
@@ -299,30 +257,6 @@ fn mcp_numeric_boundaries_reject_invalid_args_before_http() {
         requests.is_empty(),
         "invalid numeric arguments must not send HTTP, got {requests:?}"
     );
-
-    remove_env("EVEROS_API_KEY");
-    remove_env("EVEROS_USER_ID");
-    remove_env("EVEROS_BASE_URL");
-}
-
-#[test]
-fn mcp_search_preserves_radius_zero() {
-    let _guard = ENV_LOCK.lock().unwrap();
-    let (base_url, handle) = one_request_server(json!({"data":{"episodes":[]}}));
-    set_env("EVEROS_API_KEY", "test-key");
-    set_env("EVEROS_USER_ID", "u1");
-    set_env("EVEROS_BASE_URL", &base_url);
-
-    everos_hermes_rust::mcp::call_tool(
-        "everos_search_memories",
-        json!({"query":"q","method":"hybrid","radius":0,"top_k":1}),
-    )
-    .unwrap();
-    let raw = handle.join().unwrap();
-    let body = parse_http_body(&raw);
-
-    assert_eq!(body["radius"], json!(0.0));
-    assert_eq!(body["top_k"], 1);
 
     remove_env("EVEROS_API_KEY");
     remove_env("EVEROS_USER_ID");

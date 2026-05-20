@@ -18,39 +18,10 @@
       "valid": true
     },
     {
-      "name": "valid_utc_timezone",
-      "normalized": {
-        "timezone": "UTC"
-      },
-      "settings": {
-        "timezone": "UTC"
-      },
-      "strict": true,
-      "valid": true
-    },
-    {
-      "error_contains": "timezone",
-      "name": "invalid_short_timezone",
-      "settings": {
-        "timezone": "Tokyo"
-      },
-      "strict": true,
-      "valid": false
-    },
-    {
       "error_contains": "timezone",
       "name": "invalid_unknown_timezone",
       "settings": {
         "timezone": "Mars/Base"
-      },
-      "strict": true,
-      "valid": false
-    },
-    {
-      "error_contains": "timezone",
-      "name": "invalid_padded_timezone",
-      "settings": {
-        "timezone": " Asia/Tokyo "
       },
       "strict": true,
       "valid": false

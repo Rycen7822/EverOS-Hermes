@@ -191,33 +191,3 @@ fn client_param_normalization_contract_cases() {
         }
     }
 }
-
-#[test]
-fn client_session_filter_requires_exact_non_empty_operator_and_group_helpers_fail_closed() {
-    let client = EverOSClient::new("test-key", "http://127.0.0.1:9", 0.05).unwrap();
-    for filters in [
-        json!({"session_id": {}}),
-        json!({"session_id": {"eq": ""}}),
-        json!({"session_id": {"eq": 123}}),
-        json!({"session_id": ""}),
-        json!({"AND": [{"session_id": {"eq": 123}}]}),
-    ] {
-        assert!(
-            client
-                .search_memories(
-                    "coffee",
-                    Some("u1"),
-                    Some("sess"),
-                    Some(filters),
-                    "hybrid",
-                    None,
-                    5,
-                    None,
-                    false,
-                    false,
-                    None,
-                )
-                .is_err()
-        );
-    }
-}

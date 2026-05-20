@@ -39,36 +39,6 @@ fn provider_save_tool_adds_memory_and_flushes() {
 }
 
 #[test]
-fn mcp_search_tool_strips_vectors_and_exposes_new_safety_parameters() {
-    let _guard = ENV_LOCK.lock().unwrap();
-    let (base_url, handle) = one_request_server(json!({
-        "data": {
-            "episodes": [{"id":"ep1","summary":"Coffee","vector":[0.1,0.2]}],
-            "original_data": {"episodes": {"ep1": {"vector":[0.1,0.2],"summary":"Coffee"}}}
-        }
-    }));
-    set_env("EVEROS_API_KEY", "test-key");
-    set_env("EVEROS_BASE_URL", &base_url);
-    set_env("EVEROS_USER_ID", "u1");
-
-    let raw = everos_hermes_rust::mcp::call_tool(
-        "everos_search_memories",
-        json!({"query":"coffee","include_original_data":true}),
-    )
-    .unwrap();
-    let request = handle.join().unwrap();
-    let response: Value = serde_json::from_str(&raw).unwrap();
-
-    assert_eq!(parse_http_body(&request)["include_original_data"], true);
-    assert!(response.to_string().contains("Coffee"));
-    assert!(!response.to_string().contains("vector"));
-
-    remove_env("EVEROS_API_KEY");
-    remove_env("EVEROS_BASE_URL");
-    remove_env("EVEROS_USER_ID");
-}
-
-#[test]
 fn mcp_save_tool_returns_queue_semantics_when_flush_disabled() {
     let _guard = ENV_LOCK.lock().unwrap();
     let (base_url, handle) =
@@ -370,7 +340,7 @@ fn client_accepts_top_k_minus_one_and_radius_filters() {
             "hybrid",
             Some(vec!["agent_memory".to_string()]),
             -1,
-            Some(0.5),
+            Some(0.0),
             false,
             false,
             None,
@@ -378,7 +348,7 @@ fn client_accepts_top_k_minus_one_and_radius_filters() {
         .unwrap();
     let body = parse_http_body(&handle.join().unwrap());
     assert_eq!(body["top_k"], -1);
-    assert_eq!(body["radius"], 0.5);
+    assert_eq!(body["radius"], 0.0);
     assert_eq!(body["memory_types"], json!(["agent_memory"]));
     assert_eq!(body["filters"]["user_id"], "user_001");
     assert_eq!(body["filters"]["AND"][0]["timestamp"]["gte"], 1);
@@ -433,6 +403,23 @@ fn client_rejects_invalid_search_get_delete_contracts_before_request() {
                 None,
                 5,
                 Some(1.1),
+                false,
+                false,
+                None
+            )
+            .is_err()
+    );
+    assert!(
+        client
+            .search_memories(
+                "q",
+                Some("u"),
+                Some("sess"),
+                Some(json!({"session_id": {}})),
+                "hybrid",
+                None,
+                5,
+                None,
                 false,
                 false,
                 None

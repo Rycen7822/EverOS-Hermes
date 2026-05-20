@@ -27,20 +27,10 @@ def test_endpoint_whitelist_excludes_group_sender_storage():
 
 
 def test_contract_document_covers_scope_and_blacklist():
+    from everos_hermes.schemas import CLOUD_V1_ENDPOINTS
+
     text = open("docs/everos_cloud_v1_contract.md", encoding="utf-8").read()
-    for path in [
-        "POST /api/v1/memories",
-        "POST /api/v1/memories/agent",
-        "POST /api/v1/memories/flush",
-        "POST /api/v1/memories/agent/flush",
-        "POST /api/v1/memories/get",
-        "POST /api/v1/memories/search",
-        "POST /api/v1/memories/delete",
-        "GET /api/v1/tasks/{task_id}",
-        "GET /api/v1/settings",
-        "PUT /api/v1/settings",
-    ]:
-        assert path in text
-    assert "group" in text.lower()
-    assert "multimodal" in text.lower()
-    assert "out of scope" in text.lower()
+    for path in CLOUD_V1_ENDPOINTS.values():
+        assert path.replace("/api/v1/tasks/", "/api/v1/tasks/") in text
+    for term in ["PUT /api/v1/settings", "group", "multimodal", "out of scope"]:
+        assert term in text.lower() if term.islower() else term in text
