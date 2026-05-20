@@ -90,6 +90,7 @@ def _format_profiles(items: list[Any], *, max_items: int) -> list[str]:
             if text:
                 lines.append(f"- {text[:500]}")
             continue
+        before = len(lines)
         profile_data = item.get("profile_data") if isinstance(item.get("profile_data"), dict) else item
         for key in ("explicit_info", "implicit_traits", "preferences", "facts", "traits"):
             value = profile_data.get(key) if isinstance(profile_data, dict) else None
@@ -100,8 +101,10 @@ def _format_profiles(items: list[Any], *, max_items: int) -> list[str]:
                     lines.append(f"- {label}: {text[:500]}")
                     if len(lines) >= max_items:
                         return lines
-        if not lines:
+        if len(lines) == before:
             lines.append(f"- {compact_json(item)[:700]}")
+            if len(lines) >= max_items:
+                return lines
     return lines
 
 

@@ -272,11 +272,6 @@ pub fn normalize_import_messages(
     Ok((normalized, warnings))
 }
 
-fn batched(items: &[Value], batch_size: usize) -> Vec<Vec<Value>> {
-    let size = batch_size.clamp(1, 100);
-    items.chunks(size).map(|chunk| chunk.to_vec()).collect()
-}
-
 fn json_bytes(value: &Value) -> usize {
     serde_json::to_vec(value)
         .map(|bytes| bytes.len())
@@ -288,30 +283,29 @@ fn batch_payload_bytes(batch: &[Value]) -> usize {
 }
 
 fn message_metrics(messages: &[Value], batch_size: usize) -> Value {
-    let batches = batched(messages, batch_size);
-    let content_lengths: Vec<usize> = messages
-        .iter()
-        .map(|message| {
-            message
-                .get("content")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .chars()
-                .count()
-        })
-        .collect();
-    let total_content_chars: usize = content_lengths.iter().sum();
-    let max_content_chars = content_lengths.into_iter().max().unwrap_or(0);
-    let max_batch_payload_bytes = batches
-        .iter()
-        .map(|batch| batch_payload_bytes(batch))
+    let size = batch_size.clamp(1, 100);
+    let mut total_content_chars = 0usize;
+    let mut max_content_chars = 0usize;
+    for message in messages {
+        let len = message
+            .get("content")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .chars()
+            .count();
+        total_content_chars += len;
+        max_content_chars = max_content_chars.max(len);
+    }
+    let max_batch_payload_bytes = messages
+        .chunks(size)
+        .map(batch_payload_bytes)
         .max()
         .unwrap_or(0);
     json!({
         "total_messages": messages.len(),
-        "batch_count": batches.len(),
+        "batch_count": messages.chunks(size).len(),
         "requested_batch_size": batch_size,
-        "effective_batch_size": batch_size.clamp(1, 100),
+        "effective_batch_size": size,
         "total_content_chars": total_content_chars,
         "max_content_chars": max_content_chars,
         "estimated_payload_bytes": batch_payload_bytes(messages),
@@ -552,12 +546,12 @@ fn submit_batch_with_adaptive_split(
     user_id: &str,
     session_id: Option<&str>,
     scope: &str,
-    batch: Vec<Value>,
+    batch: &[Value],
     batch_index: usize,
     split_from: Option<usize>,
     batch_reports: &mut Vec<Value>,
 ) -> (usize, usize, usize) {
-    match client.add_memories_scoped(user_id, session_id, batch.clone(), true, scope) {
+    match client.add_memories_scoped(user_id, session_id, batch.to_vec(), true, scope) {
         Ok(response) => {
             let queued = batch.len();
             batch_reports.push(json!({
@@ -565,7 +559,7 @@ fn submit_batch_with_adaptive_split(
                 "split_from": split_from,
                 "ok": true,
                 "message_count": queued,
-                "payload_bytes": batch_payload_bytes(&batch),
+                "payload_bytes": batch_payload_bytes(batch),
                 "status": response.pointer("/data/status").and_then(Value::as_str).unwrap_or("queued"),
                 "task_id": response.pointer("/data/task_id").and_then(Value::as_str).unwrap_or(""),
                 "response": response,
@@ -579,7 +573,7 @@ fn submit_batch_with_adaptive_split(
                 "split_from": split_from,
                 "ok": false,
                 "message_count": batch.len(),
-                "payload_bytes": batch_payload_bytes(&batch),
+                "payload_bytes": batch_payload_bytes(batch),
                 "error": sanitized_error_message(&err),
                 "retryable": true,
                 "split": true,
@@ -591,7 +585,7 @@ fn submit_batch_with_adaptive_split(
                 user_id,
                 session_id,
                 scope,
-                batch[..mid].to_vec(),
+                &batch[..mid],
                 batch_index,
                 Some(batch_index),
                 batch_reports,
@@ -601,7 +595,7 @@ fn submit_batch_with_adaptive_split(
                 user_id,
                 session_id,
                 scope,
-                batch[mid..].to_vec(),
+                &batch[mid..],
                 batch_index,
                 Some(batch_index),
                 batch_reports,
@@ -619,7 +613,7 @@ fn submit_batch_with_adaptive_split(
                 "split_from": split_from,
                 "ok": false,
                 "message_count": failed,
-                "payload_bytes": batch_payload_bytes(&batch),
+                "payload_bytes": batch_payload_bytes(batch),
                 "error": sanitized_error_message(&err),
                 "retryable": true,
             }));
@@ -699,12 +693,12 @@ pub fn import_and_verify(
         }
         return Ok(payload);
     }
-    let batches = batched(&messages, batch_size);
+    let size = batch_size.clamp(1, 100);
     let mut batch_reports = Vec::new();
     let mut queued_count = 0usize;
     let mut failed_count = 0usize;
     let mut split_count = 0usize;
-    for (index, batch) in batches.into_iter().enumerate() {
+    for (index, batch) in messages.chunks(size).enumerate() {
         let (queued, failed, splits) = submit_batch_with_adaptive_split(
             client,
             user_id,

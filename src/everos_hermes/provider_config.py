@@ -28,7 +28,6 @@ _DEFAULT_CONFIG: dict[str, Any] = {
     "agent_visibility_timeout": 30.0,
     "agent_visibility_get_page_size": 20,
     "agent_visibility_retry_flush_attempts": 1,
-    "agent_visibility_retry_flush_backoff_ms": 250,
     "agentic_timeout": 60.0,
     "max_context_items": 8,
     "timeout": 10.0,
@@ -150,7 +149,6 @@ def _normalize_config(config: dict[str, Any]) -> dict[str, Any]:
         ("agent_visibility_top_k", 1, 20),
         ("agent_visibility_get_page_size", 1, 100),
         ("agent_visibility_retry_flush_attempts", 1, 5),
-        ("agent_visibility_retry_flush_backoff_ms", 0, 2000),
     ):
         try:
             out[key] = max(low, min(high, int(out.get(key, _DEFAULT_CONFIG[key]))))

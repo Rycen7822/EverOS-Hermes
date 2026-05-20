@@ -1,0 +1,89 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "request_json_200_object_adds_status_code",
+      "operation": "request_json",
+      "request": {
+        "method": "GET",
+        "path": "/api/v1/settings"
+      },
+      "server_response": {
+        "status": 200,
+        "body": {
+          "data": {
+            "timezone": "UTC"
+          }
+        }
+      },
+      "expected_response": {
+        "data": {
+          "timezone": "UTC"
+        },
+        "status_code": 200
+      }
+    },
+    {
+      "name": "request_json_200_array_wraps_data_and_status_code",
+      "operation": "request_json",
+      "request": {
+        "method": "GET",
+        "path": "/api/v1/tasks"
+      },
+      "server_response": {
+        "status": 200,
+        "body": [
+          {
+            "id": "task-1"
+          }
+        ]
+      },
+      "expected_response": {
+        "data": [
+          {
+            "id": "task-1"
+          }
+        ],
+        "status_code": 200
+      }
+    },
+    {
+      "name": "request_json_204_empty_body",
+      "operation": "request_json",
+      "request": {
+        "method": "GET",
+        "path": "/api/v1/no-content"
+      },
+      "server_response": {
+        "status": 204,
+        "body": null
+      },
+      "expected_response": {
+        "ok": true,
+        "status_code": 204
+      }
+    },
+    {
+      "name": "delete_204_single_returns_deleted_mode",
+      "operation": "delete_memories",
+      "args": {
+        "memory_id": "mem-1"
+      },
+      "expected_request": {
+        "body": {
+          "memory_id": "mem-1"
+        }
+      },
+      "server_response": {
+        "status": 204,
+        "body": null
+      },
+      "expected_response": {
+        "ok": true,
+        "status_code": 204,
+        "deleted": true,
+        "mode": "single"
+      }
+    }
+  ]
+}

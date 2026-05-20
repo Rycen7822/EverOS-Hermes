@@ -1,0 +1,63 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "search_method_trim_lower",
+      "surface": "client.search",
+      "args": {
+        "query": "coffee",
+        "user_id": "u1",
+        "method": " HYBRID "
+      },
+      "expect_ok": true,
+      "expected_request": {
+        "path": "/api/v1/memories/search",
+        "body_subset": {
+          "method": "hybrid"
+        }
+      }
+    },
+    {
+      "name": "get_rank_order_trim_lower",
+      "surface": "client.get",
+      "args": {
+        "user_id": "u1",
+        "memory_type": "profile",
+        "rank_order": " DESC "
+      },
+      "expect_ok": true,
+      "expected_request": {
+        "path": "/api/v1/memories/get",
+        "body_subset": {
+          "rank_order": "desc"
+        }
+      }
+    },
+    {
+      "name": "mcp_scope_agent_conflict",
+      "surface": "mcp.add_memories",
+      "args": {
+        "messages": [
+          {
+            "role": "user",
+            "timestamp": 1711900000000,
+            "content": "hello"
+          }
+        ],
+        "scope": "personal",
+        "agent": true
+      },
+      "expect_ok": false,
+      "error_contains": "scope"
+    },
+    {
+      "name": "mcp_timeout_must_be_positive",
+      "surface": "mcp.flush",
+      "args": {
+        "timeout": 0
+      },
+      "expect_ok": false,
+      "error_contains": "timeout"
+    }
+  ]
+}

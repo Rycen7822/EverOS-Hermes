@@ -12,7 +12,6 @@ def test_provider_agent_visibility_config_normalizes_defaults_and_overrides():
     assert defaults["agent_visibility_timeout"] == 30.0
     assert defaults["agent_visibility_get_page_size"] == 20
     assert defaults["agent_visibility_retry_flush_attempts"] == 1
-    assert defaults["agent_visibility_retry_flush_backoff_ms"] == 250
 
     custom = _normalize_config(
         {
@@ -23,7 +22,6 @@ def test_provider_agent_visibility_config_normalizes_defaults_and_overrides():
             "agent_visibility_timeout": 0,
             "agent_visibility_get_page_size": 200,
             "agent_visibility_retry_flush_attempts": 9,
-            "agent_visibility_retry_flush_backoff_ms": 5000,
         }
     )
     assert custom["agent_visibility_verify_after_write"] is True
@@ -33,7 +31,6 @@ def test_provider_agent_visibility_config_normalizes_defaults_and_overrides():
     assert custom["agent_visibility_timeout"] == 1.0
     assert custom["agent_visibility_get_page_size"] == 100
     assert custom["agent_visibility_retry_flush_attempts"] == 5
-    assert custom["agent_visibility_retry_flush_backoff_ms"] == 2000
 
 
 
@@ -771,3 +768,38 @@ def test_provider_config_module_exports_legacy_normalizer():
     assert provider._normalize_config is _normalize_config
     assert _DEFAULT_CONFIG["base_url"]
     assert _normalize_config({"top_k": "999", "memory_types": "profile,episodic_memory"})["top_k"] == 20
+
+
+
+def test_provider_agent_save_visibility_audit_updates_last_status_and_payload(monkeypatch, tmp_path):
+    from everos_hermes.provider import EverOSMemoryProvider
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def add_memories(self, **kwargs):
+            return {"data": {"status": "queued", "task_id": "task-agent"}}
+
+        def flush_memories(self, **kwargs):
+            return {"data": {"status": "success", "task_id": "flush-agent"}}
+
+        def search_memories(self, **kwargs):
+            return {"data": {"agent_memory": []}}
+
+        def get_memories(self, **kwargs):
+            return {"data": {"items": []}}
+
+    (tmp_path / "everos.json").write_text('{"agent_visibility_verify_after_flush": true}\n', encoding="utf-8")
+    monkeypatch.setenv("EVEROS_API_KEY", "sk-test")
+    monkeypatch.setenv("EVEROS_USER_ID", "u1")
+    monkeypatch.setattr("everos_hermes.provider.EverOSClient", FakeClient)
+    provider = EverOSMemoryProvider()
+    provider.initialize(session_id="sess-1", hermes_home=str(tmp_path), platform="cli")
+
+    result = json.loads(provider.handle_tool_call("everos_memory_save", {"content": "agent note", "scope": "agent", "flush": True}))
+
+    assert result["agent_visibility"]["agent_raw_queued"] is True
+    assert result["agent_visibility"]["agent_flush"]["status"] == "success"
+    assert result["agent_visibility"]["agent_visibility_status"] == "not_visible"
+    assert provider._last_agent_visibility_status["agent_visibility_status"] == "not_visible"

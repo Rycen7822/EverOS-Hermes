@@ -7,9 +7,11 @@ from typing import Any
 
 from .agent_visibility import audit_agent_visibility, build_agent_visibility_report, workflow_status_from_agent_visibility
 from .client import DEFAULT_MEMORY_TYPES, EverOSClient, EverOSTimeoutError
+from .flush_retry import flush_memories_with_retry
 from .redaction import error_payload as generic_error_payload, sanitized_error_message
 from .response_normalization import count_hits
 from .schemas import normalize_scope, validate_messages
+from .tool_payloads import flush_result_payload as _base_flush_result_payload, timeout_payload as _base_timeout_payload
 
 
 def now_ms() -> int:
@@ -84,27 +86,18 @@ def save_result_payload(
 
 
 def flush_result_payload(response: dict[str, Any]) -> dict[str, Any]:
-    data = response.get("data", {}) if isinstance(response, dict) else {}
-    payload: dict[str, Any] = {"ok": True, "status": "success"}
-    if isinstance(data, dict):
-        for key in ("status", "request_id", "task_id", "message"):
-            if data.get(key):
-                payload[key] = data[key]
+    payload = _base_flush_result_payload(response)
+    payload.setdefault("status", "success")
     if isinstance(response, dict) and response.get("status_code"):
         payload["status_code"] = response.get("status_code")
     return payload
 
 
 def timeout_payload(operation: str, exc: EverOSTimeoutError) -> dict[str, Any]:
-    return {
-        "ok": False,
-        "operation": operation,
-        "status": "timeout",
-        "error_code": "timeout",
-        "message": sanitized_error_message(exc),
-        "retryable": bool(getattr(exc, "retryable", True)),
-        "suggested_next_actions": list(getattr(exc, "suggested_next_actions", [])),
-    }
+    payload = _base_timeout_payload(operation, exc)
+    payload["status"] = "timeout"
+    payload["error_code"] = "timeout"
+    return payload
 
 
 def verification_error_payload(exc: Exception) -> dict[str, Any]:
@@ -326,7 +319,13 @@ def save_and_verify(
     flush_error: Exception | None = None
     if flush:
         try:
-            flush_result = client.flush_memories(user_id=user_id, session_id=session_id, scope=resolved_scope, timeout=flush_timeout)
+            flush_result, _attempt_count = flush_memories_with_retry(
+                client,
+                user_id=user_id,
+                session_id=session_id,
+                scope=resolved_scope,
+                timeout=flush_timeout,
+            )
         except EverOSTimeoutError as exc:
             flush_error = exc
         except Exception as exc:
@@ -406,14 +405,14 @@ def import_and_verify(
     resolved_scope = normalize_scope(scope)
     normalized, warnings = normalize_import_messages(messages, file_path, default_role=("assistant" if resolved_scope == "agent" else "user"))
     metrics = message_metrics(normalized, batch_size)
+    validation_errors: list[str] = []
     try:
         validate_messages(normalized, resolved_scope)
     except ValueError as exc:
         message = str(exc)
+        validation_errors.append(message)
         if message not in warnings:
             warnings.append(message)
-    fatal_tokens = ("tool_call_id", "empty", "timestamp", "role", "message_id", "1..500")
-    validation_warnings = [warning for warning in warnings if any(token in warning for token in fatal_tokens)]
     if dry_run:
         dry_run_actions = ["fix warnings before importing"] if warnings else ["rerun with dry_run=false to import messages"]
         return success_envelope(
@@ -428,7 +427,7 @@ def import_and_verify(
             verification={"status": "verification_skipped", "verified": None, "queries": []},
             suggested_next_actions=dry_run_actions,
         )
-    if validation_warnings:
+    if validation_errors:
         return error_envelope(
             workflow=workflow,
             error_code="validation_failed",
@@ -503,7 +502,14 @@ def import_and_verify(
     flush_payload = {"ok": None, "status": "not_requested"}
     if flush and queued_count:
         try:
-            flush_payload = flush_result_payload(client.flush_memories(user_id=user_id, session_id=session_id, scope=resolved_scope, timeout=flush_timeout))
+            flush_response, _attempt_count = flush_memories_with_retry(
+                client,
+                user_id=user_id,
+                session_id=session_id,
+                scope=resolved_scope,
+                timeout=flush_timeout,
+            )
+            flush_payload = flush_result_payload(flush_response)
         except EverOSTimeoutError as exc:
             flush_payload = timeout_payload("flush", exc)
         except Exception as exc:

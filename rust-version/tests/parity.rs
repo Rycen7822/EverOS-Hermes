@@ -83,6 +83,25 @@ fn one_request_server(response: Value) -> (String, thread::JoinHandle<String>) {
     (format!("http://{addr}"), handle)
 }
 
+fn one_status_empty_request_server(status: u16) -> (String, thread::JoinHandle<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let raw = read_http_request(&mut stream);
+        let reason = if status >= 400 {
+            "Internal Server Error"
+        } else {
+            "OK"
+        };
+        let reply =
+            format!("HTTP/1.1 {status} {reason}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        stream.write_all(reply.as_bytes()).unwrap();
+        raw
+    });
+    (format!("http://{addr}"), handle)
+}
+
 fn n_request_server(response: Value, count: usize) -> (String, thread::JoinHandle<Vec<String>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
@@ -178,6 +197,16 @@ fn mcp_schema_snapshot() -> Value {
                 let properties = input["properties"].as_object().unwrap();
                 let mut property_names = properties.keys().cloned().collect::<Vec<_>>();
                 property_names.sort();
+                let output = schema.get("outputSchema").unwrap_or(&Value::Null);
+                let output_properties = output
+                    .get("properties")
+                    .and_then(Value::as_object)
+                    .map(|properties| {
+                        let mut names = properties.keys().cloned().collect::<Vec<_>>();
+                        names.sort();
+                        names
+                    })
+                    .unwrap_or_default();
                 let annotations = schema
                     .get("annotations")
                     .cloned()
@@ -188,6 +217,8 @@ fn mcp_schema_snapshot() -> Value {
                     "description_summary": description_summary(schema.get("description")),
                     "required": sorted_string_values(input.get("required")),
                     "properties": property_names,
+                    "output_required": sorted_string_values(output.get("required")),
+                    "output_properties": output_properties,
                     "annotations": annotations,
                 })
             })
@@ -697,7 +728,6 @@ fn provider_agent_visibility_config_defaults_and_load_overrides() {
     assert_eq!(defaults.agent_visibility_timeout, 30.0);
     assert_eq!(defaults.agent_visibility_get_page_size, 20);
     assert_eq!(defaults.agent_visibility_retry_flush_attempts, 1);
-    assert_eq!(defaults.agent_visibility_retry_flush_backoff_ms, 250);
 
     let home = temp_home("provider_visibility_config");
     fs::write(
@@ -709,8 +739,7 @@ fn provider_agent_visibility_config_defaults_and_load_overrides() {
             "agent_visibility_top_k": 99,
             "agent_visibility_timeout": 0.1,
             "agent_visibility_get_page_size": 200,
-            "agent_visibility_retry_flush_attempts": 9,
-            "agent_visibility_retry_flush_backoff_ms": 5000
+            "agent_visibility_retry_flush_attempts": 9
         })
         .to_string(),
     )
@@ -723,7 +752,6 @@ fn provider_agent_visibility_config_defaults_and_load_overrides() {
     assert_eq!(loaded.agent_visibility_timeout, 1.0);
     assert_eq!(loaded.agent_visibility_get_page_size, 100);
     assert_eq!(loaded.agent_visibility_retry_flush_attempts, 5);
-    assert_eq!(loaded.agent_visibility_retry_flush_backoff_ms, 2000);
 }
 
 #[test]
@@ -3075,4 +3103,173 @@ fn rust_cli_provider_helper_names_make_short_lived_boundary_explicit() {
     assert!(!source.contains("fn provider_from_payload("));
     assert!(!source.contains("fn apply_state_value("));
     assert!(!source.contains("fn normalize_provider_init("));
+}
+
+#[test]
+fn client_response_envelope_contract_cases() {
+    let cases = snapshot_json("http_response_envelope_cases.json");
+    for case in cases["cases"].as_array().unwrap() {
+        match case["operation"].as_str().unwrap() {
+            "request_json" => {
+                let response = &case["server_response"];
+                let request = &case["request"];
+                let status = response["status"].as_u64().unwrap();
+                let actual = if status == 204 {
+                    let (base_url, handle) = one_status_empty_request_server(204);
+                    let client = EverOSClient::new("test-key", &base_url, 10.0).unwrap();
+                    let actual = client
+                        .request_json(
+                            request["method"].as_str().unwrap(),
+                            request["path"].as_str().unwrap(),
+                            None,
+                            None,
+                        )
+                        .unwrap();
+                    handle.join().unwrap();
+                    actual
+                } else {
+                    let (base_url, handle) = one_request_server(response["body"].clone());
+                    let client = EverOSClient::new("test-key", &base_url, 10.0).unwrap();
+                    let actual = client
+                        .request_json(
+                            request["method"].as_str().unwrap(),
+                            request["path"].as_str().unwrap(),
+                            None,
+                            None,
+                        )
+                        .unwrap();
+                    handle.join().unwrap();
+                    actual
+                };
+                assert_eq!(actual, case["expected_response"]);
+            }
+            "delete_memories" => {
+                let (base_url, handle) = one_status_empty_request_server(204);
+                let client = EverOSClient::new("test-key", &base_url, 10.0).unwrap();
+                let args = &case["args"];
+                let actual = client
+                    .delete_memories(args["memory_id"].as_str(), None, None, None)
+                    .unwrap();
+                let request = handle.join().unwrap();
+                assert_eq!(parse_http_body(&request), case["expected_request"]["body"]);
+                assert_eq!(actual, case["expected_response"]);
+            }
+            other => panic!("unsupported http response contract case: {other}"),
+        }
+    }
+}
+
+#[test]
+fn client_param_normalization_contract_cases() {
+    let cases = snapshot_json("client_param_normalization_cases.json");
+    for case in cases["cases"].as_array().unwrap() {
+        match case["surface"].as_str().unwrap() {
+            "client.search" => {
+                let (base_url, handle) = one_request_server(json!({"data":{"episodes":[]}}));
+                let client = EverOSClient::new("test-key", &base_url, 10.0).unwrap();
+                let args = &case["args"];
+                client
+                    .search_memories(
+                        args["query"].as_str().unwrap(),
+                        args["user_id"].as_str(),
+                        None,
+                        None,
+                        None,
+                        args["method"].as_str().unwrap(),
+                        None,
+                        5,
+                        None,
+                        false,
+                        false,
+                        None,
+                    )
+                    .unwrap();
+                let body = parse_http_body(&handle.join().unwrap());
+                assert_eq!(
+                    body["method"],
+                    case["expected_request"]["body_subset"]["method"]
+                );
+            }
+            "client.get" => {
+                let (base_url, handle) = one_request_server(json!({"data":{"items":[]}}));
+                let client = EverOSClient::new("test-key", &base_url, 10.0).unwrap();
+                let args = &case["args"];
+                client
+                    .get_memories(
+                        args["user_id"].as_str(),
+                        None,
+                        None,
+                        None,
+                        args["memory_type"].as_str().unwrap(),
+                        1,
+                        20,
+                        "timestamp",
+                        args["rank_order"].as_str().unwrap(),
+                    )
+                    .unwrap();
+                let body = parse_http_body(&handle.join().unwrap());
+                assert_eq!(
+                    body["rank_order"],
+                    case["expected_request"]["body_subset"]["rank_order"]
+                );
+            }
+            "mcp.add_memories" => {
+                let err =
+                    everos_hermes_rust::mcp::call_tool("everos_add_memories", case["args"].clone())
+                        .unwrap_err()
+                        .to_string();
+                assert!(err.contains(case["error_contains"].as_str().unwrap()));
+            }
+            "mcp.flush" => {
+                let _guard = ENV_LOCK.lock().unwrap();
+                set_env("EVEROS_API_KEY", "test-key");
+                set_env("EVEROS_USER_ID", "u1");
+                set_env("EVEROS_BASE_URL", "http://127.0.0.1:9");
+                let err = everos_hermes_rust::mcp::call_tool(
+                    "everos_flush_memories",
+                    case["args"].clone(),
+                )
+                .unwrap_err()
+                .to_string();
+                assert!(err.contains(case["error_contains"].as_str().unwrap()));
+                remove_env("EVEROS_API_KEY");
+                remove_env("EVEROS_USER_ID");
+                remove_env("EVEROS_BASE_URL");
+            }
+            other => panic!("unsupported param normalization contract case: {other}"),
+        }
+    }
+}
+
+#[test]
+fn client_session_filter_requires_exact_non_empty_operator_and_group_helpers_fail_closed() {
+    let client = EverOSClient::new("test-key", "http://127.0.0.1:9", 0.05).unwrap();
+    for filters in [
+        json!({"session_id": {}}),
+        json!({"session_id": {"eq": ""}}),
+        json!({"session_id": {"eq": 123}}),
+        json!({"session_id": ""}),
+        json!({"AND": [{"session_id": {"eq": 123}}]}),
+    ] {
+        assert!(
+            client
+                .search_memories(
+                    "coffee",
+                    Some("u1"),
+                    None,
+                    Some("sess"),
+                    Some(filters),
+                    "hybrid",
+                    None,
+                    5,
+                    None,
+                    false,
+                    false,
+                    None,
+                )
+                .is_err()
+        );
+    }
+    assert!(client.add_group_memories("g1", vec![], None, true).is_err());
+    assert!(client.flush_group_memories("g1", None).is_err());
 }

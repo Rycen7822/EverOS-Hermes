@@ -56,7 +56,7 @@ pub fn run_stdio() -> anyhow::Result<()> {
 }
 
 pub fn tool_definitions() -> Vec<Value> {
-    vec![
+    let mut tools = vec![
         json!({
             "name": "everos_save_memory",
             "title": "Save EverOS Memory",
@@ -543,6 +543,9 @@ pub fn tool_definitions() -> Vec<Value> {
                     "status": {
                         "type": "string"
                     },
+                    "retryable": {
+                        "type": "boolean"
+                    },
                     "suggested_next_actions": {
                         "type": "array",
                         "items": {
@@ -622,6 +625,9 @@ pub fn tool_definitions() -> Vec<Value> {
                     },
                     "status": {
                         "type": "string"
+                    },
+                    "retryable": {
+                        "type": "boolean"
                     },
                     "suggested_next_actions": {
                         "type": "array",
@@ -729,6 +735,9 @@ pub fn tool_definitions() -> Vec<Value> {
                     "status": {
                         "type": "string"
                     },
+                    "retryable": {
+                        "type": "boolean"
+                    },
                     "suggested_next_actions": {
                         "type": "array",
                         "items": {
@@ -832,6 +841,9 @@ pub fn tool_definitions() -> Vec<Value> {
                     "status": {
                         "type": "string"
                     },
+                    "retryable": {
+                        "type": "boolean"
+                    },
                     "suggested_next_actions": {
                         "type": "array",
                         "items": {
@@ -847,7 +859,29 @@ pub fn tool_definitions() -> Vec<Value> {
                 "openWorldHint": true
             }
         }),
-    ]
+    ];
+    let output_schema = text_result_output_schema();
+    for tool in &mut tools {
+        match tool.as_object_mut() {
+            Some(map) if !map.contains_key("outputSchema") => {
+                map.insert("outputSchema".to_string(), output_schema.clone());
+            }
+            _ => {}
+        }
+    }
+    tools
+}
+
+fn text_result_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "result": {
+                "type": "string"
+            }
+        },
+        "required": ["result"]
+    })
 }
 
 pub fn handle_jsonrpc_message(request: &Value) -> Option<Value> {
@@ -901,7 +935,7 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
             let session_id = optional_string(&value, "session_id");
             let flush = bool_arg(&value, "flush", true);
             let async_mode = bool_arg(&value, "async_mode", true);
-            let flush_timeout = float_arg(&value, "flush_timeout");
+            let flush_timeout = timeout_arg(&value, "flush_timeout")?;
             let scope = scope_from_args(&value)?;
             let role = optional_string(&value, "role").unwrap_or_else(|| {
                 if scope == "agent" {
@@ -965,7 +999,7 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
             let async_mode = bool_arg(&value, "async_mode", true);
             let scope = scope_from_args(&value)?;
             let flush = bool_arg(&value, "flush", false);
-            let flush_timeout = float_arg(&value, "flush_timeout");
+            let flush_timeout = timeout_arg(&value, "flush_timeout")?;
             let client = make_client()?;
             let result = client.add_memories_scoped(
                 &uid,
@@ -1036,7 +1070,7 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
             let uid = optional_string(&value, "user_id").unwrap_or_else(default_user_id);
             let session_id = optional_string(&value, "session_id");
             let scope = scope_from_args(&value)?;
-            let timeout = float_arg(&value, "timeout");
+            let timeout = timeout_arg(&value, "timeout")?;
             let client = make_client()?;
             match flush_memories_with_retry(
                 &client,
@@ -1074,11 +1108,13 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
             let query = required_string(&value, "query")?;
             let uid = optional_string(&value, "user_id").unwrap_or_else(default_user_id);
             let session_id = optional_string(&value, "session_id");
-            let method = optional_string(&value, "method").unwrap_or_else(|| "hybrid".to_string());
+            let method = optional_string(&value, "method")
+                .unwrap_or_else(|| "hybrid".to_string())
+                .to_ascii_lowercase();
             let top_k = int_arg(&value, "top_k", 5)?;
             let filters = value.get("filters").cloned();
             let radius = float_arg(&value, "radius");
-            let timeout = float_arg(&value, "timeout").or(if method == "agentic" {
+            let timeout = timeout_arg(&value, "timeout")?.or(if method == "agentic" {
                 Some(60.0)
             } else {
                 None
@@ -1238,7 +1274,7 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
             let memory_types = string_array_arg(&value, "memory_types");
             let memory_types = (!memory_types.is_empty()).then_some(memory_types);
             let top_k = int_arg(&value, "top_k", 5)?;
-            let timeout = float_arg(&value, "timeout");
+            let timeout = timeout_arg(&value, "timeout")?;
             let queries = string_array_arg(&value, "verification_queries");
             if queries.is_empty() {
                 anyhow::bail!("verification_queries is required");
@@ -1262,7 +1298,7 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
             let role = optional_string(&value, "role");
             let tool_call_id = optional_string(&value, "tool_call_id");
             let flush = bool_arg(&value, "flush", true);
-            let flush_timeout = float_arg(&value, "flush_timeout");
+            let flush_timeout = timeout_arg(&value, "flush_timeout")?;
             let mut queries = string_array_arg(&value, "verification_queries");
             if let Some(query) = optional_string(&value, "verification_query") {
                 queries.insert(0, query);
@@ -1270,7 +1306,7 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
             let memory_types = string_array_arg(&value, "memory_types");
             let memory_types = (!memory_types.is_empty()).then_some(memory_types);
             let top_k = int_arg(&value, "top_k", 5)?;
-            let timeout = float_arg(&value, "timeout");
+            let timeout = timeout_arg(&value, "timeout")?;
             Ok(pretty_json(&workflows::save_and_verify(
                 &make_client()?,
                 &content,
@@ -1296,12 +1332,12 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
             let dry_run = bool_arg(&value, "dry_run", false);
             let batch_size = uint_arg(&value, "batch_size", 50)? as usize;
             let flush = bool_arg(&value, "flush", true);
-            let flush_timeout = float_arg(&value, "flush_timeout");
+            let flush_timeout = timeout_arg(&value, "flush_timeout")?;
             let queries = string_array_arg(&value, "verification_queries");
             let memory_types = string_array_arg(&value, "memory_types");
             let memory_types = (!memory_types.is_empty()).then_some(memory_types);
             let top_k = int_arg(&value, "top_k", 5)?;
-            let timeout = float_arg(&value, "timeout");
+            let timeout = timeout_arg(&value, "timeout")?;
             let workflow = if name == "everos_batch_ingest" {
                 "batch_ingest"
             } else {
@@ -1657,16 +1693,45 @@ fn float_arg(value: &Value, key: &str) -> Option<f64> {
         .filter(|value| value.is_finite())
 }
 
+fn timeout_arg(value: &Value, key: &str) -> anyhow::Result<Option<f64>> {
+    let Some(raw) = value.get(key) else {
+        return Ok(None);
+    };
+    if raw.is_null() || raw.as_str().is_some_and(|text| text.trim().is_empty()) {
+        return Ok(None);
+    }
+    let parsed = raw
+        .as_f64()
+        .or_else(|| {
+            raw.as_str()
+                .and_then(|text| text.trim().parse::<f64>().ok())
+        })
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| anyhow::anyhow!("{key} must be a positive number"))?;
+    if parsed <= 0.0 {
+        anyhow::bail!("{key} must be a positive number");
+    }
+    Ok(Some(parsed))
+}
+
 fn scope_from_args(value: &Value) -> anyhow::Result<String> {
-    let scope = optional_string(value, "scope").unwrap_or_else(|| {
-        if bool_arg(value, "agent", false) {
-            "agent".to_string()
-        } else {
-            "personal".to_string()
-        }
-    });
+    let agent = value.get("agent").map(|_| bool_arg(value, "agent", false));
+    let scope = optional_string(value, "scope")
+        .map(|scope| scope.to_ascii_lowercase())
+        .unwrap_or_else(|| {
+            if agent.unwrap_or(false) {
+                "agent".to_string()
+            } else {
+                "personal".to_string()
+            }
+        });
     match scope.as_str() {
-        "personal" | "agent" => Ok(scope),
+        "personal" | "agent" => {
+            if matches!(agent, Some(agent) if agent != (scope == "agent")) {
+                anyhow::bail!("scope conflicts with backward-compatible agent alias");
+            }
+            Ok(scope)
+        }
         other => anyhow::bail!("scope must be personal or agent, got {other}"),
     }
 }

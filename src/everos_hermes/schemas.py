@@ -213,8 +213,23 @@ def _validate_filter_node(node: Any, *, path: str) -> None:
                 _validate_filter_node(child, path=f"{path}.{key}[{i}]")
         elif key == "timestamp":
             _validate_filter_value(value, path=f"{path}.timestamp", allow_operators=True)
+        elif key == "session_id":
+            _validate_session_id_filter_value(value, path=f"{path}.session_id")
         else:
             _validate_filter_value(value, path=f"{path}.{key}", allow_operators=True)
+
+
+def _validate_session_id_filter_value(value: Any, *, path: str) -> None:
+    if isinstance(value, str) and value.strip():
+        return
+    if isinstance(value, dict):
+        if set(value) != {"eq"}:
+            raise ValueError(f"{path} operator object must be {{'eq': '<non-empty string>'}}")
+        eq = value.get("eq")
+        if isinstance(eq, str) and eq.strip():
+            return
+        raise ValueError(f"{path}.eq must be a non-empty string")
+    raise ValueError(f"{path} must be a non-empty string or eq operator object")
 
 
 def _validate_filter_value(value: Any, *, path: str, allow_operators: bool) -> None:

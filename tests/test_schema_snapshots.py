@@ -56,6 +56,7 @@ def _mcp_snapshot() -> list[dict[str, Any]]:
     for name in mcp_server.TOOL_NAMES:
         tool = tools[name]
         parameters = tool.parameters
+        output_schema = tool.output_schema or {}
         snapshot.append(
             {
                 "name": name,
@@ -63,6 +64,8 @@ def _mcp_snapshot() -> list[dict[str, Any]]:
                 "description_summary": _description_summary(tool.description),
                 "required": sorted(parameters.get("required", [])),
                 "properties": sorted(parameters.get("properties", {}).keys()),
+                "output_required": sorted(output_schema.get("required", [])),
+                "output_properties": sorted(output_schema.get("properties", {}).keys()),
                 "annotations": _annotations_dict(tool.annotations),
             }
         )

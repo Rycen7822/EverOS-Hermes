@@ -6,14 +6,13 @@ use crate::flush_retry::flush_memories_with_retry;
 use crate::formatting::{format_search_context, pretty_json};
 use crate::policy::{should_skip_capture, should_skip_recall, stable_query_key};
 pub use crate::provider_tools::provider_tool_schemas;
-use crate::redaction::{error_payload, sanitized_error_message};
+use crate::redaction::{error_payload, sanitized_error_message, strip_context_blocks};
 use crate::response_normalization::{as_list as as_list_copy, response_data};
 use crate::trajectory::{
     TrajectoryBuildOptions, TrajectoryBuildResult,
     build_agent_trajectory_messages_with_options as build_trajectory_messages_with_options,
 };
 use crate::workflows;
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -23,7 +22,7 @@ use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,7 +47,6 @@ pub struct ProviderConfig {
     pub agent_visibility_timeout: f64,
     pub agent_visibility_get_page_size: usize,
     pub agent_visibility_retry_flush_attempts: usize,
-    pub agent_visibility_retry_flush_backoff_ms: u64,
     pub agentic_timeout: f64,
     pub max_context_items: u64,
     pub timeout: f64,
@@ -100,7 +98,6 @@ impl Default for ProviderConfig {
             agent_visibility_timeout: 30.0,
             agent_visibility_get_page_size: 20,
             agent_visibility_retry_flush_attempts: 1,
-            agent_visibility_retry_flush_backoff_ms: 250,
             agentic_timeout: 60.0,
             max_context_items: 8,
             timeout: 10.0,
@@ -683,7 +680,7 @@ impl EverOSProvider {
                 Some(session_id),
                 "agent",
                 None,
-                2,
+                self.config.agent_visibility_retry_flush_attempts,
             )?;
             flush_payload = Some(flush_result_payload_with_attempt(
                 &flush,
@@ -809,7 +806,7 @@ impl EverOSProvider {
                 session_id_opt,
                 &scope,
                 None,
-                2,
+                self.config.agent_visibility_retry_flush_attempts,
             ) {
                 Ok((response, attempt_count)) => Some(flush_result_payload_with_attempt(
                     &response,
@@ -918,7 +915,7 @@ impl EverOSProvider {
             as_bool(args.get("include_original_data"), false),
             as_bool(args.get("include_vectors"), false),
             Some(if method == "agentic" {
-                60.0
+                self.config.agentic_timeout
             } else {
                 self.config.timeout
             }),
@@ -968,7 +965,7 @@ impl EverOSProvider {
             if sid.is_empty() { None } else { Some(sid) },
             &scope,
             float_or_none(args.get("timeout")),
-            2,
+            self.config.agent_visibility_retry_flush_attempts,
         ) {
             Ok(result) => result,
             Err(err @ EverOSError::Timeout { .. }) => {
@@ -1257,12 +1254,6 @@ fn normalize_config_from_value(config: &mut ProviderConfig, value: &Value) {
     {
         config.agent_visibility_retry_flush_attempts = (value as usize).clamp(1, 5);
     }
-    if let Some(value) = map
-        .get("agent_visibility_retry_flush_backoff_ms")
-        .and_then(Value::as_u64)
-    {
-        config.agent_visibility_retry_flush_backoff_ms = value.clamp(0, 2_000);
-    }
     if let Some(value) = map.get("max_context_chars").and_then(Value::as_u64) {
         config.max_context_chars = (value as usize).clamp(1_000, 50_000);
     }
@@ -1410,11 +1401,7 @@ fn now_ms() -> u128 {
 }
 
 fn clean_content(text: &str) -> String {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?is)<memory-context>[\s\S]*?</memory-context>|<everos-context>[\s\S]*?</everos-context>").unwrap())
-        .replace_all(text, "")
-        .trim()
-        .to_string()
+    strip_context_blocks(text).trim().to_string()
 }
 
 fn tool_error(message: &str) -> String {

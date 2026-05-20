@@ -424,3 +424,91 @@ def test_update_settings_validates_strict_schema_and_returns_diff(monkeypatch):
     assert result["diff"]["timezone"] == {"before": "UTC", "after": "Asia/Tokyo"}
     with pytest.raises(ValueError, match="Unknown settings"):
         client.update_settings({"extraction_mode": "fast"})
+
+
+
+def test_request_json_success_envelope_contract_cases(monkeypatch):
+    from pathlib import Path
+
+    from everos_hermes.client import EverOSClient
+
+    cases = json.loads((Path(__file__).parent / "contracts" / "http_response_envelope_cases.json").read_text(encoding="utf-8"))["cases"]
+
+    for case in cases:
+        if case["operation"] != "request_json":
+            continue
+
+        def fake_urlopen(req, timeout, *, case=case):
+            response = case["server_response"]
+            return FakeHTTPResponse(response["body"], status=response["status"])
+
+        monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+        client = EverOSClient(api_key="sk-test")
+        request = case["request"]
+        assert client.request_json(request["method"], request["path"]) == case["expected_response"]
+
+
+def test_delete_memories_204_envelope_contract_case(monkeypatch):
+    from pathlib import Path
+
+    from everos_hermes.client import EverOSClient
+
+    case = next(
+        item
+        for item in json.loads((Path(__file__).parent / "contracts" / "http_response_envelope_cases.json").read_text(encoding="utf-8"))["cases"]
+        if item["operation"] == "delete_memories"
+    )
+    captured = {}
+
+    def fake_urlopen(req, timeout):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        response = case["server_response"]
+        return FakeHTTPResponse(response["body"], status=response["status"])
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    client = EverOSClient(api_key="sk-test")
+
+    assert client.delete_memories(**case["args"]) == case["expected_response"]
+    assert captured["body"] == case["expected_request"]["body"]
+
+
+def test_client_param_normalization_contract_cases(monkeypatch):
+    from pathlib import Path
+
+    from everos_hermes.client import EverOSClient
+
+    cases = json.loads((Path(__file__).parent / "contracts" / "client_param_normalization_cases.json").read_text(encoding="utf-8"))["cases"]
+    for case in cases:
+        if not case["surface"].startswith("client."):
+            continue
+        captured = {}
+
+        def fake_urlopen(req, timeout):
+            captured["path"] = "/" + req.full_url.split("/", 3)[3]
+            captured["body"] = json.loads(req.data.decode("utf-8"))
+            return FakeHTTPResponse({"data": {"items": [], "episodes": []}})
+
+        monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+        client = EverOSClient(api_key="sk-test")
+        if case["surface"] == "client.search":
+            client.search_memories(**case["args"])
+        elif case["surface"] == "client.get":
+            client.get_memories(**case["args"])
+        assert captured["path"] == case["expected_request"]["path"]
+        for key, value in case["expected_request"]["body_subset"].items():
+            assert captured["body"][key] == value
+
+
+def test_session_filter_requires_exact_non_empty_session_id_operator():
+    from everos_hermes.client import EverOSClient
+
+    client = EverOSClient(api_key="sk-test", base_url="http://127.0.0.1:9", timeout=0.1)
+    for filters in [
+        {"session_id": {}},
+        {"session_id": {"eq": ""}},
+        {"session_id": {"eq": 123}},
+        {"session_id": ""},
+        {"AND": [{"session_id": {"eq": 123}}]},
+    ]:
+        with pytest.raises(ValueError, match="session_id"):
+            client.search_memories(query="coffee", user_id="u1", session_id="sess", filters=filters)

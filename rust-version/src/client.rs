@@ -121,10 +121,12 @@ impl EverOSClient {
         }
         let parsed: Value = serde_json::from_str(&text)
             .map_err(|source| EverOSError::InvalidJson { url, source })?;
-        if parsed.is_object() {
-            Ok(parsed)
+        if let Value::Object(mut map) = parsed {
+            map.entry("status_code".to_string())
+                .or_insert_with(|| json!(status.as_u16()));
+            Ok(Value::Object(map))
         } else {
-            Ok(json!({"data": parsed}))
+            Ok(json!({"data": parsed, "status_code": status.as_u16()}))
         }
     }
 
@@ -174,17 +176,14 @@ impl EverOSClient {
 
     pub fn add_group_memories(
         &self,
-        group_id: &str,
-        messages: Vec<Value>,
-        group_meta: Option<Value>,
-        async_mode: bool,
+        _group_id: &str,
+        _messages: Vec<Value>,
+        _group_meta: Option<Value>,
+        _async_mode: bool,
     ) -> Result<Value> {
-        self.request_json(
-            "POST",
-            "/api/v1/memories/group",
-            Some(json!({"group_id": group_id, "group_meta": group_meta, "messages": messages, "async_mode": async_mode})),
-            None,
-        )
+        Err(EverOSError::Api(
+            "group memory is out of scope for this EverOS-Hermes release".to_string(),
+        ))
     }
 
     pub fn flush_memories(
@@ -222,13 +221,10 @@ impl EverOSClient {
         )
     }
 
-    pub fn flush_group_memories(&self, group_id: &str, timeout: Option<f64>) -> Result<Value> {
-        self.request_json(
-            "POST",
-            "/api/v1/memories/group/flush",
-            Some(json!({"group_id": group_id})),
-            timeout,
-        )
+    pub fn flush_group_memories(&self, _group_id: &str, _timeout: Option<f64>) -> Result<Value> {
+        Err(EverOSError::Api(
+            "group memory is out of scope for this EverOS-Hermes release".to_string(),
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -244,7 +240,14 @@ impl EverOSClient {
         rank_by: &str,
         rank_order: &str,
     ) -> Result<Value> {
-        validate_get_params(memory_type, page, page_size, rank_by, rank_order)?;
+        let normalized_rank_order = rank_order.trim().to_ascii_lowercase();
+        validate_get_params(
+            memory_type,
+            page,
+            page_size,
+            rank_by,
+            &normalized_rank_order,
+        )?;
         let resolved_filters = build_filters(user_id, group_id, session_id, filters)?;
         self.request_json(
             "POST",
@@ -255,7 +258,7 @@ impl EverOSClient {
                 "page": page,
                 "page_size": page_size,
                 "rank_by": rank_by,
-                "rank_order": rank_order,
+                "rank_order": normalized_rank_order,
             })),
             None,
         )
@@ -277,7 +280,8 @@ impl EverOSClient {
         include_vectors: bool,
         timeout: Option<f64>,
     ) -> Result<Value> {
-        validate_search_params(method, memory_types.as_deref(), top_k, radius)?;
+        let normalized_method = method.trim().to_ascii_lowercase();
+        validate_search_params(&normalized_method, memory_types.as_deref(), top_k, radius)?;
         let resolved_filters = build_filters(user_id, group_id, session_id, filters)?;
         let memory_types = memory_types.unwrap_or_else(|| {
             DEFAULT_MEMORY_TYPES
@@ -291,7 +295,7 @@ impl EverOSClient {
             Some(json!({
                 "query": query,
                 "filters": resolved_filters,
-                "method": method,
+                "method": normalized_method,
                 "memory_types": memory_types,
                 "top_k": top_k,
                 "radius": radius,
@@ -314,12 +318,25 @@ impl EverOSClient {
         session_id: Option<&str>,
     ) -> Result<Value> {
         validate_delete_request(memory_id, user_id, group_id, session_id)?;
-        let body = if let Some(memory_id) = memory_id.filter(|value| !value.trim().is_empty()) {
-            json!({"memory_id": memory_id})
-        } else {
-            json!({"user_id": user_id, "group_id": group_id, "session_id": session_id})
-        };
-        self.request_json("POST", "/api/v1/memories/delete", Some(body), None)
+        let (body, mode) =
+            if let Some(memory_id) = memory_id.filter(|value| !value.trim().is_empty()) {
+                (json!({"memory_id": memory_id}), "single")
+            } else {
+                (
+                    json!({"user_id": user_id, "session_id": session_id}),
+                    "batch",
+                )
+            };
+        let mut response =
+            self.request_json("POST", "/api/v1/memories/delete", Some(body), None)?;
+        if let (true, Some(map)) = (
+            response.get("status_code") == Some(&json!(204)),
+            response.as_object_mut(),
+        ) {
+            map.insert("deleted".to_string(), json!(true));
+            map.insert("mode".to_string(), json!(mode));
+        }
+        Ok(response)
     }
 
     pub fn get_task_status(&self, task_id: &str) -> Result<Value> {
@@ -772,20 +789,33 @@ fn validate_filter_map(map: &Map<String, Value>) -> Result<()> {
 }
 
 fn validate_string_or_operator(name: &str, value: &Value) -> Result<()> {
-    if value.as_str().is_some() {
-        return Ok(());
+    if let Some(text) = value.as_str() {
+        if !text.trim().is_empty() {
+            return Ok(());
+        }
+        return Err(EverOSError::Api(format!(
+            "filters.{name} must be a non-empty string"
+        )));
     }
     let Some(map) = value.as_object() else {
         return Err(EverOSError::Api(format!(
             "filters.{name} must be a string or operator object"
         )));
     };
-    for op in map.keys() {
-        if !matches!(op.as_str(), "eq") {
-            return Err(EverOSError::Api(format!(
-                "unsupported {name} operator {op}"
-            )));
-        }
+    if map.len() != 1 || !map.contains_key("eq") {
+        return Err(EverOSError::Api(format!(
+            "filters.{name} operator object must be {{\"eq\": \"<non-empty string>\"}}"
+        )));
+    }
+    let Some(text) = map.get("eq").and_then(Value::as_str) else {
+        return Err(EverOSError::Api(format!(
+            "filters.{name}.eq must be a non-empty string"
+        )));
+    };
+    if text.trim().is_empty() {
+        return Err(EverOSError::Api(format!(
+            "filters.{name}.eq must be a non-empty string"
+        )));
     }
     Ok(())
 }

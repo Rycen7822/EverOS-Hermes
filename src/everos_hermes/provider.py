@@ -593,28 +593,15 @@ class EverOSMemoryProvider(MemoryProvider):
             flush_error=flush_error,
         )
         if scope == "agent":
-            should_audit = bool(self._config.get("agent_visibility_verify_after_write")) or (
-                flush_result is not None and bool(self._config.get("agent_visibility_verify_after_flush"))
+            payload["agent_visibility"] = self._agent_visibility_after_write(
+                session_id=session_id,
+                texts=[content],
+                markers=["tool_save"],
+                agent_raw_queued=True,
+                agent_flush=payload.get("flush") if isinstance(payload.get("flush"), dict) else None,
+                flush_completed=flush_result is not None,
+                record_status=True,
             )
-            if should_audit:
-                visibility = audit_agent_visibility(
-                    client=self._client,
-                    user_id=self._user_id,
-                    session_id=session_id,
-                    queries=self._agent_visibility_queries([content], session_id=session_id, markers=["tool_save"]),
-                    top_k=int(self._config.get("agent_visibility_top_k", 5)),
-                    timeout=float(self._config.get("agent_visibility_timeout", 30.0)),
-                    get_page_size=int(self._config.get("agent_visibility_get_page_size", 20)),
-                )
-                visibility["agent_raw_queued"] = True
-                visibility["agent_flush"] = payload.get("flush") if isinstance(payload.get("flush"), dict) else None
-                payload["agent_visibility"] = visibility
-            else:
-                payload["agent_visibility"] = build_agent_visibility_report(
-                    agent_raw_queued=True,
-                    agent_flush=payload.get("flush") if isinstance(payload.get("flush"), dict) else None,
-                    checks=[],
-                )
         return json.dumps(payload, ensure_ascii=False)
 
     def _tool_search(self, args: dict[str, Any]) -> str:
@@ -639,7 +626,7 @@ class EverOSMemoryProvider(MemoryProvider):
             radius=_float_or_none(args.get("radius")),
             include_original_data=_as_bool(args.get("include_original_data", False), False),
             include_vectors=_as_bool(args.get("include_vectors", False), False),
-            timeout=60.0 if method == "agentic" else self._config["timeout"],
+            timeout=self._config["agentic_timeout"] if method == "agentic" else self._config["timeout"],
         )
         if response_format == "markdown":
             return format_search_context(response, max_items=self._config["max_context_items"]) or pretty_json(response)
@@ -808,6 +795,42 @@ class EverOSMemoryProvider(MemoryProvider):
             queries.append(f"session:{session_id}")
         return queries[:2] or ["agent memory"]
 
+    def _agent_visibility_after_write(
+        self,
+        *,
+        session_id: str | None,
+        texts: list[str],
+        markers: list[str] | None,
+        agent_raw_queued: bool,
+        agent_flush: dict[str, Any] | None,
+        flush_completed: bool,
+        record_status: bool = False,
+    ) -> dict[str, Any]:
+        should_audit = bool(self._config.get("agent_visibility_verify_after_write")) or (
+            flush_completed and bool(self._config.get("agent_visibility_verify_after_flush"))
+        )
+        if should_audit:
+            visibility = audit_agent_visibility(
+                client=self._client,
+                user_id=self._user_id,
+                session_id=session_id,
+                queries=self._agent_visibility_queries(texts, session_id=session_id, markers=markers),
+                top_k=int(self._config.get("agent_visibility_top_k", 5)),
+                timeout=float(self._config.get("agent_visibility_timeout", 30.0)),
+                get_page_size=int(self._config.get("agent_visibility_get_page_size", 20)),
+            )
+            visibility["agent_raw_queued"] = agent_raw_queued
+            visibility["agent_flush"] = agent_flush
+        else:
+            visibility = build_agent_visibility_report(
+                agent_raw_queued=agent_raw_queued,
+                agent_flush=agent_flush,
+                checks=[],
+            )
+        if record_status:
+            self._last_agent_visibility_status = visibility
+        return visibility
+
     def _write_agent_trajectory(self, result: TrajectoryBuildResult, *, session_id: str, flush_allowed: bool, operation: str) -> bool:
         if not result.messages or not self._client:
             return False
@@ -837,33 +860,15 @@ class EverOSMemoryProvider(MemoryProvider):
                 )
                 flush_payload = _flush_result_payload(flush, attempt_count=attempt_count)
                 self._last_agent_flush_status = {"ok": True, "scope": "agent", "status": _status(flush), "operation": operation}
-            should_audit = bool(self._config.get("agent_visibility_verify_after_write")) or (
-                flush_payload is not None and bool(self._config.get("agent_visibility_verify_after_flush"))
+            self._agent_visibility_after_write(
+                session_id=session_id,
+                texts=[str(message.get("content") or "") for message in result.messages],
+                markers=[operation],
+                agent_raw_queued=True,
+                agent_flush=flush_payload,
+                flush_completed=flush_payload is not None,
+                record_status=True,
             )
-            if should_audit:
-                queries = self._agent_visibility_queries(
-                    [str(message.get("content") or "") for message in result.messages],
-                    session_id=session_id,
-                    markers=[operation],
-                )
-                visibility = audit_agent_visibility(
-                    client=self._client,
-                    user_id=self._user_id,
-                    session_id=session_id,
-                    queries=queries,
-                    top_k=int(self._config.get("agent_visibility_top_k", 5)),
-                    timeout=float(self._config.get("agent_visibility_timeout", 30.0)),
-                    get_page_size=int(self._config.get("agent_visibility_get_page_size", 20)),
-                )
-                visibility["agent_raw_queued"] = True
-                visibility["agent_flush"] = flush_payload
-                self._last_agent_visibility_status = visibility
-            elif flush_payload is not None:
-                self._last_agent_visibility_status = build_agent_visibility_report(
-                    agent_raw_queued=True,
-                    agent_flush=flush_payload,
-                    checks=[],
-                )
             return True
         except Exception as exc:
             self._agent_saved_fingerprints.pop(result.fingerprint, None)

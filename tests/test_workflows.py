@@ -268,3 +268,104 @@ def test_verify_session_ingest_agent_scope_returns_visibility_checks():
     assert all(check["user_id"] == "u1" for check in checks)
     assert all(check["session_id"] == "s1" for check in checks)
     assert checks[0]["memory_types"] == ["agent_memory"]
+
+
+
+def test_import_duplicate_warning_does_not_block_non_dry_run():
+    class CaptureClient:
+        def __init__(self):
+            self.add_calls = []
+
+        def add_memories(self, **kwargs):
+            self.add_calls.append(kwargs)
+            return {"data": {"status": "queued", "task_id": "task-duplicate"}}
+
+    client = CaptureClient()
+    result = import_and_verify(
+        client=client,
+        user_id="u1",
+        session_id="s1",
+        messages=[
+            _message(1, timestamp=1712052000000, content="same"),
+            _message(2, timestamp=1712052000001, content="same"),
+        ],
+        dry_run=False,
+        batch_size=10,
+        flush=False,
+    )
+
+    assert result["ok"] is True
+    assert result["queued_count"] == 2
+    assert result["failed_count"] == 0
+    assert len(client.add_calls) == 1
+    assert any("duplicate" in warning for warning in result["warnings"])
+
+
+def test_import_missing_tool_call_id_stays_fatal_before_write():
+    result = import_and_verify(
+        client=NoWriteClient(),
+        user_id="u1",
+        session_id="s1",
+        scope="agent",
+        messages=[{"role": "tool", "timestamp": 1712052000000, "content": "tool output"}],
+        dry_run=False,
+        flush=False,
+    )
+
+    assert result["ok"] is False
+    assert result["error_code"] == "validation_failed"
+    assert result["queued_count"] == 0
+    assert any("tool_call_id" in warning for warning in result["warnings"])
+
+
+def test_save_and_verify_retries_transient_flush_send_error_once():
+    class RetryFlushClient(AgentVisibilityClient):
+        def __init__(self):
+            super().__init__()
+            self.flush_calls = 0
+
+        def flush_memories(self, **kwargs):
+            self.flush_calls += 1
+            if self.flush_calls == 1:
+                raise EverOSError("EverOS request failed: error sending request")
+            return {"data": {"status": "success", "task_id": "flush-ok"}}
+
+    client = RetryFlushClient()
+    result = save_and_verify(
+        client=client,
+        content="retry flush after save",
+        user_id="u1",
+        session_id="s1",
+        verification_queries=[],
+        flush=True,
+    )
+
+    assert client.flush_calls == 2
+    assert result["save"]["flush"]["ok"] is True
+    assert result["save"]["flush"]["status"] == "success"
+
+
+def test_import_and_verify_retries_transient_flush_send_error_once():
+    class RetryFlushClient(AgentVisibilityClient):
+        def __init__(self):
+            super().__init__()
+            self.flush_calls = 0
+
+        def flush_memories(self, **kwargs):
+            self.flush_calls += 1
+            if self.flush_calls == 1:
+                raise EverOSError("EverOS request failed: error sending request")
+            return {"data": {"status": "success", "task_id": "flush-ok"}}
+
+    client = RetryFlushClient()
+    result = import_and_verify(
+        client=client,
+        user_id="u1",
+        session_id="s1",
+        messages=[_message(1), _message(2)],
+        flush=True,
+    )
+
+    assert client.flush_calls == 2
+    assert result["flush"]["ok"] is True
+    assert result["flush"]["status"] == "success"
