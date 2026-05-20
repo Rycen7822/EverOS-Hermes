@@ -41,11 +41,26 @@ def _description_summary(text: str) -> str:
     return text
 
 
-def _annotations_dict(annotations: Any) -> dict[str, Any]:
-    if annotations is None:
-        return {}
-    raw = getattr(annotations, "__dict__", {})
-    return {key: raw[key] for key in sorted(raw) if raw[key] is not None}
+def _annotation_profile(annotations: Any) -> str:
+    raw = getattr(annotations, "__dict__", {}) if annotations is not None else {}
+    return ":".join(
+        [
+            "read" if raw.get("readOnlyHint") else "write",
+            "destructive" if raw.get("destructiveHint") else "safe",
+            "idem" if raw.get("idempotentHint") else "nonidem",
+            "open" if raw.get("openWorldHint") else "closed",
+        ]
+    )
+
+
+def _output_shape(output_schema: dict[str, Any]) -> Any:
+    required = sorted(output_schema.get("required", []))
+    properties = sorted(output_schema.get("properties", {}).keys())
+    if required == ["result"] and properties == ["result"]:
+        return "result"
+    if not required and properties == ["ok", "retryable", "status", "suggested_next_actions", "workflow"]:
+        return "workflow"
+    return {"required": required, "properties": properties}
 
 
 def _mcp_snapshot() -> list[dict[str, Any]]:
@@ -64,9 +79,8 @@ def _mcp_snapshot() -> list[dict[str, Any]]:
                 "description_summary": _description_summary(tool.description),
                 "required": sorted(parameters.get("required", [])),
                 "properties": sorted(parameters.get("properties", {}).keys()),
-                "output_required": sorted(output_schema.get("required", [])),
-                "output_properties": sorted(output_schema.get("properties", {}).keys()),
-                "annotations": _annotations_dict(tool.annotations),
+                "output_shape": _output_shape(output_schema),
+                "annotation_profile": _annotation_profile(tool.annotations),
             }
         )
     return snapshot

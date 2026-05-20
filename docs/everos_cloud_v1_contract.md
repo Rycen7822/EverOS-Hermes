@@ -15,7 +15,7 @@ EverOS-Hermes targets EverOS Cloud v1 personal and agent memory workflows for He
 
 The Hermes MCP/provider surface may expose high-level helpers that compose the whitelisted endpoints below. These helpers are not new EverOS Cloud endpoints; they are local orchestration wrappers:
 
-- `everos_batch_ingest` / `everos_memory_import_and_verify`: dry-run or execute batched `add_memories`, optional `flush`, and sample `search` verification. Reports include input/queued/failed counts, batch status, warnings, metrics, flush status, verification hits/misses, and suggested next actions. Dry-run validates supplied message timestamps as integer epoch milliseconds; execution may adaptively split multi-message batches that return Cloud `403 Forbidden`.
+- `everos_import_and_verify` / `everos_memory_import_and_verify`: dry-run or execute batched `add_memories`, optional `flush`, and sample `search` verification. Reports include input/queued/failed counts, batch status, warnings, metrics, flush status, verification hits/misses, and suggested next actions. Dry-run validates supplied message timestamps as integer epoch milliseconds; execution may adaptively split multi-message batches that return Cloud `403 Forbidden`.
 - `everos_verify_session_ingest` / `everos_memory_verify_session`: read-only verification using `POST /api/v1/memories/search` for one or more sample queries.
 - `everos_save_and_verify` / `everos_memory_save_and_verify`: one-message `add_memories`, optional `flush`, and searchability verification.
 

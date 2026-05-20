@@ -427,49 +427,32 @@ def test_update_settings_validates_strict_schema_and_returns_diff(monkeypatch):
 
 
 
-def test_request_json_success_envelope_contract_cases(monkeypatch):
+def test_http_response_envelope_contract_cases(monkeypatch):
     from pathlib import Path
 
     from everos_hermes.client import EverOSClient
 
     cases = json.loads((Path(__file__).parent / "contracts" / "http_response_envelope_cases.json").read_text(encoding="utf-8"))["cases"]
-
     for case in cases:
-        if case["operation"] != "request_json":
-            continue
+        captured = {}
 
         def fake_urlopen(req, timeout, *, case=case):
+            if getattr(req, "data", None):
+                captured["body"] = json.loads(req.data.decode("utf-8"))
             response = case["server_response"]
             return FakeHTTPResponse(response["body"], status=response["status"])
 
         monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
         client = EverOSClient(api_key="sk-test")
-        request = case["request"]
-        assert client.request_json(request["method"], request["path"]) == case["expected_response"]
-
-
-def test_delete_memories_204_envelope_contract_case(monkeypatch):
-    from pathlib import Path
-
-    from everos_hermes.client import EverOSClient
-
-    case = next(
-        item
-        for item in json.loads((Path(__file__).parent / "contracts" / "http_response_envelope_cases.json").read_text(encoding="utf-8"))["cases"]
-        if item["operation"] == "delete_memories"
-    )
-    captured = {}
-
-    def fake_urlopen(req, timeout):
-        captured["body"] = json.loads(req.data.decode("utf-8"))
-        response = case["server_response"]
-        return FakeHTTPResponse(response["body"], status=response["status"])
-
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
-    client = EverOSClient(api_key="sk-test")
-
-    assert client.delete_memories(**case["args"]) == case["expected_response"]
-    assert captured["body"] == case["expected_request"]["body"]
+        if case["operation"] == "request_json":
+            request = case["request"]
+            actual = client.request_json(request["method"], request["path"])
+        elif case["operation"] == "delete_memories":
+            actual = client.delete_memories(**case["args"])
+            assert captured["body"] == case["expected_request"]["body"]
+        else:
+            raise AssertionError(f"unsupported response envelope case: {case['operation']}")
+        assert actual == case["expected_response"]
 
 
 def test_client_param_normalization_contract_cases(monkeypatch):

@@ -125,7 +125,6 @@ class EverOSClient:
         self,
         *,
         user_id: str | None = None,
-        group_id: str | None = None,
         session_id: str | None = None,
         filters: dict[str, Any] | None = None,
         memory_type: str = "episodic_memory",
@@ -134,7 +133,6 @@ class EverOSClient:
         rank_by: str = "timestamp",
         rank_order: str = "desc",
     ) -> dict[str, Any]:
-        _reject_group_memory_scope(group_id)
         normalized_rank_order = normalize_rank_order(rank_order)
         validate_get_params(memory_type, page, page_size, rank_by, normalized_rank_order)
         resolved_filters = build_filters(user_id=user_id, session_id=session_id, filters=filters)
@@ -156,7 +154,6 @@ class EverOSClient:
         *,
         query: str,
         user_id: str | None = None,
-        group_id: str | None = None,
         session_id: str | None = None,
         filters: dict[str, Any] | None = None,
         method: str = "hybrid",
@@ -167,7 +164,6 @@ class EverOSClient:
         include_vectors: bool = False,
         timeout: float | None = None,
     ) -> dict[str, Any]:
-        _reject_group_memory_scope(group_id)
         resolved_memory_types = list(memory_types or DEFAULT_MEMORY_TYPES)
         normalized_method = method.strip().lower()
         validate_search_params(normalized_method, resolved_memory_types, top_k, radius)
@@ -190,10 +186,8 @@ class EverOSClient:
         *,
         memory_id: str | None = None,
         user_id: str | None = None,
-        group_id: str | None = None,
         session_id: str | None = None,
     ) -> dict[str, Any]:
-        _reject_group_memory_scope(group_id)
         validate_delete_request(memory_id=memory_id, user_id=user_id, session_id=session_id)
         body: dict[str, Any]
         if memory_id:
@@ -239,11 +233,6 @@ def _normalize_path(path: str) -> str:
 
 def _drop_none(obj: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in obj.items() if v is not None}
-
-
-def _reject_group_memory_scope(group_id: str | None) -> None:
-    if group_id is not None:
-        raise ValueError("group memory is out of scope for this EverOS-Hermes release")
 
 
 def _http_error_to_everos_error(exc: urllib.error.HTTPError) -> EverOSError:

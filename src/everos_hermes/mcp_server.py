@@ -31,7 +31,6 @@ TOOL_NAMES = [
     "everos_get_task_status",
     "everos_get_settings",
     "everos_update_settings",
-    "everos_batch_ingest",
     "everos_verify_session_ingest",
     "everos_save_and_verify",
     "everos_import_and_verify",
@@ -516,47 +515,6 @@ async def everos_import_and_verify(
         memory_types=memory_types,
         top_k=top_k,
         timeout=timeout,
-        workflow="import_and_verify",
-    )
-
-
-@mcp.tool(
-    name="everos_batch_ingest",
-    title="Batch Ingest EverOS Memories",
-    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
-)
-async def everos_batch_ingest(
-    messages: list[dict[str, Any]] | None = None,
-    file_path: str | None = None,
-    verification_queries: list[str] | None = None,
-    user_id: str | None = None,
-    session_id: str | None = None,
-    scope: MemoryScope = "personal",
-    dry_run: bool = False,
-    batch_size: int = 50,
-    flush: bool = True,
-    flush_timeout: float | None = None,
-    memory_types: list[SearchMemoryType] | None = None,
-    top_k: int = 5,
-    timeout: float | None = None,
-) -> WorkflowOutput:
-    """Dry-run or execute batched EverOS ingest with optional flush and verification report."""
-    return import_and_verify(
-        client=make_client(),
-        user_id=user_id or default_user_id(),
-        session_id=session_id,
-        messages=messages,
-        file_path=file_path,
-        scope=scope,
-        dry_run=dry_run,
-        batch_size=batch_size,
-        flush=flush,
-        flush_timeout=flush_timeout,
-        verification_queries=verification_queries,
-        memory_types=memory_types,
-        top_k=top_k,
-        timeout=timeout,
-        workflow="batch_ingest",
     )
 
 

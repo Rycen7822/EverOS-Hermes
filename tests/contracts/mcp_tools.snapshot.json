@@ -17,18 +17,8 @@
       "tool_call_id",
       "user_id"
     ],
-    "output_required": [
-      "result"
-    ],
-    "output_properties": [
-      "result"
-    ],
-    "annotations": {
-      "destructiveHint": false,
-      "idempotentHint": false,
-      "openWorldHint": true,
-      "readOnlyHint": false
-    }
+    "output_shape": "result",
+    "annotation_profile": "write:safe:nonidem:open"
   },
   {
     "name": "everos_add_memories",
@@ -47,18 +37,8 @@
       "session_id",
       "user_id"
     ],
-    "output_required": [
-      "result"
-    ],
-    "output_properties": [
-      "result"
-    ],
-    "annotations": {
-      "destructiveHint": false,
-      "idempotentHint": false,
-      "openWorldHint": true,
-      "readOnlyHint": false
-    }
+    "output_shape": "result",
+    "annotation_profile": "write:safe:nonidem:open"
   },
   {
     "name": "everos_flush_memories",
@@ -72,18 +52,8 @@
       "timeout",
       "user_id"
     ],
-    "output_required": [
-      "result"
-    ],
-    "output_properties": [
-      "result"
-    ],
-    "annotations": {
-      "destructiveHint": false,
-      "idempotentHint": true,
-      "openWorldHint": true,
-      "readOnlyHint": false
-    }
+    "output_shape": "result",
+    "annotation_profile": "write:safe:idem:open"
   },
   {
     "name": "everos_search_memories",
@@ -107,18 +77,8 @@
       "top_k",
       "user_id"
     ],
-    "output_required": [
-      "result"
-    ],
-    "output_properties": [
-      "result"
-    ],
-    "annotations": {
-      "destructiveHint": false,
-      "idempotentHint": true,
-      "openWorldHint": true,
-      "readOnlyHint": true
-    }
+    "output_shape": "result",
+    "annotation_profile": "read:safe:idem:open"
   },
   {
     "name": "everos_get_memories",
@@ -136,18 +96,8 @@
       "session_id",
       "user_id"
     ],
-    "output_required": [
-      "result"
-    ],
-    "output_properties": [
-      "result"
-    ],
-    "annotations": {
-      "destructiveHint": false,
-      "idempotentHint": true,
-      "openWorldHint": true,
-      "readOnlyHint": true
-    }
+    "output_shape": "result",
+    "annotation_profile": "read:safe:idem:open"
   },
   {
     "name": "everos_delete_memories",
@@ -161,18 +111,8 @@
       "session_id",
       "user_id"
     ],
-    "output_required": [
-      "result"
-    ],
-    "output_properties": [
-      "result"
-    ],
-    "annotations": {
-      "destructiveHint": true,
-      "idempotentHint": true,
-      "openWorldHint": true,
-      "readOnlyHint": false
-    }
+    "output_shape": "result",
+    "annotation_profile": "write:destructive:idem:open"
   },
   {
     "name": "everos_get_task_status",
@@ -184,18 +124,8 @@
     "properties": [
       "task_id"
     ],
-    "output_required": [
-      "result"
-    ],
-    "output_properties": [
-      "result"
-    ],
-    "annotations": {
-      "destructiveHint": false,
-      "idempotentHint": true,
-      "openWorldHint": true,
-      "readOnlyHint": true
-    }
+    "output_shape": "result",
+    "annotation_profile": "read:safe:idem:open"
   },
   {
     "name": "everos_get_settings",
@@ -203,18 +133,8 @@
     "description_summary": "Get current EverOS memory-space settings.",
     "required": [],
     "properties": [],
-    "output_required": [
-      "result"
-    ],
-    "output_properties": [
-      "result"
-    ],
-    "annotations": {
-      "destructiveHint": false,
-      "idempotentHint": true,
-      "openWorldHint": true,
-      "readOnlyHint": true
-    }
+    "output_shape": "result",
+    "annotation_profile": "read:safe:idem:open"
   },
   {
     "name": "everos_update_settings",
@@ -228,53 +148,8 @@
       "settings",
       "strict"
     ],
-    "output_required": [
-      "result"
-    ],
-    "output_properties": [
-      "result"
-    ],
-    "annotations": {
-      "destructiveHint": false,
-      "idempotentHint": true,
-      "openWorldHint": true,
-      "readOnlyHint": false
-    }
-  },
-  {
-    "name": "everos_batch_ingest",
-    "title": "Batch Ingest EverOS Memories",
-    "description_summary": "Dry-run or execute batched EverOS ingest with optional flush and verification report.",
-    "required": [],
-    "properties": [
-      "batch_size",
-      "dry_run",
-      "file_path",
-      "flush",
-      "flush_timeout",
-      "memory_types",
-      "messages",
-      "scope",
-      "session_id",
-      "timeout",
-      "top_k",
-      "user_id",
-      "verification_queries"
-    ],
-    "output_required": [],
-    "output_properties": [
-      "ok",
-      "retryable",
-      "status",
-      "suggested_next_actions",
-      "workflow"
-    ],
-    "annotations": {
-      "destructiveHint": false,
-      "idempotentHint": false,
-      "openWorldHint": true,
-      "readOnlyHint": false
-    }
+    "output_shape": "result",
+    "annotation_profile": "write:safe:idem:open"
   },
   {
     "name": "everos_verify_session_ingest",
@@ -292,20 +167,8 @@
       "user_id",
       "verification_queries"
     ],
-    "output_required": [],
-    "output_properties": [
-      "ok",
-      "retryable",
-      "status",
-      "suggested_next_actions",
-      "workflow"
-    ],
-    "annotations": {
-      "destructiveHint": false,
-      "idempotentHint": true,
-      "openWorldHint": true,
-      "readOnlyHint": true
-    }
+    "output_shape": "workflow",
+    "annotation_profile": "read:safe:idem:open"
   },
   {
     "name": "everos_save_and_verify",
@@ -329,20 +192,8 @@
       "verification_queries",
       "verification_query"
     ],
-    "output_required": [],
-    "output_properties": [
-      "ok",
-      "retryable",
-      "status",
-      "suggested_next_actions",
-      "workflow"
-    ],
-    "annotations": {
-      "destructiveHint": false,
-      "idempotentHint": false,
-      "openWorldHint": true,
-      "readOnlyHint": false
-    }
+    "output_shape": "workflow",
+    "annotation_profile": "write:safe:nonidem:open"
   },
   {
     "name": "everos_import_and_verify",
@@ -364,19 +215,7 @@
       "user_id",
       "verification_queries"
     ],
-    "output_required": [],
-    "output_properties": [
-      "ok",
-      "retryable",
-      "status",
-      "suggested_next_actions",
-      "workflow"
-    ],
-    "annotations": {
-      "destructiveHint": false,
-      "idempotentHint": false,
-      "openWorldHint": true,
-      "readOnlyHint": false
-    }
+    "output_shape": "workflow",
+    "annotation_profile": "write:safe:nonidem:open"
   }
 ]

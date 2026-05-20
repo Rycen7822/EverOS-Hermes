@@ -1,5 +1,5 @@
 use crate::agent_visibility::build_agent_visibility_report;
-use crate::client::{DEFAULT_MEMORY_TYPES, EverOSClient, EverOSError};
+use crate::client::{EverOSClient, EverOSError};
 use crate::env::get_env;
 use crate::flush_retry::flush_memories_with_retry;
 use crate::formatting::{format_search_context, pretty_json};
@@ -13,7 +13,7 @@ const MAX_FRAME_HEADER_LINE_BYTES: usize = 8 * 1024;
 const MAX_FRAME_HEADER_BYTES: usize = 64 * 1024;
 const MAX_FRAME_BODY_BYTES: usize = 16 * 1024 * 1024;
 
-pub const TOOL_NAMES: [&str; 13] = [
+pub const TOOL_NAMES: [&str; 12] = [
     "everos_save_memory",
     "everos_add_memories",
     "everos_flush_memories",
@@ -23,7 +23,6 @@ pub const TOOL_NAMES: [&str; 13] = [
     "everos_get_task_status",
     "everos_get_settings",
     "everos_update_settings",
-    "everos_batch_ingest",
     "everos_verify_session_ingest",
     "everos_save_and_verify",
     "everos_import_and_verify",
@@ -456,112 +455,6 @@ pub fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "everos_batch_ingest",
-            "title": "Batch Ingest EverOS Memories",
-            "description": "Dry-run or execute batched EverOS ingest with optional flush and verification report.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "messages": {
-                        "type": "array",
-                        "items": {
-                            "type": "object"
-                        }
-                    },
-                    "file_path": {
-                        "type": "string"
-                    },
-                    "verification_queries": {
-                        "type": "array",
-                        "items": {
-                            "type": "string"
-                        }
-                    },
-                    "user_id": {
-                        "type": "string"
-                    },
-                    "session_id": {
-                        "type": "string"
-                    },
-                    "scope": {
-                        "type": "string",
-                        "enum": [
-                            "personal",
-                            "agent"
-                        ],
-                        "default": "personal"
-                    },
-                    "dry_run": {
-                        "type": "boolean",
-                        "default": false
-                    },
-                    "batch_size": {
-                        "type": "integer",
-                        "default": 50,
-                        "minimum": 1,
-                        "maximum": 100
-                    },
-                    "flush": {
-                        "type": "boolean",
-                        "default": true
-                    },
-                    "flush_timeout": {
-                        "type": "number"
-                    },
-                    "memory_types": {
-                        "type": "array",
-                        "items": {
-                            "type": "string",
-                            "enum": [
-                                "episodic_memory",
-                                "profile",
-                                "raw_message",
-                                "agent_memory"
-                            ]
-                        }
-                    },
-                    "top_k": {
-                        "type": "integer",
-                        "default": 5,
-                        "minimum": -1,
-                        "maximum": 100
-                    },
-                    "timeout": {
-                        "type": "number"
-                    }
-                }
-            },
-            "outputSchema": {
-                "type": "object",
-                "properties": {
-                    "ok": {
-                        "type": "boolean"
-                    },
-                    "workflow": {
-                        "type": "string"
-                    },
-                    "status": {
-                        "type": "string"
-                    },
-                    "retryable": {
-                        "type": "boolean"
-                    },
-                    "suggested_next_actions": {
-                        "type": "array",
-                        "items": {
-                            "type": "string"
-                        }
-                    }
-                }
-            },
-            "annotations": {
-                "readOnlyHint": false,
-                "destructiveHint": false,
-                "idempotentHint": false,
-                "openWorldHint": true
-            }
-        }),
-        json!({
             "name": "everos_verify_session_ingest",
             "title": "Verify EverOS Session Ingest",
             "description": "Verify that an existing user/session is searchable by running read-only sample queries.",
@@ -968,14 +861,18 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
                     flush_timeout,
                     2,
                 ) {
-                    Ok((response, _attempt_count)) => Some(flush_result_payload(&response)),
-                    Err(err @ EverOSError::Timeout { .. }) => Some(timeout_payload("flush", &err)),
+                    Ok((response, _attempt_count)) => {
+                        Some(workflows::tool_flush_result_payload(&response))
+                    }
+                    Err(err @ EverOSError::Timeout { .. }) => {
+                        Some(workflows::tool_timeout_payload("flush", &err))
+                    }
                     Err(err) => Some(error_payload("flush", &err)),
                 }
             } else {
                 None
             };
-            let mut payload = save_result_payload(
+            let mut payload = workflows::tool_save_result_payload(
                 &result,
                 &uid,
                 session_id.as_deref(),
@@ -984,7 +881,12 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
                 flush_payload,
             );
             if scope == "agent" {
-                add_agent_visibility(&mut payload, Some(true), Some(&uid), session_id.as_deref());
+                workflows::add_agent_visibility(
+                    &mut payload,
+                    Some(true),
+                    Some(&uid),
+                    session_id.as_deref(),
+                );
             }
             Ok(pretty_json(&payload))
         }
@@ -1021,10 +923,10 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
                         let mut payload = json!({
                             "ok": true,
                             "add": result,
-                            "flush": flush_result_payload_with_attempt(&response, Some(attempt_count)),
+                            "flush": workflows::tool_flush_result_payload_with_attempt(&response, Some(attempt_count)),
                         });
                         if scope == "agent" {
-                            add_agent_visibility(
+                            workflows::add_agent_visibility(
                                 &mut payload,
                                 Some(true),
                                 Some(&uid),
@@ -1034,9 +936,9 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
                         Ok(pretty_json(&payload))
                     }
                     Err(err @ EverOSError::Timeout { .. }) => {
-                        let mut payload = json!({"ok": true, "add": result, "flush": timeout_payload("flush", &err)});
+                        let mut payload = json!({"ok": true, "add": result, "flush": workflows::tool_timeout_payload("flush", &err)});
                         if scope == "agent" {
-                            add_agent_visibility(
+                            workflows::add_agent_visibility(
                                 &mut payload,
                                 Some(true),
                                 Some(&uid),
@@ -1048,7 +950,7 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
                     Err(err) => {
                         let mut payload = json!({"ok": true, "add": result, "flush": error_payload("flush", &err)});
                         if scope == "agent" {
-                            add_agent_visibility(
+                            workflows::add_agent_visibility(
                                 &mut payload,
                                 Some(true),
                                 Some(&uid),
@@ -1060,7 +962,12 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
                 }
             } else if scope == "agent" {
                 let mut payload = json!({"ok": true, "add": result});
-                add_agent_visibility(&mut payload, Some(true), Some(&uid), session_id.as_deref());
+                workflows::add_agent_visibility(
+                    &mut payload,
+                    Some(true),
+                    Some(&uid),
+                    session_id.as_deref(),
+                );
                 Ok(pretty_json(&payload))
             } else {
                 Ok(pretty_json(&result))
@@ -1082,8 +989,10 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
             ) {
                 Ok((response, attempt_count)) => {
                     if scope == "agent" {
-                        let flush_payload =
-                            flush_result_payload_with_attempt(&response, Some(attempt_count));
+                        let flush_payload = workflows::tool_flush_result_payload_with_attempt(
+                            &response,
+                            Some(attempt_count),
+                        );
                         Ok(pretty_json(&json!({
                             "flush": flush_payload.clone(),
                             "agent_visibility": build_agent_visibility_report(
@@ -1099,7 +1008,7 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
                     }
                 }
                 Err(err @ EverOSError::Timeout { .. }) => {
-                    Ok(pretty_json(&timeout_payload("flush", &err)))
+                    Ok(pretty_json(&workflows::tool_timeout_payload("flush", &err)))
                 }
                 Err(err) => Err(err.into()),
             }
@@ -1137,7 +1046,6 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
             let response = match client.search_memories(
                 &query,
                 Some(&uid),
-                None,
                 session_id.as_deref(),
                 filters.clone(),
                 &method,
@@ -1155,7 +1063,6 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
                     let mut response = client.search_memories(
                         &query,
                         Some(&uid),
-                        None,
                         session_id.as_deref(),
                         filters,
                         "hybrid",
@@ -1176,7 +1083,9 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
                     response
                 }
                 Err(err @ EverOSError::Timeout { .. }) => {
-                    return Ok(pretty_json(&timeout_payload("search", &err)));
+                    return Ok(pretty_json(&workflows::tool_timeout_payload(
+                        "search", &err,
+                    )));
                 }
                 Err(err) => return Err(err.into()),
             };
@@ -1202,7 +1111,6 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
                 .to_ascii_lowercase();
             let response = make_client()?.get_memories(
                 Some(&uid),
-                None,
                 session_id.as_deref(),
                 filters,
                 &memory_type,
@@ -1250,7 +1158,6 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
             Ok(pretty_json(&make_client()?.delete_memories(
                 memory_id.as_deref(),
                 uid.as_deref(),
-                None,
                 session_id.as_deref(),
             )?))
         }
@@ -1323,7 +1230,7 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
                 timeout,
             )?))
         }
-        "everos_import_and_verify" | "everos_batch_ingest" => {
+        "everos_import_and_verify" => {
             let uid = optional_string(&value, "user_id").unwrap_or_else(default_user_id);
             let session_id = optional_string(&value, "session_id");
             let scope = scope_from_args(&value)?;
@@ -1338,11 +1245,6 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
             let memory_types = (!memory_types.is_empty()).then_some(memory_types);
             let top_k = int_arg(&value, "top_k", 5)?;
             let timeout = timeout_arg(&value, "timeout")?;
-            let workflow = if name == "everos_batch_ingest" {
-                "batch_ingest"
-            } else {
-                "import_and_verify"
-            };
             Ok(pretty_json(&workflows::import_and_verify(
                 &make_client()?,
                 &uid,
@@ -1358,7 +1260,6 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
                 memory_types,
                 top_k,
                 timeout,
-                workflow,
             )?))
         }
         _ => anyhow::bail!("Unknown EverOS MCP tool: {name}"),
@@ -1512,93 +1413,6 @@ fn render(response: &Value, response_format: &str) -> String {
     pretty_json(response)
 }
 
-fn flush_result_payload(response: &Value) -> Value {
-    flush_result_payload_with_attempt(response, None)
-}
-
-fn flush_result_payload_with_attempt(response: &Value, attempt_count: Option<usize>) -> Value {
-    let data = response.get("data").unwrap_or(response);
-    let mut payload = serde_json::Map::new();
-    payload.insert("ok".to_string(), Value::Bool(true));
-    if let Some(attempt_count) = attempt_count.filter(|value| *value > 1) {
-        payload.insert("attempt_count".to_string(), json!(attempt_count));
-    }
-    for key in ["status", "request_id", "task_id", "message"] {
-        if let Some(value) = data.get(key).filter(|value| !value.is_null()) {
-            payload.insert(key.to_string(), value.clone());
-        }
-    }
-    Value::Object(payload)
-}
-
-fn timeout_payload(operation: &str, err: &EverOSError) -> Value {
-    json!({
-        "ok": false,
-        "operation": operation,
-        "error": sanitized_error_message(err),
-        "retryable": true,
-        "suggested_next_actions": [
-            "search existing memories before retrying, because the server may have completed the request after the client timed out",
-            "if the operation returned a task_id or request_id earlier, check that status before issuing another write/flush",
-            "retry with a longer timeout only if search/status checks do not show the expected result"
-        ]
-    })
-}
-
-fn save_result_payload(
-    result: &Value,
-    user_id: &str,
-    session_id: Option<&str>,
-    scope: &str,
-    flush_requested: bool,
-    flush: Option<Value>,
-) -> Value {
-    let status = result
-        .pointer("/data/status")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let task_id = result
-        .pointer("/data/task_id")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let extraction_requested = flush_requested
-        || !task_id.is_empty()
-        || matches!(status, "queued" | "processing" | "success");
-    json!({
-        "saved": true,
-        "message_queued": true,
-        "extraction_requested": extraction_requested,
-        "searchable": Value::Null,
-        "user_id": user_id,
-        "session_id": session_id,
-        "scope": scope,
-        "status": status,
-        "task_id": task_id,
-        "flush": flush.unwrap_or_else(|| {
-            if flush_requested {
-                json!({"ok": false, "error": "flush requested but no flush result was recorded"})
-            } else {
-                json!({"ok": Value::Null, "status": "not_requested"})
-            }
-        }),
-    })
-}
-
-fn add_agent_visibility(
-    payload: &mut Value,
-    agent_raw_queued: Option<bool>,
-    user_id: Option<&str>,
-    session_id: Option<&str>,
-) {
-    let flush = payload.get("flush").cloned();
-    if let Some(map) = payload.as_object_mut() {
-        map.insert(
-            "agent_visibility".to_string(),
-            build_agent_visibility_report(agent_raw_queued, flush, vec![], user_id, session_id),
-        );
-    }
-}
-
 fn required_string(value: &Value, key: &str) -> anyhow::Result<String> {
     let text = optional_string(value, key).unwrap_or_default();
     if text.trim().is_empty() {
@@ -1748,12 +1562,4 @@ fn now_ms() -> u128 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
-}
-
-#[allow(dead_code)]
-fn _default_memory_types() -> Vec<String> {
-    DEFAULT_MEMORY_TYPES
-        .iter()
-        .map(|item| item.to_string())
-        .collect()
 }

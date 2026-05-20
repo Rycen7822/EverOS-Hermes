@@ -257,7 +257,6 @@ impl EverOSProvider {
                 Some(&self.user_id),
                 None,
                 None,
-                None,
                 &self.config.search_method,
                 Some(self.config.memory_types.clone()),
                 self.config.top_k as i64,
@@ -272,7 +271,6 @@ impl EverOSProvider {
                 .search_memories(
                     &query,
                     Some(&self.user_id),
-                    None,
                     None,
                     None,
                     &self.config.search_method,
@@ -292,7 +290,6 @@ impl EverOSProvider {
                 .search_memories(
                     &query,
                     Some(&self.user_id),
-                    None,
                     Some(sid),
                     None,
                     &self.config.search_method,
@@ -682,7 +679,7 @@ impl EverOSProvider {
                 None,
                 self.config.agent_visibility_retry_flush_attempts,
             )?;
-            flush_payload = Some(flush_result_payload_with_attempt(
+            flush_payload = Some(workflows::tool_flush_result_payload_with_attempt(
                 &flush,
                 Some(attempt_count),
             ));
@@ -808,17 +805,21 @@ impl EverOSProvider {
                 None,
                 self.config.agent_visibility_retry_flush_attempts,
             ) {
-                Ok((response, attempt_count)) => Some(flush_result_payload_with_attempt(
-                    &response,
-                    Some(attempt_count),
-                )),
-                Err(err @ EverOSError::Timeout { .. }) => Some(timeout_payload("flush", &err)),
+                Ok((response, attempt_count)) => {
+                    Some(workflows::tool_flush_result_payload_with_attempt(
+                        &response,
+                        Some(attempt_count),
+                    ))
+                }
+                Err(err @ EverOSError::Timeout { .. }) => {
+                    Some(workflows::tool_timeout_payload("flush", &err))
+                }
                 Err(err) => Some(error_payload("flush", &err)),
             }
         } else {
             None
         };
-        let mut payload = save_result_payload(
+        let mut payload = workflows::tool_save_result_payload(
             &result,
             &self.user_id,
             session_id_opt,
@@ -827,10 +828,8 @@ impl EverOSProvider {
             flush_payload,
         );
         if scope == "agent" {
-            let flush_for_visibility = payload.get("flush").cloned();
             let should_audit = self.config.agent_visibility_verify_after_write
-                || (flush_for_visibility.is_some()
-                    && self.config.agent_visibility_verify_after_flush);
+                || (flush_requested && self.config.agent_visibility_verify_after_flush);
             if should_audit {
                 let queries = self.agent_visibility_queries(
                     vec![content.clone()],
@@ -850,14 +849,14 @@ impl EverOSProvider {
                     map.insert("agent_raw_queued".to_string(), Value::Bool(true));
                     map.insert(
                         "agent_flush".to_string(),
-                        flush_for_visibility.unwrap_or(Value::Null),
+                        payload.get("flush").cloned().unwrap_or(Value::Null),
                     );
                 }
                 if let Some(map) = payload.as_object_mut() {
                     map.insert("agent_visibility".to_string(), visibility);
                 }
             } else {
-                add_agent_visibility(
+                workflows::add_agent_visibility(
                     &mut payload,
                     Some(true),
                     Some(&self.user_id),
@@ -901,7 +900,6 @@ impl EverOSProvider {
         let response = self.client.as_ref().expect("active").search_memories(
             &query,
             Some(&self.user_id),
-            None,
             if session_id.is_empty() {
                 None
             } else {
@@ -935,7 +933,6 @@ impl EverOSProvider {
         let memory_type = non_empty_or(&value_string(args, "memory_type"), "episodic_memory");
         let response = self.client.as_ref().expect("active").get_memories(
             Some(&self.user_id),
-            None,
             if session_id.is_empty() {
                 None
             } else {
@@ -969,12 +966,13 @@ impl EverOSProvider {
         ) {
             Ok(result) => result,
             Err(err @ EverOSError::Timeout { .. }) => {
-                return Ok(pretty_json(&timeout_payload("flush", &err)));
+                return Ok(pretty_json(&workflows::tool_timeout_payload("flush", &err)));
             }
             Err(err) => return Err(err),
         };
         if scope == "agent" {
-            let flush_payload = flush_result_payload_with_attempt(&response, Some(attempt_count));
+            let flush_payload =
+                workflows::tool_flush_result_payload_with_attempt(&response, Some(attempt_count));
             return Ok(pretty_json(&json!({
                 "flush": flush_payload.clone(),
                 "agent_visibility": build_agent_visibility_report(
@@ -999,12 +997,11 @@ impl EverOSProvider {
         if memory_id.trim().is_empty() {
             return Ok(tool_error("memory_id is required"));
         }
-        let response = self.client.as_ref().expect("active").delete_memories(
-            Some(&memory_id),
-            None,
-            None,
-            None,
-        )?;
+        let response =
+            self.client
+                .as_ref()
+                .expect("active")
+                .delete_memories(Some(&memory_id), None, None)?;
         Ok(pretty_json(&response))
     }
 
@@ -1083,7 +1080,6 @@ impl EverOSProvider {
             memory_types,
             int_between(args.get("top_k"), -1, 100, self.config.top_k),
             float_or_none(args.get("timeout")),
-            "import_and_verify",
         )?;
         Ok(pretty_json(&result))
     }
@@ -1406,89 +1402,6 @@ fn clean_content(text: &str) -> String {
 
 fn tool_error(message: &str) -> String {
     serde_json::to_string(&json!({"error": sanitized_error_message(message)})).unwrap()
-}
-
-fn timeout_payload(operation: &str, err: &EverOSError) -> Value {
-    json!({
-        "ok": false,
-        "operation": operation,
-        "error": sanitized_error_message(err),
-        "retryable": true,
-        "suggested_next_actions": [
-            "search existing memories before retrying, because the server may have completed the request after the client timed out",
-            "if the operation returned a task_id or request_id earlier, check that status before issuing another write/flush",
-            "retry with a longer timeout only if search/status checks do not show the expected result"
-        ]
-    })
-}
-
-fn flush_result_payload_with_attempt(response: &Value, attempt_count: Option<usize>) -> Value {
-    let data = response.get("data").unwrap_or(response);
-    let mut payload = serde_json::Map::new();
-    payload.insert("ok".to_string(), Value::Bool(true));
-    if let Some(attempt_count) = attempt_count.filter(|value| *value > 1) {
-        payload.insert("attempt_count".to_string(), json!(attempt_count));
-    }
-    for key in ["status", "request_id", "task_id", "message"] {
-        if let Some(value) = data.get(key).filter(|value| !value.is_null()) {
-            payload.insert(key.to_string(), value.clone());
-        }
-    }
-    Value::Object(payload)
-}
-
-fn save_result_payload(
-    result: &Value,
-    user_id: &str,
-    session_id: Option<&str>,
-    scope: &str,
-    flush_requested: bool,
-    flush: Option<Value>,
-) -> Value {
-    let status = result
-        .pointer("/data/status")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let task_id = result
-        .pointer("/data/task_id")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let extraction_requested = flush_requested
-        || !task_id.is_empty()
-        || matches!(status, "queued" | "processing" | "success");
-    json!({
-        "saved": true,
-        "message_queued": true,
-        "extraction_requested": extraction_requested,
-        "searchable": Value::Null,
-        "scope": scope,
-        "user_id": user_id,
-        "session_id": session_id,
-        "status": status,
-        "task_id": task_id,
-        "flush": flush.unwrap_or_else(|| {
-            if flush_requested {
-                json!({"ok": false, "error": "flush requested but no flush result was recorded"})
-            } else {
-                json!({"ok": Value::Null, "status": "not_requested"})
-            }
-        }),
-    })
-}
-
-fn add_agent_visibility(
-    payload: &mut Value,
-    agent_raw_queued: Option<bool>,
-    user_id: Option<&str>,
-    session_id: Option<&str>,
-) {
-    let flush = payload.get("flush").cloned();
-    if let Some(map) = payload.as_object_mut() {
-        map.insert(
-            "agent_visibility".to_string(),
-            build_agent_visibility_report(agent_raw_queued, flush, vec![], user_id, session_id),
-        );
-    }
 }
 
 fn value_string(value: &Value, key: &str) -> String {

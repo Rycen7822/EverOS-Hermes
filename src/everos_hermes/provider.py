@@ -256,11 +256,8 @@ class EverOSMemoryProvider(MemoryProvider):
         self._active = False
         self._threads: list[threading.Thread] = []
         self._last_write_status: dict[str, Any] = {}
-        self._last_flush_status: dict[str, Any] = {}
         self._last_agent_write_status: dict[str, Any] = {}
-        self._last_agent_flush_status: dict[str, Any] = {}
         self._last_recall_status: dict[str, Any] = {}
-        self._last_agent_trajectory_status: dict[str, Any] = {}
         self._last_agent_visibility_status: dict[str, Any] = {}
         self._prefetch_cache: dict[str, dict[str, Any]] = {}
         self._prefetch_inflight: set[str] = set()
@@ -690,12 +687,9 @@ class EverOSMemoryProvider(MemoryProvider):
             role=str(args.get("role") or "").strip() or None,
             tool_call_id=str(args.get("tool_call_id") or "").strip() or None,
             flush=_as_bool(args.get("flush", True), True),
-            flush_timeout=_float_or_none(args.get("flush_timeout")),
             verification_query=str(args.get("verification_query") or "").strip() or None,
             verification_queries=args.get("verification_queries") if isinstance(args.get("verification_queries"), list) else None,
-            memory_types=args.get("memory_types") if isinstance(args.get("memory_types"), list) else None,
             top_k=_top_k(args.get("top_k", self._config["top_k"]), self._config["top_k"]),
-            timeout=_float_or_none(args.get("timeout")),
         )
         return pretty_json(result)
 
@@ -710,11 +704,8 @@ class EverOSMemoryProvider(MemoryProvider):
             dry_run=_as_bool(args.get("dry_run", False), False),
             batch_size=_int_between(args.get("batch_size", 50), 1, 100, 50),
             flush=_as_bool(args.get("flush", True), True),
-            flush_timeout=_float_or_none(args.get("flush_timeout")),
             verification_queries=args.get("verification_queries") if isinstance(args.get("verification_queries"), list) else None,
-            memory_types=args.get("memory_types") if isinstance(args.get("memory_types"), list) else None,
             top_k=_top_k(args.get("top_k", self._config["top_k"]), self._config["top_k"]),
-            timeout=_float_or_none(args.get("timeout")),
         )
         return pretty_json(result)
 
@@ -730,7 +721,6 @@ class EverOSMemoryProvider(MemoryProvider):
             verification_queries=[str(query) for query in queries],
             memory_types=args.get("memory_types") if isinstance(args.get("memory_types"), list) else None,
             top_k=_top_k(args.get("top_k", self._config["top_k"]), self._config["top_k"]),
-            timeout=_float_or_none(args.get("timeout")),
         )
         return pretty_json(result)
 
@@ -756,8 +746,7 @@ class EverOSMemoryProvider(MemoryProvider):
                     result = self._client.add_memories(user_id=self._user_id, session_id=sid, messages=personal_messages, async_mode=True, scope="personal")
                     self._last_write_status = {"ok": True, "scope": "personal", "task_id": _task_id(result)}
                     if self._config["flush_after_turn"]:
-                        flush = self._client.flush_memories(user_id=self._user_id, session_id=sid, scope="personal")
-                        self._last_flush_status = {"ok": True, "scope": "personal", "status": _status(flush)}
+                        self._client.flush_memories(user_id=self._user_id, session_id=sid, scope="personal")
                 except Exception as exc:
                     self._record_status("sync_turn.personal", False, exc)
             if write_agent:
@@ -835,8 +824,7 @@ class EverOSMemoryProvider(MemoryProvider):
         if not result.messages or not self._client:
             return False
         if not self._remember_agent_fingerprint(result.fingerprint):
-            self._last_agent_trajectory_status = {"ok": True, "scope": "agent", "deduped": True, "operation": operation}
-            self._last_agent_write_status = dict(self._last_agent_trajectory_status)
+            self._last_agent_write_status = {"ok": True, "scope": "agent", "deduped": True, "operation": operation}
             return False
         try:
             add = self._client.add_memories(user_id=self._user_id, session_id=session_id, messages=result.messages, async_mode=True, scope="agent")
@@ -848,7 +836,6 @@ class EverOSMemoryProvider(MemoryProvider):
                 "output_count": result.output_count,
                 "warnings": result.warnings,
             }
-            self._last_agent_trajectory_status = dict(self._last_agent_write_status)
             flush_payload: dict[str, Any] | None = None
             if flush_allowed and self._config.get("agent_flush_after_turn"):
                 flush, attempt_count = flush_memories_with_retry(
@@ -859,7 +846,6 @@ class EverOSMemoryProvider(MemoryProvider):
                     include_timeout=False,
                 )
                 flush_payload = _flush_result_payload(flush, attempt_count=attempt_count)
-                self._last_agent_flush_status = {"ok": True, "scope": "agent", "status": _status(flush), "operation": operation}
             self._agent_visibility_after_write(
                 session_id=session_id,
                 texts=[str(message.get("content") or "") for message in result.messages],
@@ -1000,7 +986,6 @@ class EverOSMemoryProvider(MemoryProvider):
             status["error"] = sanitized_error_message(exc)
         if agent:
             self._last_agent_write_status = status
-            self._last_agent_trajectory_status = dict(status)
         else:
             self._last_write_status = status
         self._write_debug_log(status)
@@ -1055,11 +1040,6 @@ def _float_or_none(value: Any) -> float | None:
 def _task_id(response: dict[str, Any]) -> str:
     data = response.get("data", {}) if isinstance(response, dict) else {}
     return str(data.get("task_id") or "") if isinstance(data, dict) else ""
-
-
-def _status(response: dict[str, Any]) -> str:
-    data = response.get("data", {}) if isinstance(response, dict) else {}
-    return str(data.get("status") or "") if isinstance(data, dict) else ""
 
 
 def _build_personal_turn_messages(user_content: str, assistant_content: str, *, session_id: str, now_ms: int) -> list[dict[str, Any]]:

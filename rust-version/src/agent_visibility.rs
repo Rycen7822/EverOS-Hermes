@@ -123,7 +123,6 @@ pub fn audit_agent_visibility_with_options(
                 client.search_memories(
                     query,
                     Some(user_id),
-                    None,
                     session_id,
                     None,
                     "hybrid",
@@ -160,7 +159,6 @@ pub fn audit_agent_visibility_with_options(
         let mut check = json!({"kind": "get", "user_id": user_id, "session_id": session_id, "memory_type": memory_type});
         match client.get_memories(
             Some(user_id),
-            None,
             session_id,
             None,
             memory_type,

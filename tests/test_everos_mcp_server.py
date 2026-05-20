@@ -532,7 +532,6 @@ def test_mcp_workflow_tools_are_registered_with_structured_envelopes():
 
     tools = mcp_server.mcp._tool_manager._tools
     for name in [
-        "everos_batch_ingest",
         "everos_verify_session_ingest",
         "everos_save_and_verify",
         "everos_import_and_verify",
@@ -540,8 +539,7 @@ def test_mcp_workflow_tools_are_registered_with_structured_envelopes():
         assert name in tools
         assert tools[name].output_schema["type"] == "object"
         assert "ok" in tools[name].output_schema["properties"]
-    assert mcp_server.TOOL_NAMES[-4:] == [
-        "everos_batch_ingest",
+    assert mcp_server.TOOL_NAMES[-3:] == [
         "everos_verify_session_ingest",
         "everos_save_and_verify",
         "everos_import_and_verify",
@@ -620,7 +618,7 @@ def test_mcp_import_and_verify_dry_run_reports_warnings_without_writes(monkeypat
     assert result["suggested_next_actions"][0].startswith("fix warnings")
 
 
-def test_mcp_batch_ingest_batches_flushes_and_verifies(monkeypatch):
+def test_mcp_import_and_verify_batches_flushes_and_verifies(monkeypatch):
     from everos_hermes import mcp_server
 
     calls = []
@@ -642,7 +640,7 @@ def test_mcp_batch_ingest_batches_flushes_and_verifies(monkeypatch):
     monkeypatch.setenv("EVEROS_USER_ID", "u1")
     monkeypatch.setattr(mcp_server, "make_client", lambda: FakeClient())
 
-    result = asyncio.run(mcp_server.everos_batch_ingest(
+    result = asyncio.run(mcp_server.everos_import_and_verify(
         messages=[
             {"role": "user", "content": "Alpha", "timestamp": 1, "message_id": "msg-alpha"},
             {"role": "assistant", "content": "Beta", "timestamp": 2},
@@ -655,7 +653,7 @@ def test_mcp_batch_ingest_batches_flushes_and_verifies(monkeypatch):
     ))
 
     assert result["ok"] is True
-    assert result["workflow"] == "batch_ingest"
+    assert result["workflow"] == "import_and_verify"
     assert result["status"] == "verified"
     assert result["input_count"] == 3
     assert result["queued_count"] == 3

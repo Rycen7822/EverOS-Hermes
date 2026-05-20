@@ -7,12 +7,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_python_source_mcp_tool_count_is_13():
+def test_python_source_mcp_tool_count_is_12():
     from everos_hermes import mcp_server
 
     tools = mcp_server.mcp._tool_manager._tools
-    assert len(mcp_server.TOOL_NAMES) == 13
-    assert len(tools) == 13
+    assert len(mcp_server.TOOL_NAMES) == 12
+    assert len(tools) == 12
     assert set(tools) == set(mcp_server.TOOL_NAMES)
 
 
@@ -27,7 +27,7 @@ def test_provider_explicit_tool_schema_count_is_8(monkeypatch, tmp_path):
     assert all(schema["name"].startswith("everos_memory_") for schema in schemas)
 
 
-def test_readme_uses_current_mcp_13_badge_and_no_stale_mcp_9_wording():
+def test_readme_uses_current_mcp_12_badge_and_no_stale_mcp_9_wording():
     text = (ROOT / "README.md").read_text(encoding="utf-8")
 
     stale_patterns = [
@@ -38,7 +38,7 @@ def test_readme_uses_current_mcp_13_badge_and_no_stale_mcp_9_wording():
     ]
     for pattern in stale_patterns:
         assert not re.search(pattern, text, flags=re.IGNORECASE), pattern
-    assert "MCP-13%20tools" in text or "MCP-13 tools" in text
+    assert "MCP-12%20tools" in text or "MCP-12 tools" in text
     assert "<p align=\"center\">" in text
     assert "style=for-the-badge" in text
     assert "Hermes-single%20plugin" in text

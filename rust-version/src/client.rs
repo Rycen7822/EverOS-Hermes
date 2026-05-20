@@ -174,18 +174,6 @@ impl EverOSClient {
         )
     }
 
-    pub fn add_group_memories(
-        &self,
-        _group_id: &str,
-        _messages: Vec<Value>,
-        _group_meta: Option<Value>,
-        _async_mode: bool,
-    ) -> Result<Value> {
-        Err(EverOSError::Api(
-            "group memory is out of scope for this EverOS-Hermes release".to_string(),
-        ))
-    }
-
     pub fn flush_memories(
         &self,
         user_id: &str,
@@ -221,17 +209,10 @@ impl EverOSClient {
         )
     }
 
-    pub fn flush_group_memories(&self, _group_id: &str, _timeout: Option<f64>) -> Result<Value> {
-        Err(EverOSError::Api(
-            "group memory is out of scope for this EverOS-Hermes release".to_string(),
-        ))
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub fn get_memories(
         &self,
         user_id: Option<&str>,
-        group_id: Option<&str>,
         session_id: Option<&str>,
         filters: Option<Value>,
         memory_type: &str,
@@ -248,7 +229,7 @@ impl EverOSClient {
             rank_by,
             &normalized_rank_order,
         )?;
-        let resolved_filters = build_filters(user_id, group_id, session_id, filters)?;
+        let resolved_filters = build_filters(user_id, session_id, filters)?;
         self.request_json(
             "POST",
             "/api/v1/memories/get",
@@ -269,7 +250,6 @@ impl EverOSClient {
         &self,
         query: &str,
         user_id: Option<&str>,
-        group_id: Option<&str>,
         session_id: Option<&str>,
         filters: Option<Value>,
         method: &str,
@@ -282,7 +262,7 @@ impl EverOSClient {
     ) -> Result<Value> {
         let normalized_method = method.trim().to_ascii_lowercase();
         validate_search_params(&normalized_method, memory_types.as_deref(), top_k, radius)?;
-        let resolved_filters = build_filters(user_id, group_id, session_id, filters)?;
+        let resolved_filters = build_filters(user_id, session_id, filters)?;
         let memory_types = memory_types.unwrap_or_else(|| {
             DEFAULT_MEMORY_TYPES
                 .iter()
@@ -314,10 +294,9 @@ impl EverOSClient {
         &self,
         memory_id: Option<&str>,
         user_id: Option<&str>,
-        group_id: Option<&str>,
         session_id: Option<&str>,
     ) -> Result<Value> {
-        validate_delete_request(memory_id, user_id, group_id, session_id)?;
+        validate_delete_request(memory_id, user_id, session_id)?;
         let (body, mode) =
             if let Some(memory_id) = memory_id.filter(|value| !value.trim().is_empty()) {
                 (json!({"memory_id": memory_id}), "single")
@@ -423,23 +402,11 @@ pub fn drop_nulls(value: Value) -> Value {
     }
 }
 
-fn reject_group_memory_scope(group_id: Option<&str>, message: &str) -> Result<()> {
-    if group_id.filter(|value| !value.trim().is_empty()).is_some() {
-        return Err(EverOSError::Api(message.to_string()));
-    }
-    Ok(())
-}
-
 pub fn build_filters(
     user_id: Option<&str>,
-    group_id: Option<&str>,
     session_id: Option<&str>,
     filters: Option<Value>,
 ) -> Result<Value> {
-    reject_group_memory_scope(
-        group_id,
-        "group memory is out of scope for this EverOS-Hermes release",
-    )?;
     let mut map = match filters {
         Some(Value::Object(map)) => map,
         Some(_) => return Err(EverOSError::Api("filters must be an object".to_string())),
@@ -732,13 +699,8 @@ fn settings_data_object(value: &Value) -> Option<&Map<String, Value>> {
 fn validate_delete_request(
     memory_id: Option<&str>,
     user_id: Option<&str>,
-    group_id: Option<&str>,
     session_id: Option<&str>,
 ) -> Result<()> {
-    reject_group_memory_scope(
-        group_id,
-        "group delete is out of scope for this EverOS-Hermes release",
-    )?;
     let has_memory_id = memory_id.is_some_and(|value| !value.trim().is_empty());
     if has_memory_id && (user_id.is_some() || session_id.is_some()) {
         return Err(EverOSError::Api(

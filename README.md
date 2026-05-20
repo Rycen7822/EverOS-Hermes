@@ -13,7 +13,7 @@ Use EverOS through a single Hermes plugin directory, with compatibility surfaces
 <p align="center">
   <a href="README.md"><img src="https://img.shields.io/badge/Docs-README-f5c542?style=for-the-badge" alt="Documentation"></a>
   <a href="https://github.com/Rycen7822/EverOS-Hermes"><img src="https://img.shields.io/badge/GitHub-EverOS--Hermes-0969da?style=for-the-badge" alt="GitHub repository"></a>
-  <a href="src/everos_hermes/mcp_server.py"><img src="https://img.shields.io/badge/MCP-13%20tools-2ea44f?style=for-the-badge" alt="MCP: thirteen tools"></a>
+  <a href="src/everos_hermes/mcp_server.py"><img src="https://img.shields.io/badge/MCP-12%20tools-2ea44f?style=for-the-badge" alt="MCP: twelve tools"></a>
   <a href="integrations/hermes"><img src="https://img.shields.io/badge/Hermes-single%20plugin-5865F2?style=for-the-badge" alt="Hermes single plugin"></a>
   <a href="rust-version/README.md"><img src="https://img.shields.io/badge/Runtime-Python%20%7C%20Rust-blue?style=for-the-badge" alt="Runtime: Python and Rust"></a>
   <a href="https://github.com/Rycen7822/EverOS-Hermes/releases"><img src="https://img.shields.io/badge/Rust%20Prebuilt-available-0969da?style=for-the-badge" alt="Rust prebuilt package available"></a>
@@ -37,7 +37,7 @@ Current versions and surfaces:
 - Python package: `everos-hermes` `0.3.0`.
 - Rust crate/binary: `everos-hermes-rust` `0.3.0`.
 - Standalone provider/plugin tools: 8 `everos_memory_*` tools.
-- Stdio compatibility server: MCP-13 tools for existing stdio integrations.
+- Stdio compatibility server: MCP-12 tools for existing stdio integrations.
 
 The stdio compatibility server and Rust binary remain in the repository for existing integrations and release packages. Normal Hermes users should install and enable the plugin rather than configuring a separate server and copying a separate skill.
 

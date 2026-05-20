@@ -32,15 +32,17 @@ pub fn error_envelope(workflow: &str, error_code: &str, message: &str) -> Value 
     })
 }
 
-pub fn flush_result_payload(response: &Value) -> Value {
-    flush_result_payload_with_attempt(response, None)
+pub fn tool_flush_result_payload(response: &Value) -> Value {
+    tool_flush_result_payload_with_attempt(response, None)
 }
 
-pub fn flush_result_payload_with_attempt(response: &Value, attempt_count: Option<usize>) -> Value {
+pub fn tool_flush_result_payload_with_attempt(
+    response: &Value,
+    attempt_count: Option<usize>,
+) -> Value {
     let data = response.get("data").unwrap_or(response);
     let mut payload = serde_json::Map::new();
     payload.insert("ok".to_string(), Value::Bool(true));
-    payload.insert("status".to_string(), Value::String("success".to_string()));
     if let Some(attempt_count) = attempt_count.filter(|value| *value > 1) {
         payload.insert("attempt_count".to_string(), json!(attempt_count));
     }
@@ -49,19 +51,30 @@ pub fn flush_result_payload_with_attempt(response: &Value, attempt_count: Option
             payload.insert(key.to_string(), value.clone());
         }
     }
-    if let Some(status_code) = response.get("status_code") {
-        payload.insert("status_code".to_string(), status_code.clone());
-    }
     Value::Object(payload)
 }
 
-pub fn timeout_payload(operation: &str, err: &EverOSError) -> Value {
+pub fn flush_result_payload(response: &Value) -> Value {
+    flush_result_payload_with_attempt(response, None)
+}
+
+pub fn flush_result_payload_with_attempt(response: &Value, attempt_count: Option<usize>) -> Value {
+    let mut payload = tool_flush_result_payload_with_attempt(response, attempt_count);
+    if let Some(map) = payload.as_object_mut() {
+        map.entry("status".to_string())
+            .or_insert_with(|| Value::String("success".to_string()));
+        if let Some(status_code) = response.get("status_code") {
+            map.insert("status_code".to_string(), status_code.clone());
+        }
+    }
+    payload
+}
+
+pub fn tool_timeout_payload(operation: &str, err: &EverOSError) -> Value {
     json!({
         "ok": false,
         "operation": operation,
-        "status": "timeout",
-        "error_code": "timeout",
-        "message": sanitized_error_message(err),
+        "error": sanitized_error_message(err),
         "retryable": true,
         "suggested_next_actions": [
             "search existing memories before retrying, because the server may have completed the request after the client timed out",
@@ -69,6 +82,22 @@ pub fn timeout_payload(operation: &str, err: &EverOSError) -> Value {
             "retry with a longer timeout only if search/status checks do not show the expected result"
         ]
     })
+}
+
+pub fn timeout_payload(operation: &str, err: &EverOSError) -> Value {
+    let mut payload = tool_timeout_payload(operation, err);
+    if let Some(map) = payload.as_object_mut() {
+        let message = map
+            .remove("error")
+            .unwrap_or_else(|| Value::String(sanitized_error_message(err)));
+        map.insert("status".to_string(), Value::String("timeout".to_string()));
+        map.insert(
+            "error_code".to_string(),
+            Value::String("timeout".to_string()),
+        );
+        map.insert("message".to_string(), message);
+    }
+    payload
 }
 
 fn verification_error_payload(err: &EverOSError) -> Value {
@@ -92,7 +121,7 @@ fn verification_failed(verification: &Value) -> bool {
         && verification.get("ok") == Some(&Value::Bool(false))
 }
 
-pub fn save_result_payload(
+pub fn tool_save_result_payload(
     result: &Value,
     user_id: &str,
     session_id: Option<&str>,
@@ -103,7 +132,7 @@ pub fn save_result_payload(
     let status = result
         .pointer("/data/status")
         .and_then(Value::as_str)
-        .unwrap_or("queued");
+        .unwrap_or("");
     let task_id = result
         .pointer("/data/task_id")
         .and_then(Value::as_str)
@@ -112,8 +141,6 @@ pub fn save_result_payload(
         || !task_id.is_empty()
         || matches!(status, "queued" | "processing" | "success");
     json!({
-        "ok": true,
-        "status": status,
         "saved": true,
         "message_queued": true,
         "extraction_requested": extraction_requested,
@@ -121,15 +148,63 @@ pub fn save_result_payload(
         "user_id": user_id,
         "session_id": session_id,
         "scope": scope,
+        "status": status,
         "task_id": task_id,
         "flush": flush.unwrap_or_else(|| {
             if flush_requested {
-                json!({"ok": false, "status":"missing", "error": "flush requested but no flush result was recorded"})
+                json!({"ok": false, "error": "flush requested but no flush result was recorded"})
             } else {
                 json!({"ok": Value::Null, "status": "not_requested"})
             }
         }),
     })
+}
+
+pub fn save_result_payload(
+    result: &Value,
+    user_id: &str,
+    session_id: Option<&str>,
+    scope: &str,
+    flush_requested: bool,
+    flush: Option<Value>,
+) -> Value {
+    let mut payload =
+        tool_save_result_payload(result, user_id, session_id, scope, flush_requested, flush);
+    if let Some(map) = payload.as_object_mut() {
+        if map
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .is_empty()
+        {
+            map.insert("status".to_string(), Value::String("queued".to_string()));
+        }
+        map.insert("ok".to_string(), Value::Bool(true));
+        if let (true, Some(flush)) = (
+            flush_requested,
+            map.get_mut("flush").and_then(Value::as_object_mut),
+        ) {
+            flush
+                .entry("status".to_string())
+                .or_insert_with(|| Value::String("missing".to_string()));
+        }
+    }
+    payload
+}
+
+pub fn add_agent_visibility(
+    payload: &mut Value,
+    agent_raw_queued: Option<bool>,
+    user_id: Option<&str>,
+    session_id: Option<&str>,
+) {
+    let flush = payload.get("flush").cloned();
+    if let Some(map) = payload.as_object_mut() {
+        map.insert(
+            "agent_visibility".to_string(),
+            build_agent_visibility_report(agent_raw_queued, flush, vec![], user_id, session_id),
+        );
+    }
 }
 
 fn now_ms() -> u128 {
@@ -349,7 +424,6 @@ pub fn verify_session_ingest(
         let response = client.search_memories(
             query,
             Some(user_id),
-            None,
             session_id,
             None,
             "hybrid",
@@ -638,7 +712,6 @@ pub fn import_and_verify(
     memory_types: Option<Vec<String>>,
     top_k: i64,
     timeout: Option<f64>,
-    workflow: &str,
 ) -> Result<Value, EverOSError> {
     let scope = normalize_scope(scope)?;
     let default_role = if scope == "agent" {
@@ -649,7 +722,7 @@ pub fn import_and_verify(
     let (messages, warnings) = normalize_import_messages(messages, file_path, default_role)?;
     let metrics = message_metrics(&messages, batch_size);
     if dry_run {
-        let mut payload = success_envelope(workflow, "dry_run");
+        let mut payload = success_envelope("import_and_verify", "dry_run");
         payload.insert("input_count".to_string(), json!(messages.len()));
         payload.insert("queued_count".to_string(), json!(0));
         payload.insert("failed_count".to_string(), json!(0));
@@ -680,7 +753,7 @@ pub fn import_and_verify(
         .collect();
     if !blocking_warnings.is_empty() {
         let mut payload = error_envelope(
-            workflow,
+            "import_and_verify",
             "validation_failed",
             "import contains messages that cannot be safely submitted",
         );
@@ -774,7 +847,7 @@ pub fn import_and_verify(
             "adjust verification queries if extraction consolidated memories".to_string(),
         ));
     }
-    let mut payload = success_envelope(workflow, status);
+    let mut payload = success_envelope("import_and_verify", status);
     payload.insert("input_count".to_string(), json!(messages.len()));
     payload.insert("queued_count".to_string(), json!(queued_count));
     payload.insert("failed_count".to_string(), json!(failed_count));

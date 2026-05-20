@@ -29,7 +29,6 @@ def test_import_dry_run_warns_for_non_epoch_ms_timestamp_and_reports_metrics():
         dry_run=True,
         batch_size=5,
         flush=False,
-        workflow="batch_ingest",
     )
 
     assert result["ok"] is True
@@ -51,7 +50,6 @@ def test_import_rejects_non_epoch_ms_timestamp_before_real_write():
         dry_run=False,
         batch_size=5,
         flush=False,
-        workflow="batch_ingest",
     )
 
     assert result["ok"] is False
@@ -80,7 +78,6 @@ def test_import_splits_cloud_403_batches_until_small_subbatches_queue():
         dry_run=False,
         batch_size=12,
         flush=False,
-        workflow="batch_ingest",
     )
 
     assert result["ok"] is True
@@ -318,54 +315,49 @@ def test_import_missing_tool_call_id_stays_fatal_before_write():
     assert any("tool_call_id" in warning for warning in result["warnings"])
 
 
-def test_save_and_verify_retries_transient_flush_send_error_once():
-    class RetryFlushClient(AgentVisibilityClient):
-        def __init__(self):
-            super().__init__()
-            self.flush_calls = 0
+class RetryFlushClient(AgentVisibilityClient):
+    def __init__(self):
+        super().__init__()
+        self.flush_calls = 0
 
-        def flush_memories(self, **kwargs):
-            self.flush_calls += 1
-            if self.flush_calls == 1:
-                raise EverOSError("EverOS request failed: error sending request")
-            return {"data": {"status": "success", "task_id": "flush-ok"}}
-
-    client = RetryFlushClient()
-    result = save_and_verify(
-        client=client,
-        content="retry flush after save",
-        user_id="u1",
-        session_id="s1",
-        verification_queries=[],
-        flush=True,
-    )
-
-    assert client.flush_calls == 2
-    assert result["save"]["flush"]["ok"] is True
-    assert result["save"]["flush"]["status"] == "success"
+    def flush_memories(self, **kwargs):
+        self.flush_calls += 1
+        if self.flush_calls == 1:
+            raise EverOSError("EverOS request failed: error sending request")
+        return {"data": {"status": "success", "task_id": "flush-ok"}}
 
 
-def test_import_and_verify_retries_transient_flush_send_error_once():
-    class RetryFlushClient(AgentVisibilityClient):
-        def __init__(self):
-            super().__init__()
-            self.flush_calls = 0
+def test_workflows_retry_transient_flush_send_error_once():
+    cases = [
+        (
+            lambda client: save_and_verify(
+                client=client,
+                content="retry flush after save",
+                user_id="u1",
+                session_id="s1",
+                verification_queries=[],
+                flush=True,
+            ),
+            ("save", "flush"),
+        ),
+        (
+            lambda client: import_and_verify(
+                client=client,
+                user_id="u1",
+                session_id="s1",
+                messages=[_message(1), _message(2)],
+                flush=True,
+            ),
+            ("flush",),
+        ),
+    ]
 
-        def flush_memories(self, **kwargs):
-            self.flush_calls += 1
-            if self.flush_calls == 1:
-                raise EverOSError("EverOS request failed: error sending request")
-            return {"data": {"status": "success", "task_id": "flush-ok"}}
-
-    client = RetryFlushClient()
-    result = import_and_verify(
-        client=client,
-        user_id="u1",
-        session_id="s1",
-        messages=[_message(1), _message(2)],
-        flush=True,
-    )
-
-    assert client.flush_calls == 2
-    assert result["flush"]["ok"] is True
-    assert result["flush"]["status"] == "success"
+    for run_workflow, path in cases:
+        client = RetryFlushClient()
+        result = run_workflow(client)
+        flush_payload = result
+        for key in path:
+            flush_payload = flush_payload[key]
+        assert client.flush_calls == 2
+        assert flush_payload["ok"] is True
+        assert flush_payload["status"] == "success"

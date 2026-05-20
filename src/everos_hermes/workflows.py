@@ -11,7 +11,11 @@ from .flush_retry import flush_memories_with_retry
 from .redaction import error_payload as generic_error_payload, sanitized_error_message
 from .response_normalization import count_hits
 from .schemas import normalize_scope, validate_messages
-from .tool_payloads import flush_result_payload as _base_flush_result_payload, timeout_payload as _base_timeout_payload
+from .tool_payloads import (
+    flush_result_payload as _base_flush_result_payload,
+    save_result_payload as _base_save_result_payload,
+    timeout_payload as _base_timeout_payload,
+)
 
 
 def now_ms() -> int:
@@ -57,31 +61,19 @@ def save_result_payload(
     flush_result: dict[str, Any] | None = None,
     flush_error: Exception | None = None,
 ) -> dict[str, Any]:
-    data = result.get("data", {}) if isinstance(result, dict) else {}
-    status = data.get("status", "") if isinstance(data, dict) else ""
-    task_id = data.get("task_id", "") if isinstance(data, dict) else ""
-    payload: dict[str, Any] = {
-        "ok": True,
-        "status": status or "queued",
-        "saved": True,
-        "message_queued": True,
-        "extraction_requested": bool(task_id or status in {"queued", "processing", "success"} or flush_requested),
-        "searchable": None,
-        "scope": scope,
-        "user_id": user_id,
-        "session_id": session_id,
-        "task_id": task_id,
-    }
-    if flush_result is not None:
-        payload["flush"] = flush_result_payload(flush_result)
-    elif isinstance(flush_error, EverOSTimeoutError):
-        payload["flush"] = timeout_payload("flush", flush_error)
-    elif flush_error is not None:
-        payload["flush"] = generic_error_payload("flush", flush_error)
-    elif flush_requested:
-        payload["flush"] = {"ok": False, "status": "missing", "error": "flush requested but no flush result was recorded"}
-    else:
-        payload["flush"] = {"ok": None, "status": "not_requested"}
+    payload = _base_save_result_payload(
+        result=result,
+        user_id=user_id,
+        session_id=session_id,
+        scope=scope,
+        flush_requested=flush_requested,
+        flush_result=flush_result,
+        flush_error=flush_error,
+    )
+    payload["ok"] = True
+    payload["status"] = payload.get("status") or "queued"
+    if flush_requested and isinstance(payload.get("flush"), dict):
+        payload["flush"].setdefault("status", "missing")
     return payload
 
 
@@ -400,7 +392,6 @@ def import_and_verify(
     memory_types: list[str] | None = None,
     top_k: int = 5,
     timeout: float | None = None,
-    workflow: str = "import_and_verify",
 ) -> dict[str, Any]:
     resolved_scope = normalize_scope(scope)
     normalized, warnings = normalize_import_messages(messages, file_path, default_role=("assistant" if resolved_scope == "agent" else "user"))
@@ -416,7 +407,7 @@ def import_and_verify(
     if dry_run:
         dry_run_actions = ["fix warnings before importing"] if warnings else ["rerun with dry_run=false to import messages"]
         return success_envelope(
-            workflow=workflow,
+            workflow="import_and_verify",
             status="dry_run",
             input_count=len(normalized),
             queued_count=0,
@@ -429,7 +420,7 @@ def import_and_verify(
         )
     if validation_errors:
         return error_envelope(
-            workflow=workflow,
+            workflow="import_and_verify",
             error_code="validation_failed",
             message="import contains messages that cannot be safely submitted",
             input_count=len(normalized),
@@ -561,7 +552,7 @@ def import_and_verify(
     if verification.get("verified") is False:
         actions.extend(["wait for extraction and rerun verify_session_ingest", "adjust verification queries if extraction consolidated memories"])
     payload = success_envelope(
-        workflow=workflow,
+        workflow="import_and_verify",
         status=status,
         input_count=len(normalized),
         queued_count=queued_count,

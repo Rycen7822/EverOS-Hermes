@@ -207,19 +207,31 @@ fn mcp_schema_snapshot() -> Value {
                         names
                     })
                     .unwrap_or_default();
-                let annotations = schema
-                    .get("annotations")
-                    .cloned()
-                    .unwrap_or_else(|| json!({}));
+                let output_required = sorted_string_values(output.get("required"));
+                let output_shape = if output_required == ["result"] && output_properties == ["result"] {
+                    json!("result")
+                } else if output_required.is_empty()
+                    && output_properties == ["ok", "retryable", "status", "suggested_next_actions", "workflow"]
+                {
+                    json!("workflow")
+                } else {
+                    json!({"required": output_required, "properties": output_properties})
+                };
+                let annotations = schema.get("annotations").unwrap_or(&Value::Null);
                 json!({
                     "name": schema["name"],
                     "title": schema["title"],
                     "description_summary": description_summary(schema.get("description")),
                     "required": sorted_string_values(input.get("required")),
                     "properties": property_names,
-                    "output_required": sorted_string_values(output.get("required")),
-                    "output_properties": output_properties,
-                    "annotations": annotations,
+                    "output_shape": output_shape,
+                    "annotation_profile": format!(
+                        "{}:{}:{}:{}",
+                        if annotations["readOnlyHint"].as_bool().unwrap_or(false) { "read" } else { "write" },
+                        if annotations["destructiveHint"].as_bool().unwrap_or(false) { "destructive" } else { "safe" },
+                        if annotations["idempotentHint"].as_bool().unwrap_or(false) { "idem" } else { "nonidem" },
+                        if annotations["openWorldHint"].as_bool().unwrap_or(false) { "open" } else { "closed" },
+                    ),
                 })
             })
             .collect(),
@@ -510,7 +522,6 @@ fn client_search_uses_hybrid_defaults_and_session_filter() {
         .search_memories(
             "coffee preference",
             Some("user_001"),
-            None,
             Some("session_001"),
             None,
             "hybrid",
@@ -557,7 +568,6 @@ fn client_search_strips_vectors_by_default_but_can_keep_them() {
             Some("user_001"),
             None,
             None,
-            None,
             "hybrid",
             None,
             5,
@@ -577,7 +587,6 @@ fn client_search_strips_vectors_by_default_but_can_keep_them() {
         .search_memories(
             "coffee",
             Some("user_001"),
-            None,
             None,
             None,
             "hybrid",
@@ -1362,7 +1371,6 @@ fn mcp_tool_name_constant_matches_expected_thirteen_tools() {
             "everos_get_task_status",
             "everos_get_settings",
             "everos_update_settings",
-            "everos_batch_ingest",
             "everos_verify_session_ingest",
             "everos_save_and_verify",
             "everos_import_and_verify",
@@ -1379,7 +1387,6 @@ fn client_accepts_top_k_minus_one_and_radius_filters() {
         .search_memories(
             "debug timeout",
             Some("user_001"),
-            None,
             Some("session_001"),
             Some(json!({"AND":[{"timestamp":{"gte":1}}]})),
             "hybrid",
@@ -1410,7 +1417,6 @@ fn client_rejects_invalid_search_get_delete_contracts_before_request() {
                 Some("u"),
                 None,
                 None,
-                None,
                 "hybrid",
                 Some(vec!["agent_case".to_string()]),
                 5,
@@ -1426,7 +1432,6 @@ fn client_rejects_invalid_search_get_delete_contracts_before_request() {
             .search_memories(
                 "q",
                 Some("u"),
-                None,
                 None,
                 None,
                 "hybrid",
@@ -1446,7 +1451,6 @@ fn client_rejects_invalid_search_get_delete_contracts_before_request() {
                 Some("u"),
                 None,
                 None,
-                None,
                 "hybrid",
                 None,
                 5,
@@ -1463,7 +1467,6 @@ fn client_rejects_invalid_search_get_delete_contracts_before_request() {
                 Some("u"),
                 None,
                 None,
-                None,
                 "agent_memory",
                 1,
                 20,
@@ -1474,14 +1477,10 @@ fn client_rejects_invalid_search_get_delete_contracts_before_request() {
     );
     assert!(
         client
-            .delete_memories(Some("mem-1"), Some("u"), None, None)
+            .delete_memories(Some("mem-1"), Some("u"), None)
             .is_err()
     );
-    assert!(
-        client
-            .delete_memories(None, None, None, Some("sess"))
-            .is_err()
-    );
+    assert!(client.delete_memories(None, None, Some("sess")).is_err());
 }
 
 #[test]
@@ -1578,7 +1577,6 @@ fn mcp_and_provider_schemas_expose_cloud_v1_parameters() {
 fn mcp_and_provider_workflow_tools_are_registered() {
     let tools = everos_hermes_rust::mcp::tool_definitions();
     for name in [
-        "everos_batch_ingest",
         "everos_verify_session_ingest",
         "everos_save_and_verify",
         "everos_import_and_verify",
@@ -1720,7 +1718,7 @@ fn mcp_import_and_verify_dry_run_reports_warnings_without_http() {
 }
 
 #[test]
-fn mcp_batch_ingest_batches_flushes_and_verifies() {
+fn mcp_import_and_verify_batches_flushes_and_verifies() {
     let _guard = ENV_LOCK.lock().unwrap();
     let (base_url, handle) = sequenced_request_server(
         vec![
@@ -1736,7 +1734,7 @@ fn mcp_batch_ingest_batches_flushes_and_verifies() {
     set_env("EVEROS_BASE_URL", &base_url);
 
     let raw = everos_hermes_rust::mcp::call_tool(
-        "everos_batch_ingest",
+        "everos_import_and_verify",
         json!({
             "session_id":"sess-batch",
             "batch_size":2,
@@ -1754,7 +1752,7 @@ fn mcp_batch_ingest_batches_flushes_and_verifies() {
     let requests = handle.join().unwrap();
 
     assert_eq!(response["ok"], true);
-    assert_eq!(response["workflow"], "batch_ingest");
+    assert_eq!(response["workflow"], "import_and_verify");
     assert_eq!(response["status"], "verified");
     assert_eq!(response["input_count"], 3);
     assert_eq!(response["queued_count"], 3);
@@ -1839,7 +1837,7 @@ fn mcp_import_and_verify_preserves_batch_payload_when_verification_has_error() {
 }
 
 #[test]
-fn mcp_batch_ingest_splits_cloud_403_batches() {
+fn mcp_import_and_verify_splits_cloud_403_batches() {
     let _guard = ENV_LOCK.lock().unwrap();
     let (base_url, handle) = sequenced_status_request_server(
         vec![
@@ -1860,7 +1858,7 @@ fn mcp_batch_ingest_splits_cloud_403_batches() {
     set_env("EVEROS_BASE_URL", &base_url);
 
     let raw = everos_hermes_rust::mcp::call_tool(
-        "everos_batch_ingest",
+        "everos_import_and_verify",
         json!({
             "session_id":"sess-split",
             "batch_size":4,
@@ -1878,7 +1876,7 @@ fn mcp_batch_ingest_splits_cloud_403_batches() {
     let requests = handle.join().unwrap();
 
     assert_eq!(response["ok"], true);
-    assert_eq!(response["workflow"], "batch_ingest");
+    assert_eq!(response["workflow"], "import_and_verify");
     assert_eq!(response["status"], "queued");
     assert_eq!(response["input_count"], 4);
     assert_eq!(response["queued_count"], 4);
@@ -3113,34 +3111,21 @@ fn client_response_envelope_contract_cases() {
             "request_json" => {
                 let response = &case["server_response"];
                 let request = &case["request"];
-                let status = response["status"].as_u64().unwrap();
-                let actual = if status == 204 {
-                    let (base_url, handle) = one_status_empty_request_server(204);
-                    let client = EverOSClient::new("test-key", &base_url, 10.0).unwrap();
-                    let actual = client
-                        .request_json(
-                            request["method"].as_str().unwrap(),
-                            request["path"].as_str().unwrap(),
-                            None,
-                            None,
-                        )
-                        .unwrap();
-                    handle.join().unwrap();
-                    actual
+                let (base_url, handle) = if response["status"].as_u64().unwrap() == 204 {
+                    one_status_empty_request_server(204)
                 } else {
-                    let (base_url, handle) = one_request_server(response["body"].clone());
-                    let client = EverOSClient::new("test-key", &base_url, 10.0).unwrap();
-                    let actual = client
-                        .request_json(
-                            request["method"].as_str().unwrap(),
-                            request["path"].as_str().unwrap(),
-                            None,
-                            None,
-                        )
-                        .unwrap();
-                    handle.join().unwrap();
-                    actual
+                    one_request_server(response["body"].clone())
                 };
+                let client = EverOSClient::new("test-key", &base_url, 10.0).unwrap();
+                let actual = client
+                    .request_json(
+                        request["method"].as_str().unwrap(),
+                        request["path"].as_str().unwrap(),
+                        None,
+                        None,
+                    )
+                    .unwrap();
+                handle.join().unwrap();
                 assert_eq!(actual, case["expected_response"]);
             }
             "delete_memories" => {
@@ -3148,7 +3133,7 @@ fn client_response_envelope_contract_cases() {
                 let client = EverOSClient::new("test-key", &base_url, 10.0).unwrap();
                 let args = &case["args"];
                 let actual = client
-                    .delete_memories(args["memory_id"].as_str(), None, None, None)
+                    .delete_memories(args["memory_id"].as_str(), None, None)
                     .unwrap();
                 let request = handle.join().unwrap();
                 assert_eq!(parse_http_body(&request), case["expected_request"]["body"]);
@@ -3174,7 +3159,6 @@ fn client_param_normalization_contract_cases() {
                         args["user_id"].as_str(),
                         None,
                         None,
-                        None,
                         args["method"].as_str().unwrap(),
                         None,
                         5,
@@ -3197,7 +3181,6 @@ fn client_param_normalization_contract_cases() {
                 client
                     .get_memories(
                         args["user_id"].as_str(),
-                        None,
                         None,
                         None,
                         args["memory_type"].as_str().unwrap(),
@@ -3256,7 +3239,6 @@ fn client_session_filter_requires_exact_non_empty_operator_and_group_helpers_fai
                 .search_memories(
                     "coffee",
                     Some("u1"),
-                    None,
                     Some("sess"),
                     Some(filters),
                     "hybrid",
@@ -3270,6 +3252,4 @@ fn client_session_filter_requires_exact_non_empty_operator_and_group_helpers_fai
                 .is_err()
         );
     }
-    assert!(client.add_group_memories("g1", vec![], None, true).is_err());
-    assert!(client.flush_group_memories("g1", None).is_err());
 }
