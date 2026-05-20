@@ -74,7 +74,7 @@ def main() -> int:
 
         tools = client.request("tools/list", {})
         tool_count = len(tools.get("result", {}).get("tools", []))
-        assert_true(failures, "tools/list has thirteen tools", tool_count == 13, f"tool_count={tool_count}")
+        assert_true(failures, "tools/list has twelve tools", tool_count == 12, f"tool_count={tool_count}")
 
         _, save_payload = call(
             client,

@@ -376,6 +376,110 @@ def save_and_verify(
     return payload
 
 
+def _submit_import_batch(
+    *,
+    client: EverOSClient,
+    user_id: str,
+    session_id: str | None,
+    scope: str,
+    batch: list[dict[str, Any]],
+    batch_index: int,
+    batch_reports: list[dict[str, Any]],
+    split_from: int | None = None,
+) -> tuple[int, int, int]:
+    try:
+        result = client.add_memories(
+            user_id=user_id,
+            session_id=session_id,
+            messages=batch,
+            async_mode=True,
+            scope=scope,
+        )
+        data = result.get("data", {}) if isinstance(result, dict) else {}
+        batch_reports.append({
+            "batch_index": batch_index,
+            "split_from": split_from,
+            "ok": True,
+            "message_count": len(batch),
+            "payload_bytes": _json_bytes({"messages": batch}),
+            "status": data.get("status", "queued") if isinstance(data, dict) else "queued",
+            "task_id": data.get("task_id", "") if isinstance(data, dict) else "",
+            "response": result,
+        })
+        return len(batch), 0, 0
+    except Exception as exc:  # keep importing independent batches if possible
+        if _is_cloud_403(exc) and len(batch) > 1:
+            mid = max(1, len(batch) // 2)
+            batch_reports.append({
+                "batch_index": batch_index,
+                "split_from": split_from,
+                "ok": False,
+                "message_count": len(batch),
+                "payload_bytes": _json_bytes({"messages": batch}),
+                "error": sanitized_error_message(exc),
+                "retryable": True,
+                "split": True,
+                "split_reason": "cloud_403",
+                "split_into": [mid, len(batch) - mid],
+            })
+            left_queued, left_failed, left_splits = _submit_import_batch(
+                client=client,
+                user_id=user_id,
+                session_id=session_id,
+                scope=scope,
+                batch=batch[:mid],
+                batch_index=batch_index,
+                batch_reports=batch_reports,
+                split_from=batch_index,
+            )
+            right_queued, right_failed, right_splits = _submit_import_batch(
+                client=client,
+                user_id=user_id,
+                session_id=session_id,
+                scope=scope,
+                batch=batch[mid:],
+                batch_index=batch_index,
+                batch_reports=batch_reports,
+                split_from=batch_index,
+            )
+            return left_queued + right_queued, left_failed + right_failed, 1 + left_splits + right_splits
+        batch_reports.append({
+            "batch_index": batch_index,
+            "split_from": split_from,
+            "ok": False,
+            "message_count": len(batch),
+            "payload_bytes": _json_bytes({"messages": batch}),
+            "error": sanitized_error_message(exc),
+            "retryable": True,
+        })
+        return 0, len(batch), 0
+
+
+def _import_status(*, verification: dict[str, Any], queued_count: int, failed_count: int) -> str:
+    if verification.get("operation") == "verification" and verification.get("ok") is False and queued_count:
+        return "verification_error"
+    if verification.get("verified") is True:
+        return "verified"
+    if verification.get("verified") is False and queued_count:
+        return verification.get("status", "not_yet_searchable")
+    if failed_count and queued_count:
+        return "partially_queued"
+    if failed_count:
+        return "failed"
+    return "queued"
+
+
+def _import_actions(*, split_count: int, failed_count: int, verification: dict[str, Any]) -> list[str]:
+    actions: list[str] = []
+    if split_count:
+        actions.append("Cloud 403 triggered adaptive batch splitting; keep batch_size small for long messages")
+    if failed_count:
+        actions.append("retry only failed batches using the batch report")
+    if verification.get("verified") is False:
+        actions.extend(["wait for extraction and rerun verify_session_ingest", "adjust verification queries if extraction consolidated memories"])
+    return actions
+
+
 def import_and_verify(
     *,
     client: EverOSClient,
@@ -434,59 +538,16 @@ def import_and_verify(
     queued_count = 0
     failed_count = 0
     split_count = 0
-
-    def submit_batch(batch: list[dict[str, Any]], *, batch_index: int, split_from: int | None = None) -> tuple[int, int, int]:
-        try:
-            result = client.add_memories(
-                user_id=user_id,
-                session_id=session_id,
-                messages=batch,
-                async_mode=True,
-                scope=resolved_scope,
-            )
-            data = result.get("data", {}) if isinstance(result, dict) else {}
-            batch_reports.append({
-                "batch_index": batch_index,
-                "split_from": split_from,
-                "ok": True,
-                "message_count": len(batch),
-                "payload_bytes": _json_bytes({"messages": batch}),
-                "status": data.get("status", "queued") if isinstance(data, dict) else "queued",
-                "task_id": data.get("task_id", "") if isinstance(data, dict) else "",
-                "response": result,
-            })
-            return len(batch), 0, 0
-        except Exception as exc:  # keep importing independent batches if possible
-            if _is_cloud_403(exc) and len(batch) > 1:
-                mid = max(1, len(batch) // 2)
-                batch_reports.append({
-                    "batch_index": batch_index,
-                    "split_from": split_from,
-                    "ok": False,
-                    "message_count": len(batch),
-                    "payload_bytes": _json_bytes({"messages": batch}),
-                    "error": sanitized_error_message(exc),
-                    "retryable": True,
-                    "split": True,
-                    "split_reason": "cloud_403",
-                    "split_into": [mid, len(batch) - mid],
-                })
-                left_queued, left_failed, left_splits = submit_batch(batch[:mid], batch_index=batch_index, split_from=batch_index)
-                right_queued, right_failed, right_splits = submit_batch(batch[mid:], batch_index=batch_index, split_from=batch_index)
-                return left_queued + right_queued, left_failed + right_failed, 1 + left_splits + right_splits
-            batch_reports.append({
-                "batch_index": batch_index,
-                "split_from": split_from,
-                "ok": False,
-                "message_count": len(batch),
-                "payload_bytes": _json_bytes({"messages": batch}),
-                "error": sanitized_error_message(exc),
-                "retryable": True,
-            })
-            return 0, len(batch), 0
-
     for index, batch in enumerate(batches):
-        queued, failed, splits = submit_batch(batch, batch_index=index)
+        queued, failed, splits = _submit_import_batch(
+            client=client,
+            user_id=user_id,
+            session_id=session_id,
+            scope=resolved_scope,
+            batch=batch,
+            batch_index=index,
+            batch_reports=batch_reports,
+        )
         queued_count += queued
         failed_count += failed
         split_count += splits
@@ -521,18 +582,7 @@ def import_and_verify(
             verification = verification_error_payload(exc)
     else:
         verification = {"status": "verification_skipped", "verified": None, "queries": []}
-    if verification.get("operation") == "verification" and verification.get("ok") is False and queued_count:
-        status = "verification_error"
-    elif verification.get("verified") is True:
-        status = "verified"
-    elif verification.get("verified") is False and queued_count:
-        status = verification.get("status", "not_yet_searchable")
-    elif failed_count and queued_count:
-        status = "partially_queued"
-    elif failed_count:
-        status = "failed"
-    else:
-        status = "queued"
+    status = _import_status(verification=verification, queued_count=queued_count, failed_count=failed_count)
     agent_visibility = None
     if resolved_scope == "agent" and isinstance(verification, dict) and verification.get("agent_visibility"):
         verification_visibility = verification.get("agent_visibility", {})
@@ -544,13 +594,7 @@ def import_and_verify(
             session_id=session_id,
         )
         status = workflow_status_from_agent_visibility(agent_visibility, status)
-    actions: list[str] = []
-    if split_count:
-        actions.append("Cloud 403 triggered adaptive batch splitting; keep batch_size small for long messages")
-    if failed_count:
-        actions.append("retry only failed batches using the batch report")
-    if verification.get("verified") is False:
-        actions.extend(["wait for extraction and rerun verify_session_ingest", "adjust verification queries if extraction consolidated memories"])
+    actions = _import_actions(split_count=split_count, failed_count=failed_count, verification=verification)
     payload = success_envelope(
         workflow="import_and_verify",
         status=status,

@@ -696,6 +696,141 @@ fn submit_batch_with_adaptive_split(
     }
 }
 
+fn import_dry_run_payload(message_count: usize, warnings: Vec<String>, metrics: Value) -> Value {
+    let mut payload = success_envelope("import_and_verify", "dry_run");
+    payload.insert("input_count".to_string(), json!(message_count));
+    payload.insert("queued_count".to_string(), json!(0));
+    payload.insert("failed_count".to_string(), json!(0));
+    payload.insert("warnings".to_string(), json!(warnings));
+    payload.insert("metrics".to_string(), metrics);
+    payload.insert("batches".to_string(), json!([]));
+    payload.insert(
+        "verification".to_string(),
+        json!({"status":"verification_skipped","verified":Value::Null,"queries":[]}),
+    );
+    payload.insert(
+        "suggested_next_actions".to_string(),
+        json!([
+            "fix warnings before importing",
+            "rerun with dry_run=false to import messages"
+        ]),
+    );
+    Value::Object(payload)
+}
+
+fn import_validation_failed_payload(
+    message_count: usize,
+    warnings: Vec<String>,
+    metrics: Value,
+) -> Value {
+    let mut payload = error_envelope(
+        "import_and_verify",
+        "validation_failed",
+        "import contains messages that cannot be safely submitted",
+    );
+    if let Some(map) = payload.as_object_mut() {
+        map.insert("input_count".to_string(), json!(message_count));
+        map.insert("queued_count".to_string(), json!(0));
+        map.insert("failed_count".to_string(), json!(message_count));
+        map.insert("warnings".to_string(), json!(warnings));
+        map.insert("metrics".to_string(), metrics);
+    }
+    payload
+}
+
+fn import_flush_payload(
+    client: &EverOSClient,
+    user_id: &str,
+    session_id: Option<&str>,
+    scope: &str,
+    flush: bool,
+    queued_count: usize,
+    flush_timeout: Option<f64>,
+) -> Value {
+    if flush && queued_count > 0 {
+        match client.flush_memories_scoped(user_id, session_id, scope, flush_timeout) {
+            Ok(response) => flush_result_payload(&response),
+            Err(err @ EverOSError::Timeout { .. }) => timeout_payload("flush", &err),
+            Err(err) => error_payload("flush", &err),
+        }
+    } else {
+        json!({"ok":Value::Null,"status":"not_requested"})
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn import_verification_payload(
+    client: &EverOSClient,
+    user_id: &str,
+    session_id: Option<&str>,
+    verification_queries: Vec<String>,
+    memory_types: Option<Vec<String>>,
+    scope: &str,
+    top_k: i64,
+    timeout: Option<f64>,
+) -> Value {
+    if verification_queries.is_empty() {
+        json!({"status":"verification_skipped","verified":Value::Null,"queries":[]})
+    } else {
+        match verify_session_ingest(
+            client,
+            user_id,
+            session_id,
+            verification_queries,
+            memory_types,
+            scope,
+            top_k,
+            timeout,
+        ) {
+            Ok(value) => value,
+            Err(err) => verification_error_payload(&err),
+        }
+    }
+}
+
+fn import_status(verification: &Value, queued_count: usize, failed_count: usize) -> String {
+    if verification_failed(verification) && queued_count > 0 {
+        "verification_error".to_string()
+    } else if verification.get("verified") == Some(&Value::Bool(true)) {
+        "verified".to_string()
+    } else if verification.get("verified") == Some(&Value::Bool(false)) && queued_count > 0 {
+        verification["status"]
+            .as_str()
+            .unwrap_or("not_yet_searchable")
+            .to_string()
+    } else if failed_count > 0 && queued_count > 0 {
+        "partially_queued".to_string()
+    } else if failed_count > 0 {
+        "failed".to_string()
+    } else {
+        "queued".to_string()
+    }
+}
+
+fn import_actions(verification: &Value, split_count: usize, failed_count: usize) -> Vec<Value> {
+    let mut actions = Vec::new();
+    if split_count > 0 {
+        actions.push(Value::String(
+            "Cloud 403 triggered adaptive batch splitting; keep batch_size small for long messages"
+                .to_string(),
+        ));
+    }
+    if failed_count > 0 {
+        actions.push(Value::String(
+            "retry only failed batches using the batch report".to_string(),
+        ));
+    }
+    if verification.get("verified") == Some(&Value::Bool(false)) {
+        actions.push(Value::String(
+            "wait for extraction and rerun verify_session_ingest".to_string(),
+        ));
+        actions.push(Value::String(
+            "adjust verification queries if extraction consolidated memories".to_string(),
+        ));
+    }
+    actions
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn import_and_verify(
     client: &EverOSClient,
@@ -722,25 +857,7 @@ pub fn import_and_verify(
     let (messages, warnings) = normalize_import_messages(messages, file_path, default_role)?;
     let metrics = message_metrics(&messages, batch_size);
     if dry_run {
-        let mut payload = success_envelope("import_and_verify", "dry_run");
-        payload.insert("input_count".to_string(), json!(messages.len()));
-        payload.insert("queued_count".to_string(), json!(0));
-        payload.insert("failed_count".to_string(), json!(0));
-        payload.insert("warnings".to_string(), json!(warnings));
-        payload.insert("metrics".to_string(), metrics);
-        payload.insert("batches".to_string(), json!([]));
-        payload.insert(
-            "verification".to_string(),
-            json!({"status":"verification_skipped","verified":Value::Null,"queries":[]}),
-        );
-        payload.insert(
-            "suggested_next_actions".to_string(),
-            json!([
-                "fix warnings before importing",
-                "rerun with dry_run=false to import messages"
-            ]),
-        );
-        return Ok(Value::Object(payload));
+        return Ok(import_dry_run_payload(messages.len(), warnings, metrics));
     }
     let blocking_warnings: Vec<String> = warnings
         .iter()
@@ -752,19 +869,11 @@ pub fn import_and_verify(
         .cloned()
         .collect();
     if !blocking_warnings.is_empty() {
-        let mut payload = error_envelope(
-            "import_and_verify",
-            "validation_failed",
-            "import contains messages that cannot be safely submitted",
-        );
-        if let Some(map) = payload.as_object_mut() {
-            map.insert("input_count".to_string(), json!(messages.len()));
-            map.insert("queued_count".to_string(), json!(0));
-            map.insert("failed_count".to_string(), json!(messages.len()));
-            map.insert("warnings".to_string(), json!(warnings));
-            map.insert("metrics".to_string(), metrics);
-        }
-        return Ok(payload);
+        return Ok(import_validation_failed_payload(
+            messages.len(),
+            warnings,
+            metrics,
+        ));
     }
     let size = batch_size.clamp(1, 100);
     let mut batch_reports = Vec::new();
@@ -786,68 +895,28 @@ pub fn import_and_verify(
         failed_count += failed;
         split_count += splits;
     }
-    let flush_payload = if flush && queued_count > 0 {
-        match client.flush_memories_scoped(user_id, session_id, &scope, flush_timeout) {
-            Ok(response) => flush_result_payload(&response),
-            Err(err @ EverOSError::Timeout { .. }) => timeout_payload("flush", &err),
-            Err(err) => error_payload("flush", &err),
-        }
-    } else {
-        json!({"ok":Value::Null,"status":"not_requested"})
-    };
-    let verification = if verification_queries.is_empty() {
-        json!({"status":"verification_skipped","verified":Value::Null,"queries":[]})
-    } else {
-        match verify_session_ingest(
-            client,
-            user_id,
-            session_id,
-            verification_queries,
-            memory_types,
-            &scope,
-            top_k,
-            timeout,
-        ) {
-            Ok(value) => value,
-            Err(err) => verification_error_payload(&err),
-        }
-    };
-    let status = if verification_failed(&verification) && queued_count > 0 {
-        "verification_error"
-    } else if verification.get("verified") == Some(&Value::Bool(true)) {
-        "verified"
-    } else if verification.get("verified") == Some(&Value::Bool(false)) && queued_count > 0 {
-        verification["status"]
-            .as_str()
-            .unwrap_or("not_yet_searchable")
-    } else if failed_count > 0 && queued_count > 0 {
-        "partially_queued"
-    } else if failed_count > 0 {
-        "failed"
-    } else {
-        "queued"
-    };
-    let mut actions = Vec::new();
-    if split_count > 0 {
-        actions.push(Value::String(
-            "Cloud 403 triggered adaptive batch splitting; keep batch_size small for long messages"
-                .to_string(),
-        ));
-    }
-    if failed_count > 0 {
-        actions.push(Value::String(
-            "retry only failed batches using the batch report".to_string(),
-        ));
-    }
-    if verification.get("verified") == Some(&Value::Bool(false)) {
-        actions.push(Value::String(
-            "wait for extraction and rerun verify_session_ingest".to_string(),
-        ));
-        actions.push(Value::String(
-            "adjust verification queries if extraction consolidated memories".to_string(),
-        ));
-    }
-    let mut payload = success_envelope("import_and_verify", status);
+    let flush_payload = import_flush_payload(
+        client,
+        user_id,
+        session_id,
+        &scope,
+        flush,
+        queued_count,
+        flush_timeout,
+    );
+    let verification = import_verification_payload(
+        client,
+        user_id,
+        session_id,
+        verification_queries,
+        memory_types,
+        &scope,
+        top_k,
+        timeout,
+    );
+    let status = import_status(&verification, queued_count, failed_count);
+    let actions = import_actions(&verification, split_count, failed_count);
+    let mut payload = success_envelope("import_and_verify", &status);
     payload.insert("input_count".to_string(), json!(messages.len()));
     payload.insert("queued_count".to_string(), json!(queued_count));
     payload.insert("failed_count".to_string(), json!(failed_count));

@@ -9,7 +9,7 @@ It provides:
 - The bundled plugin skill `everos:everos-memory-curation` under `integrations/hermes/resources/skills/`.
 - A thin `SKILL.md` router plus detailed skill references under `integrations/hermes/resources/skills/everos-memory-curation/references/`.
 - Rust parity for provider behavior: structured agent trajectory capture, the budgeted context assembler, deterministic message ids, `prefetch_cache_enabled`, optional `include_recent_raw`, and hooks such as `agent_trajectory_on_session_end`, `agent_trajectory_on_pre_compress`, and delegation capture.
-- A stdio compatibility command surface with MCP-13 tools for callers that already depend on it. Normal Hermes installs should use the plugin path below.
+- A stdio compatibility command surface with MCP-12 tools for callers that already depend on it. Normal Hermes installs should use the plugin path below.
 
 ## Build
 

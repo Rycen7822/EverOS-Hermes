@@ -320,7 +320,7 @@ def main() -> int:
         tools = client.request("tools/list", {})
         tool_items = tools.get("result", {}).get("tools", [])
         tool_count = len(tool_items)
-        assert_true(assertions, failures, "tools/list returns 13 tools", tool_count == 13, f"tool_count={tool_count}")
+        assert_true(assertions, failures, "tools/list returns 12 tools", tool_count == 12, f"tool_count={tool_count}")
 
         for case, expected in [
             ("smoke-not-visible", "not_visible"),
