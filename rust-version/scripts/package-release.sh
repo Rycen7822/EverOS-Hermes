@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$ROOT/.." && pwd)"
 cd "$ROOT"
 
 VERSION="${VERSION:-$(python3 - <<'PY'
@@ -21,21 +22,58 @@ DIST_DIR="$ROOT/dist"
 STAGE="$DIST_DIR/$PKG_NAME"
 ARCHIVE="$DIST_DIR/$PKG_NAME.tar.gz"
 SHA_FILE="$ARCHIVE.sha256"
+RUST_PLUGIN_PREFIX="rust-version/integrations/hermes"
+CANONICAL_PLUGIN_DIR="$ROOT/../integrations/hermes"
+CANONICAL_SKILL_PREFIX="integrations/hermes/resources/skills/everos-memory-curation"
+STAGED_SKILL_DIR="$STAGE/integrations/hermes/resources/skills/everos-memory-curation"
 
-cargo build --release --bin everos-hermes-rust
+copy_tracked_prefix() {
+  # Stage release inputs via git ls-files so ignored/untracked files never enter the archive.
+  local prefix="$1"
+  local dest="$2"
+  local copied=0
+  while IFS= read -r -d '' rel; do
+    local src="$REPO_ROOT/$rel"
+    local relative="${rel#$prefix/}"
+    mkdir -p "$dest/$(dirname "$relative")"
+    install -m 0644 "$src" "$dest/$relative"
+    copied=1
+  done < <(git -C "$REPO_ROOT" ls-files -z -- "$prefix")
+  if [[ "$copied" -ne 1 ]]; then
+    printf 'No tracked files found for %s\n' "$prefix" >&2
+    exit 1
+  fi
+}
+
+check_no_untracked_sensitive_files() {
+  local status rel base
+  while IFS= read -r line; do
+    status="${line:0:2}"
+    rel="${line:3}"
+    [[ "$status" == "??" || "$status" == "!!" ]] || continue
+    base="$(basename "$rel")"
+    case "$base:$rel" in
+      .env:*|*.env:*|*.pem:*|*.key:*|*.p12:*|*.pfx:*|*secret*|*token*|*credential*)
+        printf 'Refusing to package untracked or ignored sensitive file: %s\n' "$rel" >&2
+        exit 1
+        ;;
+    esac
+  done < <(git -C "$REPO_ROOT" status --porcelain --ignored --untracked-files=all -- "$RUST_PLUGIN_PREFIX" "$CANONICAL_SKILL_PREFIX")
+}
+
+check_no_untracked_sensitive_files
+cargo build --release --target "$TARGET" --bin everos-hermes-rust
 
 rm -rf "$STAGE"
 mkdir -p "$STAGE/bin" "$STAGE/integrations"
-install -m 0755 "$ROOT/target/release/everos-hermes-rust" "$STAGE/bin/everos-hermes-rust"
-cp -R "$ROOT/integrations/hermes" "$STAGE/integrations/hermes"
-CANONICAL_SKILL_DIR="$ROOT/../integrations/hermes/resources/skills/everos-memory-curation"
-STAGED_SKILL_DIR="$STAGE/integrations/hermes/resources/skills/everos-memory-curation"
-test -d "$CANONICAL_SKILL_DIR"
-rm -rf "$STAGE/integrations/hermes/resources/skills/everos-memory-curation"
+install -m 0755 "$ROOT/target/$TARGET/release/everos-hermes-rust" "$STAGE/bin/everos-hermes-rust"
+copy_tracked_prefix "$RUST_PLUGIN_PREFIX" "$STAGE/integrations/hermes"
+test -d "$CANONICAL_PLUGIN_DIR"
+rm -rf "$STAGED_SKILL_DIR"
 mkdir -p "$(dirname "$STAGED_SKILL_DIR")"
-cp -R "$CANONICAL_SKILL_DIR" "$STAGED_SKILL_DIR"
+copy_tracked_prefix "$CANONICAL_SKILL_PREFIX" "$STAGED_SKILL_DIR"
 find "$STAGE" \( -type d -name '__pycache__' -o -type f \( -name '*.pyc' -o -name '*.pyo' \) \) -prune -exec rm -rf {} +
-cp "$ROOT/README.md" "$STAGE/README.md"
+install -m 0644 "$ROOT/README.md" "$STAGE/README.md"
 
 cat > "$STAGE/INSTALL.md" <<EOF
 # EverOS-Hermes Rust prebuilt package
@@ -79,7 +117,17 @@ hermes config set memory.provider everos
 Load the bundled runbook with \`/skill everos:everos-memory-curation\`; its entry \`SKILL.md\` is a thin router that points to \`references/*.md\` for detailed guidance. Restart Hermes CLI/WebUI/gateway after changing plugin, provider, or secret configuration.
 EOF
 
-tar -C "$DIST_DIR" -czf "$ARCHIVE" "$PKG_NAME"
+find "$STAGE" -type d -exec chmod 0755 {} +
+find "$STAGE" -type f -exec chmod 0644 {} +
+chmod 0755 "$STAGE/bin/everos-hermes-rust"
+
+tar -C "$DIST_DIR" \
+  --sort=name \
+  --owner=0 \
+  --group=0 \
+  --numeric-owner \
+  --mtime='@0' \
+  -czf "$ARCHIVE" "$PKG_NAME"
 (
   cd "$DIST_DIR"
   sha256sum "$(basename "$ARCHIVE")" > "$(basename "$SHA_FILE")"

@@ -1,0 +1,162 @@
+{
+  "cases": [
+    {
+      "name": "mixed_search_response",
+      "response": {
+        "data": {
+          "episodes": [
+            {
+              "id": "e1",
+              "summary": "episode"
+            }
+          ],
+          "profiles": [
+            {
+              "profile_data": {
+                "facts": [
+                  "fact"
+                ]
+              }
+            }
+          ],
+          "raw_messages": [
+            {
+              "role": "user",
+              "content": "raw"
+            }
+          ],
+          "results": [
+            {
+              "id": "r1"
+            }
+          ],
+          "agent_memory": {
+            "cases": [
+              {
+                "id": "case1"
+              }
+            ],
+            "skills": [
+              {
+                "id": "skill1"
+              }
+            ]
+          },
+          "embedding": [
+            0.1,
+            0.2
+          ]
+        }
+      },
+      "expected_data_keys": [
+        "agent_memory",
+        "embedding",
+        "episodes",
+        "profiles",
+        "raw_messages",
+        "results"
+      ],
+      "expected_hit_count": 6,
+      "expected_summary": {
+        "keys": [
+          "agent_memory",
+          "embedding",
+          "episodes",
+          "profiles",
+          "raw_messages",
+          "results"
+        ],
+        "hit_count": 6
+      }
+    },
+    {
+      "name": "get_items_response",
+      "response": {
+        "data": {
+          "items": [
+            {
+              "id": "i1"
+            },
+            {
+              "id": "i2"
+            }
+          ]
+        }
+      },
+      "expected_data_keys": [
+        "items"
+      ],
+      "expected_hit_count": 2,
+      "expected_summary": {
+        "keys": [
+          "items"
+        ],
+        "hit_count": 2
+      }
+    },
+    {
+      "name": "top_level_memories_response",
+      "response": {
+        "memories": [
+          {
+            "id": "m1"
+          }
+        ],
+        "other": "ignored"
+      },
+      "expected_data_keys": [
+        "memories",
+        "other"
+      ],
+      "expected_hit_count": 1,
+      "expected_summary": {
+        "keys": [
+          "memories",
+          "other"
+        ],
+        "hit_count": 1
+      }
+    },
+    {
+      "name": "data_array_response",
+      "response": {
+        "data": [
+          {
+            "id": "a1"
+          },
+          {
+            "id": "a2"
+          }
+        ]
+      },
+      "expected_data_keys": [],
+      "expected_hit_count": 2,
+      "expected_summary": {
+        "items": 2,
+        "hit_count": 2
+      }
+    }
+  ],
+  "as_list_cases": [
+    {
+      "input": null,
+      "expected": []
+    },
+    {
+      "input": [
+        1,
+        2
+      ],
+      "expected": [
+        1,
+        2
+      ]
+    },
+    {
+      "input": "scalar",
+      "expected": [
+        "scalar"
+      ]
+    }
+  ]
+}

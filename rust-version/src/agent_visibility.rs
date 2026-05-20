@@ -1,6 +1,7 @@
 use crate::client::{EverOSClient, EverOSError};
-use crate::workflows::count_hits;
+use crate::response_normalization::{count_hits, response_summary};
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::time::Instant;
 
 pub fn build_agent_visibility_report(
@@ -54,6 +55,19 @@ pub fn build_agent_visibility_report(
     report
 }
 
+pub fn workflow_status_from_agent_visibility(agent_visibility: &Value, fallback: &str) -> String {
+    match agent_visibility
+        .get("agent_visibility_status")
+        .and_then(Value::as_str)
+    {
+        Some("visible") => "verified".to_string(),
+        Some("partial") => "partially_verified".to_string(),
+        Some("not_visible") => "agent_not_visible".to_string(),
+        Some("error") => "agent_visibility_error".to_string(),
+        _ => fallback.to_string(),
+    }
+}
+
 pub fn audit_agent_visibility(
     client: &EverOSClient,
     user_id: &str,
@@ -62,6 +76,31 @@ pub fn audit_agent_visibility(
     top_k: i64,
     timeout: Option<f64>,
     get_page_size: u64,
+) -> Value {
+    audit_agent_visibility_with_options(
+        client,
+        user_id,
+        session_id,
+        queries,
+        top_k,
+        timeout,
+        get_page_size,
+        None,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn audit_agent_visibility_with_options(
+    client: &EverOSClient,
+    user_id: &str,
+    session_id: Option<&str>,
+    queries: &[String],
+    top_k: i64,
+    timeout: Option<f64>,
+    get_page_size: u64,
+    precomputed_searches: Option<&HashMap<String, Value>>,
+    include_responses: bool,
 ) -> Value {
     let mut checks = Vec::new();
     for query in queries
@@ -77,20 +116,26 @@ pub fn audit_agent_visibility(
             "memory_types": ["agent_memory"],
             "query": query,
         });
-        match client.search_memories(
-            query,
-            Some(user_id),
-            None,
-            session_id,
-            None,
-            "hybrid",
-            Some(vec!["agent_memory".to_string()]),
-            top_k,
-            None,
-            false,
-            false,
-            timeout,
-        ) {
+        let search_result = precomputed_searches
+            .and_then(|items| items.get(query).cloned())
+            .map(Ok)
+            .unwrap_or_else(|| {
+                client.search_memories(
+                    query,
+                    Some(user_id),
+                    None,
+                    session_id,
+                    None,
+                    "hybrid",
+                    Some(vec!["agent_memory".to_string()]),
+                    top_k,
+                    None,
+                    false,
+                    false,
+                    timeout,
+                )
+            });
+        match search_result {
             Ok(response) => {
                 let hit_count = count_hits(&response);
                 set_check_fields(
@@ -99,10 +144,11 @@ pub fn audit_agent_visibility(
                     hit_count,
                     Some(response),
                     None,
+                    include_responses,
                 );
             }
             Err(err) => {
-                set_check_fields(&mut check, "error", 0, None, Some(err));
+                set_check_fields(&mut check, "error", 0, None, Some(err), include_responses);
             }
         }
         set_latency(&mut check, started);
@@ -131,10 +177,11 @@ pub fn audit_agent_visibility(
                     hit_count,
                     Some(response),
                     None,
+                    include_responses,
                 );
             }
             Err(err) => {
-                set_check_fields(&mut check, "error", 0, None, Some(err));
+                set_check_fields(&mut check, "error", 0, None, Some(err), include_responses);
             }
         }
         set_latency(&mut check, started);
@@ -142,6 +189,15 @@ pub fn audit_agent_visibility(
     }
 
     build_agent_visibility_report(None, None, checks, Some(user_id), session_id)
+}
+
+fn set_latency(check: &mut Value, started: Instant) {
+    if let Some(map) = check.as_object_mut() {
+        map.insert(
+            "latency_ms".to_string(),
+            json!(started.elapsed().as_secs_f64() * 1000.0),
+        );
+    }
 }
 
 fn check_hit_count(check: &Value) -> u64 {
@@ -161,22 +217,19 @@ fn set_check_fields(
     hit_count: usize,
     response: Option<Value>,
     error: Option<EverOSError>,
+    include_response: bool,
 ) {
     if let Some(map) = check.as_object_mut() {
         map.insert("status".to_string(), Value::String(status.to_string()));
         map.insert("hit_count".to_string(), json!(hit_count));
         if let Some(response) = response {
-            map.insert("response".to_string(), response);
+            map.insert("response_summary".to_string(), response_summary(&response));
+            if include_response {
+                map.insert("response".to_string(), response);
+            }
         }
         if let Some(error) = error {
             map.insert("error".to_string(), Value::String(error.to_string()));
         }
-    }
-}
-
-fn set_latency(check: &mut Value, started: Instant) {
-    if let Some(map) = check.as_object_mut() {
-        let elapsed_ms = (started.elapsed().as_secs_f64() * 1000.0 * 1000.0).round() / 1000.0;
-        map.insert("latency_ms".to_string(), json!(elapsed_ms));
     }
 }

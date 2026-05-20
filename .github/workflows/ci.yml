@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install Python package and test tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[test]' ruff mypy
+      - name: Ruff
+        run: python -m ruff check .
+      - name: Pytest
+        run: python -m pytest -q
+      - name: Mypy
+        run: python -m mypy src/everos_hermes --ignore-missing-imports
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - name: Rust format
+        working-directory: rust-version
+        run: cargo fmt --all --check
+      - name: Rust tests
+        working-directory: rust-version
+        run: cargo test --quiet
+      - name: Rust clippy
+        working-directory: rust-version
+        run: cargo clippy --quiet -- -D warnings
+      - name: Release package smoke
+        working-directory: rust-version
+        run: |
+          ./scripts/package-release.sh
+          cd dist
+          sha256sum -c everos-hermes-rust-*.tar.gz.sha256
+          python - <<'PY'
+          import tarfile
+          from pathlib import Path
+          archive = next(Path('.').glob('everos-hermes-rust-*.tar.gz'))
+          forbidden = ('.env', '__pycache__', '.pyc', '.pyo', 'secret', 'token', 'private', 'scratch')
+          required = [
+              'bin/everos-hermes-rust',
+              'integrations/hermes/plugin.yaml',
+              'integrations/hermes/__init__.py',
+              'integrations/hermes/resources/skills/everos-memory-curation/SKILL.md',
+              'integrations/hermes/resources/skills/everos-memory-curation/references/memory-routing-policy.md',
+          ]
+          with tarfile.open(archive, 'r:gz') as tf:
+              names = [member.name for member in tf.getmembers()]
+          for suffix in required:
+              if not any(name.endswith(suffix) for name in names):
+                  raise SystemExit(f'missing release resource: {suffix}')
+          if any(any(fragment in name.lower() for fragment in forbidden) for name in names):
+              raise SystemExit('release archive contains forbidden local/private-looking resource')
+          PY

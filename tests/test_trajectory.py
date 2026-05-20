@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from everos_hermes.trajectory import build_agent_trajectory_messages
+from everos_hermes.trajectory import TrajectoryBuildOptions, build_agent_trajectory_messages, build_agent_trajectory_messages_with_options
 
 
 def test_builds_user_assistant_tool_chain_with_tool_calls():
@@ -84,6 +84,49 @@ def test_redacts_secret_patterns_and_strips_everos_context():
     assert "<memory-context>" not in rendered
 
 
+def test_redacts_json_style_tool_call_arguments_and_secret_keyed_values():
+    result = build_agent_trajectory_messages(
+        [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-secret",
+                        "type": "function",
+                        "function": {
+                            "name": "everos_memory_save",
+                            "arguments": '{"api_key":"json-key-value","token":"json-token-value","credentials":"json-credentials-value","nested":{"password":"nested-pass-value"}}',
+                        },
+                    }
+                ],
+                "metadata": {"secret": "metadata-secret-value"},
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-secret",
+                "content": {"credentials": "tool-credentials-value", "nested": {"api_key": "tool-content-key"}, "ok": True},
+            },
+        ],
+        session_id="sess-secret",
+        source="session_end",
+        now_ms=1_700_000_000_000,
+    )
+
+    rendered = json.dumps(result.messages, ensure_ascii=False)
+    for leaked in [
+        "json-key-value",
+        "json-token-value",
+        "json-credentials-value",
+        "tool-credentials-value",
+        "nested-pass-value",
+        "metadata-secret-value",
+        "tool-content-key",
+    ]:
+        assert leaked not in rendered
+    assert rendered.count("[REDACTED]") >= 5
+
+
 def test_deterministic_message_id_is_stable():
     base = [
         {"role": "user", "content": "same", "timestamp": 1700000000},
@@ -153,3 +196,37 @@ def test_timestamp_normalization_accepts_ms_seconds_and_missing():
         1_700_000_000_000,
         1_800_000_000_002,
     ]
+
+
+def test_options_builder_matches_legacy_signature():
+    messages = [
+        {"role": "system", "content": "hidden"},
+        {"role": "user", "content": "hello", "timestamp": 1_700_000_000},
+        {"role": "assistant", "content": "world", "timestamp": 1_700_000_001},
+    ]
+    options = TrajectoryBuildOptions(
+        session_id="sess-options",
+        source="pre_compress",
+        now_ms=1_800_000_000_000,
+        max_messages=10,
+        max_message_chars=100,
+        max_tool_result_chars=50,
+        max_payload_chars=10_000,
+        include_system=True,
+    )
+
+    via_options = build_agent_trajectory_messages_with_options(messages, options)
+    legacy = build_agent_trajectory_messages(
+        messages,
+        session_id="sess-options",
+        source="pre_compress",
+        now_ms=1_800_000_000_000,
+        max_messages=10,
+        max_message_chars=100,
+        max_tool_result_chars=50,
+        max_payload_chars=10_000,
+        include_system=True,
+    )
+
+    assert via_options == legacy
+    assert [message["role"] for message in via_options.messages] == ["system", "user", "assistant"]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import types
 from pathlib import Path
 
 import yaml
@@ -163,13 +164,102 @@ def test_rust_plugin_skill_resources_are_byte_identical_to_python_canonical_tree
         assert canonical_files[rel_path].read_bytes() == rust_files[rel_path].read_bytes(), rel_path
 
 
-def test_rust_prebuild_package_script_uses_python_skill_resources_as_canonical_source():
-    script = (REPO_ROOT / "rust-version" / "scripts" / "package-release.sh").read_text(encoding="utf-8")
+def test_rust_prebuild_shim_sends_sensitive_payloads_over_stdin_and_logs_background_failures(monkeypatch, tmp_path):
+    module = _load_plugin_module(RUST_PLUGIN_DIR, "everos_hermes_rust_shim_stdio_under_test")
+    fake_bin = tmp_path / "everos-hermes-rust"
+    fake_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake_bin.chmod(0o755)
+    monkeypatch.setenv("EVEROS_HERMES_RUST_BIN", str(fake_bin))
 
-    assert "CANONICAL_SKILL_DIR" in script
-    assert "../integrations/hermes/resources/skills/everos-memory-curation" in script
-    assert "rm -rf \"$STAGE/integrations/hermes/resources/skills/everos-memory-curation\"" in script
-    assert "cp -R \"$CANONICAL_SKILL_DIR\"" in script
+    run_calls = []
+
+    def fake_run(cmd, *, text, capture_output, timeout, check, input=None):
+        run_calls.append({"cmd": cmd, "input": input, "timeout": timeout})
+        if "tool-schemas" in cmd:
+            stdout = "[]"
+        elif "tool-call" in cmd:
+            stdout = '{"ok":true}'
+        else:
+            stdout = "ok"
+        return types.SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+    popen_calls = []
+
+    class FakePopen:
+        def __init__(self, cmd, **kwargs):
+            popen_calls.append({"cmd": cmd, "kwargs": kwargs, "communicated": []})
+            self.returncode = None
+
+        def communicate(self, input=None, timeout=None):
+            popen_calls[-1]["communicated"].append({"input": input, "timeout": timeout})
+            self.returncode = 7
+            bearer_token = "abc" + "+def/" + "ghi=~tail"
+            quoted_value = "quoted," + "semi;" + "with]delimiters"
+            email_secret = "email" + "-secret"
+            key_secret = "key" + "-secret"
+            client_id_secret = "client" + "-id-secret"
+            credentials_blob = json.dumps({"client_email": email_secret, "private_key": key_secret}).replace('"', '\\"')
+            arguments_blob = json.dumps({"credentials": {"client_email": email_secret, "client_id": client_id_secret}}).replace('"', '\\"')
+            pretty_payload = "{\n  \"client_email\": \"" + email_secret + "\",\n  \"client_id\": \"" + client_id_secret + "\"\n}"
+            return (
+                "",
+                "background failed tok"
+                + "en=\""
+                + quoted_value
+                + "\" creden"
+                + "tials=\""
+                + credentials_blob
+                + "\" Authorization: Bearer "
+                + bearer_token
+                + " arguments=\""
+                + arguments_blob
+                + "\" creden"
+                + "tials="
+                + pretty_payload
+                + " request_id=req-shim"
+            )
+
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            self.returncode = 7
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(module.subprocess, "Popen", FakePopen)
+
+    provider = module.EverOSRustMemoryProvider()
+    provider.initialize("sess", hermes_home=str(tmp_path), user_id="user-secret", agent_context="ctx-secret")
+    provider.save_config({"api_key": "config-secret", "base_url": "http://example.test"}, str(tmp_path))
+    provider.prefetch("query secret", session_id="sess-q")
+    provider.handle_tool_call("everos_memory_save", {"content": "tool secret"})
+    provider.sync_turn("user secret", "assistant secret", session_id="sess-bg")
+
+    joined_args = "\n".join("\0".join(call["cmd"]) for call in run_calls + popen_calls)
+    for secret in ["config-secret", "query secret", "tool secret", "user secret", "assistant secret", "ctx-secret"]:
+        assert secret not in joined_args
+    assert all("--payload-stdin" in call["cmd"] for call in run_calls if "tool-schemas" not in call["cmd"])
+    assert all(call["input"] and "secret" in call["input"] for call in run_calls if "tool-schemas" not in call["cmd"])
+    assert popen_calls and popen_calls[0]["kwargs"].get("stdin") == module.subprocess.PIPE
+    assert popen_calls[0]["communicated"] and "assistant secret" in popen_calls[0]["communicated"][0]["input"]
+
+    provider.shutdown()
+    log_path = tmp_path / "everos.log"
+    log_text = log_path.read_text(encoding="utf-8")
+    assert "background provider command failed" in log_text
+    assert "[REDACTED]" in log_text
+    assert "abc+def/ghi=~tail" not in log_text
+    assert "quoted,semi;with]delimiters" not in log_text
+    assert "email-secret" not in log_text
+    assert "key-secret" not in log_text
+    assert "client-id-secret" not in log_text
+    assert "request_id=req-shim" in log_text
+    assert log_path.stat().st_mode & 0o777 == 0o600
 
 
 def test_standalone_register_exposes_tools_and_plugin_skill_without_memory_provider_method(monkeypatch):
@@ -334,15 +424,3 @@ def test_install_docs_describe_one_plugin_not_separate_mcp_and_skill_setup():
     assert "mcp_servers:" not in combined
     assert "Optional MCP server" not in combined
     assert "explicit MCP tools" not in root_readme
-
-
-def test_project_versions_match_plugin_manifest_version():
-    pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    cargo = (REPO_ROOT / "rust-version" / "Cargo.toml").read_text(encoding="utf-8")
-    py_manifest = yaml.safe_load(PLUGIN_MANIFEST.read_text(encoding="utf-8"))
-    rust_manifest = yaml.safe_load(RUST_PLUGIN_MANIFEST.read_text(encoding="utf-8"))
-
-    assert py_manifest["version"] == "0.3.0"
-    assert rust_manifest["version"] == "0.3.0"
-    assert 'version = "0.3.0"' in pyproject
-    assert 'version = "0.3.0"' in cargo

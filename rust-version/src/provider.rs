@@ -5,8 +5,12 @@ use crate::env::get_env;
 use crate::flush_retry::flush_memories_with_retry;
 use crate::formatting::{format_search_context, pretty_json};
 use crate::policy::{should_skip_capture, should_skip_recall, stable_query_key};
+pub use crate::provider_tools::provider_tool_schemas;
+use crate::redaction::{error_payload, sanitized_error_message};
+use crate::response_normalization::{as_list as as_list_copy, response_data};
 use crate::trajectory::{
-    TrajectoryBuildResult, build_agent_trajectory_messages as build_trajectory_messages,
+    TrajectoryBuildOptions, TrajectoryBuildResult,
+    build_agent_trajectory_messages_with_options as build_trajectory_messages_with_options,
 };
 use crate::workflows;
 use regex::Regex;
@@ -15,6 +19,9 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::fs;
+use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -486,16 +493,9 @@ impl EverOSProvider {
             json!({"role":"user","timestamp":now,"content":task.trim()}),
             json!({"role":"assistant","timestamp":now + 1,"content":format!("{}{}", prefix, result.trim())}),
         ];
-        let mut built = build_trajectory_messages(
+        let mut built = build_trajectory_messages_with_options(
             &messages,
-            &self.session_id,
-            "delegation",
-            Some(now),
-            self.config.agent_max_messages,
-            self.config.agent_max_message_chars,
-            self.config.agent_max_tool_result_chars,
-            self.config.agent_max_payload_chars,
-            false,
+            &self.trajectory_options("delegation", &self.session_id, now, None),
         );
         if !child.is_empty() {
             for message in built.messages.iter_mut() {
@@ -581,16 +581,9 @@ impl EverOSProvider {
             json!({"role":"user","timestamp":now_ms,"content":format!("Task request: {}", truncate_for_memory(user_content, 4000))}),
             json!({"role":"assistant","timestamp":now_ms + 1,"content":format!("Agent response summary: {}\nOutcome: completed_or_partial\nReusable lesson hint: capture approach, correction, and verification if useful.", truncate_for_memory(assistant_content, 4000))}),
         ];
-        build_trajectory_messages(
+        build_trajectory_messages_with_options(
             &messages,
-            session_id,
-            "sync_turn",
-            Some(now_ms),
-            2,
-            self.config.agent_max_message_chars,
-            self.config.agent_max_tool_result_chars,
-            self.config.agent_max_payload_chars,
-            false,
+            &self.trajectory_options("sync_turn", session_id, now_ms, Some(2)),
         )
     }
 
@@ -599,17 +592,29 @@ impl EverOSProvider {
         messages: &[Value],
         source: &str,
     ) -> TrajectoryBuildResult {
-        build_trajectory_messages(
+        build_trajectory_messages_with_options(
             messages,
-            &self.session_id,
-            source,
-            Some(now_ms()),
-            self.config.agent_max_messages,
-            self.config.agent_max_message_chars,
-            self.config.agent_max_tool_result_chars,
-            self.config.agent_max_payload_chars,
-            false,
+            &self.trajectory_options(source, &self.session_id, now_ms(), None),
         )
+    }
+
+    fn trajectory_options(
+        &self,
+        source: &str,
+        session_id: &str,
+        now_ms: u128,
+        max_messages: Option<usize>,
+    ) -> TrajectoryBuildOptions {
+        TrajectoryBuildOptions {
+            session_id: session_id.to_string(),
+            source: source.to_string(),
+            now_ms: Some(now_ms),
+            max_messages: max_messages.unwrap_or(self.config.agent_max_messages),
+            max_message_chars: self.config.agent_max_message_chars,
+            max_tool_result_chars: self.config.agent_max_tool_result_chars,
+            max_payload_chars: self.config.agent_max_payload_chars,
+            include_system: false,
+        }
     }
 
     fn agent_visibility_queries(
@@ -811,7 +816,7 @@ impl EverOSProvider {
                     Some(attempt_count),
                 )),
                 Err(err @ EverOSError::Timeout { .. }) => Some(timeout_payload("flush", &err)),
-                Err(err) => return Err(err),
+                Err(err) => Some(error_payload("flush", &err)),
             }
         } else {
             None
@@ -1115,19 +1120,6 @@ impl EverOSProvider {
     }
 }
 
-pub fn provider_tool_schemas() -> Vec<Value> {
-    vec![
-        json!({"name":"everos_memory_save","description":"Queue an explicit long-term memory message in EverOS and optionally request extraction; saved=true does not guarantee a structured memory is immediately searchable. Agent scope returns agent_visibility=unchecked unless verification is enabled.","parameters":{"type":"object","properties":{"content":{"type":"string","description":"Memory content to store."},"session_id":{"type":"string","description":"Optional EverOS/Hermes session id."},"scope":{"type":"string","enum":["personal","agent"],"description":"Memory scope. Default personal."},"role":{"type":"string","enum":["user","assistant","tool","system"],"description":"Message role. role=tool is only valid with scope=agent and requires tool_call_id."},"tool_call_id":{"type":"string","description":"Required when role=tool for agent memory."},"flush":{"type":"boolean","description":"Trigger EverOS extraction immediately. Default true."}},"required":["content"]}}),
-        json!({"name":"everos_memory_search","description":"Search EverOS long-term memory using keyword, vector, hybrid, or agentic retrieval.","parameters":{"type":"object","properties":{"query":{"type":"string","description":"Search query."},"limit":{"type":"integer","description":"Backward-compatible alias for top_k."},"top_k":{"type":"integer","description":"Cloud top_k; -1 requests all matching results."},"method":{"type":"string","enum":["keyword","vector","hybrid","agentic"],"description":"Retrieval method. Default hybrid."},"session_id":{"type":"string","description":"Optional session filter."},"filters":{"type":"object","description":"Optional Cloud v1 filters DSL."},"memory_types":{"type":"array","items":{"type":"string","enum":["episodic_memory","profile","raw_message","agent_memory"]},"description":"Optional EverOS search memory types."},"radius":{"type":"number","description":"Optional vector radius for vector/hybrid/agentic retrieval."},"include_original_data":{"type":"boolean","description":"Include Cloud original_data. Vectors remain stripped by default."},"include_vectors":{"type":"boolean","description":"Keep embedding/vector fields for debugging only."},"response_format":{"type":"string","enum":["json","markdown"],"description":"Output format."}},"required":["query"]}}),
-        json!({"name":"everos_memory_get","description":"Get structured EverOS memories by type for the configured user.","parameters":{"type":"object","properties":{"memory_type":{"type":"string","enum":["episodic_memory","profile","agent_case","agent_skill"],"description":"Memory type to retrieve."},"page":{"type":"integer","description":"Page number starting at 1."},"page_size":{"type":"integer","description":"Items per page, 1-100."},"session_id":{"type":"string","description":"Optional session filter."},"filters":{"type":"object","description":"Optional Cloud v1 filters DSL."},"rank_by":{"type":"string","description":"Rank field. Default timestamp."},"rank_order":{"type":"string","enum":["asc","desc"],"description":"Rank order."}}}}),
-        json!({"name":"everos_memory_flush","description":"Force EverOS memory extraction for the configured user/session. Timeout errors are retryable; search/status checks should happen before retrying. Agent scope reports flush separately from structured visibility and retries transient request-send failures once.","parameters":{"type":"object","properties":{"session_id":{"type":"string","description":"Optional session id."},"scope":{"type":"string","enum":["personal","agent"],"description":"Memory scope to flush."},"timeout":{"type":"number","description":"Optional per-call timeout in seconds."}}}}),
-        json!({"name":"everos_memory_forget","description":"Delete an EverOS memory by id. Requires confirm=true because this is destructive.","parameters":{"type":"object","properties":{"memory_id":{"type":"string","description":"Exact EverOS memory id to delete."},"confirm":{"type":"boolean","description":"Must be true to delete."}},"required":["memory_id","confirm"]}}),
-        json!({"name":"everos_memory_save_and_verify","description":"Queue one memory message, optionally flush extraction, then verify searchability with sample queries. Agent scope returns structured agent_visibility status.","parameters":{"type":"object","properties":{"content":{"type":"string","description":"Memory content to store."},"verification_query":{"type":"string","description":"Primary query used to verify recall."},"verification_queries":{"type":"array","items":{"type":"string"},"description":"Additional verification queries."},"session_id":{"type":"string","description":"Optional session id."},"scope":{"type":"string","enum":["personal","agent"],"description":"Memory scope."},"role":{"type":"string","enum":["user","assistant","tool","system"],"description":"Message role; role=tool requires tool_call_id."},"tool_call_id":{"type":"string","description":"Required when role=tool for agent memory."},"flush":{"type":"boolean","description":"Trigger extraction before verification. Default true."},"top_k":{"type":"integer","description":"Verification search top_k."}},"required":["content"]}}),
-        json!({"name":"everos_memory_import_and_verify","description":"Batch-import messages or a local file, with dry-run validation, optional flush, and verification report.","parameters":{"type":"object","properties":{"messages":{"type":"array","items":{"type":"object"},"description":"Messages to import."},"file_path":{"type":"string","description":"Optional local JSON/JSONL/Markdown file to import."},"verification_queries":{"type":"array","items":{"type":"string"},"description":"Queries used to verify recall."},"session_id":{"type":"string","description":"Optional session id."},"scope":{"type":"string","enum":["personal","agent"],"description":"Memory scope."},"dry_run":{"type":"boolean","description":"Validate and summarize without writing."},"batch_size":{"type":"integer","description":"Messages per add_memories call."},"flush":{"type":"boolean","description":"Flush after importing. Default true."},"top_k":{"type":"integer","description":"Verification search top_k."}}}}),
-        json!({"name":"everos_memory_verify_session","description":"Read-only verification for an existing user/session using sample search queries. Agent scope returns structured agent_visibility status.","parameters":{"type":"object","properties":{"verification_queries":{"type":"array","items":{"type":"string"},"description":"Queries used to verify recall."},"session_id":{"type":"string","description":"Optional session id."},"scope":{"type":"string","enum":["personal","agent"],"description":"Memory scope."},"memory_types":{"type":"array","items":{"type":"string","enum":["episodic_memory","profile","raw_message","agent_memory"]}},"top_k":{"type":"integer","description":"Verification search top_k."}},"required":["verification_queries"]}}),
-    ]
-}
-
 pub fn load_config(hermes_home: &Path) -> ProviderConfig {
     let mut config = ProviderConfig::default();
     let path = hermes_home.join("everos.json");
@@ -1156,7 +1148,31 @@ pub fn save_config(values: &Value, hermes_home: &Path) -> std::io::Result<()> {
     let mut config = ProviderConfig::default();
     normalize_config_from_value(&mut config, &Value::Object(merged));
     fs::create_dir_all(hermes_home)?;
-    fs::write(path, serde_json::to_string_pretty(&config).unwrap() + "\n")
+    let content = serde_json::to_string_pretty(&config).unwrap() + "\n";
+    write_private_config(&path, content.as_bytes())
+}
+
+#[cfg(unix)]
+fn write_private_config(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(content)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_private_config(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)?;
+    file.write_all(content)
 }
 
 fn normalize_config_from_value(config: &mut ProviderConfig, value: &Value) {
@@ -1248,52 +1264,52 @@ fn normalize_config_from_value(config: &mut ProviderConfig, value: &Value) {
         config.agent_visibility_retry_flush_backoff_ms = value.clamp(0, 2_000);
     }
     if let Some(value) = map.get("max_context_chars").and_then(Value::as_u64) {
-        config.max_context_chars = (value as usize).clamp(1_000, 200_000);
+        config.max_context_chars = (value as usize).clamp(1_000, 50_000);
     }
     if let Some(value) = map.get("recent_raw_top_k").and_then(Value::as_u64) {
-        config.recent_raw_top_k = (value as usize).clamp(0, 100);
+        config.recent_raw_top_k = (value as usize).clamp(0, 20);
     }
     if let Some(value) = map.get("profile_max_items").and_then(Value::as_u64) {
-        config.profile_max_items = (value as usize).clamp(0, 100);
+        config.profile_max_items = (value as usize).clamp(0, 20);
     }
     if let Some(value) = map.get("agent_skills_max_items").and_then(Value::as_u64) {
-        config.agent_skills_max_items = (value as usize).clamp(0, 100);
+        config.agent_skills_max_items = (value as usize).clamp(0, 20);
     }
     if let Some(value) = map.get("agent_cases_max_items").and_then(Value::as_u64) {
-        config.agent_cases_max_items = (value as usize).clamp(0, 100);
+        config.agent_cases_max_items = (value as usize).clamp(0, 20);
     }
     if let Some(value) = map.get("episodic_max_items").and_then(Value::as_u64) {
-        config.episodic_max_items = (value as usize).clamp(0, 100);
+        config.episodic_max_items = (value as usize).clamp(0, 20);
     }
     if let Some(value) = map.get("min_score").and_then(Value::as_f64) {
         config.min_score = value.clamp(0.0, 1.0);
     }
     if let Some(value) = map.get("min_recall_query_chars").and_then(Value::as_u64) {
-        config.min_recall_query_chars = (value as usize).clamp(0, 100);
+        config.min_recall_query_chars = (value as usize).clamp(0, 200);
     }
     if let Some(value) = map
         .get("prefetch_cache_ttl_seconds")
         .and_then(Value::as_u64)
     {
-        config.prefetch_cache_ttl_seconds = value.clamp(0, 86_400);
+        config.prefetch_cache_ttl_seconds = value.clamp(1, 600);
     }
     if let Some(value) = map.get("agent_max_messages").and_then(Value::as_u64) {
-        config.agent_max_messages = (value as usize).clamp(1, 500);
+        config.agent_max_messages = (value as usize).clamp(1, 200);
     }
     if let Some(value) = map.get("agent_max_message_chars").and_then(Value::as_u64) {
-        config.agent_max_message_chars = (value as usize).clamp(100, 200_000);
+        config.agent_max_message_chars = (value as usize).clamp(100, 20_000);
     }
     if let Some(value) = map
         .get("agent_max_tool_result_chars")
         .and_then(Value::as_u64)
     {
-        config.agent_max_tool_result_chars = (value as usize).clamp(100, 200_000);
+        config.agent_max_tool_result_chars = (value as usize).clamp(100, 20_000);
     }
     if let Some(value) = map.get("agent_max_payload_chars").and_then(Value::as_u64) {
-        config.agent_max_payload_chars = (value as usize).clamp(1_000, 1_000_000);
+        config.agent_max_payload_chars = (value as usize).clamp(1_000, 200_000);
     }
     if let Some(value) = map.get("agent_dedupe_entries").and_then(Value::as_u64) {
-        config.agent_dedupe_entries = (value as usize).clamp(1, 10_000);
+        config.agent_dedupe_entries = (value as usize).clamp(16, 4_096);
     }
     if let Some(mode) = map.get("agent_capture_mode").and_then(Value::as_str) {
         let mode = mode.trim().to_ascii_lowercase();
@@ -1402,14 +1418,14 @@ fn clean_content(text: &str) -> String {
 }
 
 fn tool_error(message: &str) -> String {
-    serde_json::to_string(&json!({"error": message})).unwrap()
+    serde_json::to_string(&json!({"error": sanitized_error_message(message)})).unwrap()
 }
 
 fn timeout_payload(operation: &str, err: &EverOSError) -> Value {
     json!({
         "ok": false,
         "operation": operation,
-        "error": err.to_string(),
+        "error": sanitized_error_message(err),
         "retryable": true,
         "suggested_next_actions": [
             "search existing memories before retrying, because the server may have completed the request after the client timed out",
@@ -1655,26 +1671,6 @@ fn merge_agent_response(main_response: Option<&Value>, agent_response: Option<&V
         }
     }
     Value::Object(Map::from_iter([("data".to_string(), Value::Object(data))]))
-}
-
-fn response_data(response: Option<&Value>) -> Map<String, Value> {
-    let Some(response) = response else {
-        return Map::new();
-    };
-    response
-        .get("data")
-        .unwrap_or(response)
-        .as_object()
-        .cloned()
-        .unwrap_or_default()
-}
-
-fn as_list_copy(value: Option<&Value>) -> Vec<Value> {
-    match value {
-        None | Some(Value::Null) => Vec::new(),
-        Some(Value::Array(items)) => items.clone(),
-        Some(other) => vec![other.clone()],
-    }
 }
 
 fn hash_text(text: &str) -> String {

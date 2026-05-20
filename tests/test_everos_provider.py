@@ -36,6 +36,148 @@ def test_provider_agent_visibility_config_normalizes_defaults_and_overrides():
     assert custom["agent_visibility_retry_flush_backoff_ms"] == 2000
 
 
+
+def test_provider_config_contract_clamps_drift_prone_fields():
+    from pathlib import Path
+
+    from everos_hermes.provider import _normalize_config
+
+    contract = json.loads((Path(__file__).parent / "contracts" / "provider_config_contract.json").read_text(encoding="utf-8"))
+    fields = contract["fields"]
+
+    defaults = _normalize_config({})
+    for key, spec in fields.items():
+        assert defaults[key] == spec["default"]
+
+    below_min = _normalize_config({key: 0 for key, spec in fields.items() if spec["min"] > 0})
+    for key, spec in fields.items():
+        if spec["min"] > 0:
+            assert below_min[key] == spec["min"]
+
+    above_max = _normalize_config({key: spec["max"] + 1 for key, spec in fields.items()})
+    for key, spec in fields.items():
+        assert above_max[key] == spec["max"]
+
+
+def test_save_config_drops_api_key_and_uses_private_permissions(tmp_path):
+    from everos_hermes.provider import EverOSMemoryProvider, _load_config
+
+    provider = EverOSMemoryProvider()
+    provider.save_config({"api_key": "secret-config-key", "user_id": "u1", "base_url": "https://example.test"}, str(tmp_path))
+
+    config_path = tmp_path / "everos.json"
+    text = config_path.read_text(encoding="utf-8")
+    assert "secret-config-key" not in text
+    assert "api_key" not in text
+    assert _load_config(str(tmp_path))["user_id"] == "u1"
+    assert config_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_tool_errors_are_redacted_before_returning_to_model(monkeypatch, tmp_path):
+    from everos_hermes.provider import EverOSMemoryProvider
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def search_memories(self, **kwargs):
+            raise RuntimeError("backend failed api_key=secret-tool-key Authorization: Bearer secret-token")
+
+    monkeypatch.setenv("EVEROS_API_KEY", "sk-test")
+    monkeypatch.setenv("EVEROS_USER_ID", "u1")
+    monkeypatch.setattr("everos_hermes.provider.EverOSClient", FakeClient)
+    provider = EverOSMemoryProvider()
+    provider.initialize(session_id="sess-1", hermes_home=str(tmp_path), platform="cli")
+
+    raw = provider.handle_tool_call("everos_memory_search", {"query": "coffee"})
+
+    result = json.loads(raw)
+    assert "secret-tool-key" not in result["error"]
+    assert "secret-token" not in result["error"]
+    assert "[REDACTED]" in result["error"]
+
+
+def test_redaction_handles_quoted_and_whitespace_secret_values():
+    from everos_hermes.redaction import sanitized_error_message
+
+    secret_words = ["alpha", "beta", "gamma"]
+    token_words = ["delta", "epsilon"]
+    bearer_token = "abc" + "+def/" + "ghi=~tail"
+    quoted_value = "quoted," + "semi;" + "with]delimiters"
+    credentials_value = "zeta" + " eta"
+    email_secret = "email" + "-secret"
+    key_secret = "key" + "-secret"
+    client_id_secret = "client" + "-id-secret"
+    credentials_blob = json.dumps({"client_email": email_secret, "private_key": key_secret})
+    credentials_object = json.dumps({"client_email": email_secret, "client_id": client_id_secret})
+    arguments_object = json.dumps({"credentials": {"client_email": email_secret, "client_id": client_id_secret}})
+    pretty_payload = "{\n  \"client_email\": \"" + email_secret + "\",\n  \"client_id\": \"" + client_id_secret + "\"\n}"
+
+    rendered = "\n".join(
+        [
+            sanitized_error_message(
+                "backend failed pass" + "word='" + " ".join(secret_words) + "' request_id=req-pass"
+            ),
+            sanitized_error_message("tok" + "en=" + " ".join(token_words) + " request_id=req-token"),
+            sanitized_error_message("Authorization: Bearer " + bearer_token),
+            sanitized_error_message("api_" + "key=\"" + quoted_value + "\""),
+            sanitized_error_message("creden" + "tials=" + credentials_value),
+            sanitized_error_message(
+                "creden" + "tials=\"" + credentials_blob.replace('"', '\\"') + "\""
+            ),
+            sanitized_error_message("creden" + "tials=" + credentials_object + " request_id=req-object"),
+            sanitized_error_message("arguments=\"" + arguments_object.replace('"', '\\"') + "\" request_id=req-args"),
+            sanitized_error_message("creden" + "tials=" + pretty_payload + " request_id=req-pretty"),
+        ]
+    )
+
+    for leaked in [
+        *secret_words,
+        *token_words,
+        bearer_token,
+        quoted_value,
+        credentials_value,
+        email_secret,
+        key_secret,
+        client_id_secret,
+    ]:
+        assert leaked not in rendered
+    assert rendered.count("[REDACTED]") >= 7
+    assert "request_id=req-pass" in rendered
+    assert "request_id=req-token" in rendered
+    assert "request_id=req-object" in rendered
+    assert "request_id=req-args" in rendered
+    assert "request_id=req-pretty" in rendered
+
+def test_memory_save_tool_preserves_queue_payload_when_flush_has_non_timeout_error(monkeypatch, tmp_path):
+    from everos_hermes.provider import EverOSMemoryProvider
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def add_memories(self, **kwargs):
+            return {"data": {"status": "queued", "task_id": "task-queued"}}
+
+        def flush_memories(self, **kwargs):
+            raise RuntimeError("flush failed token=provider-secret")
+
+    monkeypatch.setenv("EVEROS_API_KEY", "sk-test")
+    monkeypatch.setenv("EVEROS_USER_ID", "u1")
+    monkeypatch.setattr("everos_hermes.provider.EverOSClient", FakeClient)
+    provider = EverOSMemoryProvider()
+    provider.initialize(session_id="sess-1", hermes_home=str(tmp_path), platform="cli")
+
+    result = json.loads(provider.handle_tool_call("everos_memory_save", {"content": "queued before failure", "flush": True}))
+
+    assert result["saved"] is True
+    assert result["message_queued"] is True
+    assert result["task_id"] == "task-queued"
+    assert result["flush"]["ok"] is False
+    assert result["flush"]["status"] == "error"
+    assert "provider-secret" not in json.dumps(result)
+
+
 def test_provider_availability_requires_api_key(monkeypatch, tmp_path):
     from everos_hermes.provider import EverOSMemoryProvider
 
@@ -411,11 +553,12 @@ def test_provider_background_error_records_redacted_log_and_status(monkeypatch, 
     provider.shutdown()
 
     assert provider._last_write_status["ok"] is False
-    log_text = (tmp_path / "everos.log").read_text(encoding="utf-8")
+    log_path = tmp_path / "everos.log"
+    log_text = log_path.read_text(encoding="utf-8")
+    assert log_path.stat().st_mode & 0o777 == 0o600
     assert "sync_turn.personal" in log_text
     assert "sk-test" not in log_text
     assert "please remember failure" not in log_text
-
 
 
 def test_provider_exposes_and_runs_save_and_verify_workflow(monkeypatch, tmp_path):
@@ -619,3 +762,12 @@ def test_provider_flush_agent_transient_request_failure_retries_once(monkeypatch
     assert result["flush"]["ok"] is True
     assert result["flush"]["attempt_count"] == 2
     assert result["agent_visibility"]["agent_visibility_status"] == "unchecked"
+
+
+def test_provider_config_module_exports_legacy_normalizer():
+    from everos_hermes import provider
+    from everos_hermes.provider_config import _DEFAULT_CONFIG, _normalize_config
+
+    assert provider._normalize_config is _normalize_config
+    assert _DEFAULT_CONFIG["base_url"]
+    assert _normalize_config({"top_k": "999", "memory_types": "profile,episodic_memory"})["top_k"] == 20

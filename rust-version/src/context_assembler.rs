@@ -1,4 +1,5 @@
 use crate::formatting::compact_json;
+use crate::response_normalization::{as_list, response_data};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
@@ -138,14 +139,6 @@ pub fn assemble_everos_context(
     }
 }
 
-fn response_data(response: Option<&Value>) -> Map<String, Value> {
-    let Some(response) = response else {
-        return Map::new();
-    };
-    let data = response.get("data").unwrap_or(response);
-    data.as_object().cloned().unwrap_or_default()
-}
-
 fn profile_items(data: &Map<String, Value>) -> Vec<Value> {
     as_list(data.get("profiles").or_else(|| data.get("profile")))
 }
@@ -196,14 +189,6 @@ fn agent_case_items(data: &Map<String, Value>) -> Vec<Value> {
         None => {}
     }
     items
-}
-
-fn as_list(value: Option<&Value>) -> Vec<Value> {
-    match value {
-        None | Some(Value::Null) => Vec::new(),
-        Some(Value::Array(items)) => items.clone(),
-        Some(other) => vec![other.clone()],
-    }
 }
 
 fn sort_items(items: &mut [Value]) {

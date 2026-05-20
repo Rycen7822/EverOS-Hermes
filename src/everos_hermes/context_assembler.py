@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from dataclasses import dataclass
 from html import escape
 from typing import Any, Mapping
+
+from .response_normalization import as_list as _normalized_as_list, response_data
 
 
 SECTION_ORDER = ["profile", "agent_skills", "agent_cases", "episodic", "recent_context"]
@@ -38,8 +39,8 @@ def assemble_everos_context(
     source: str = "prefetch",
 ) -> ContextAssemblyResult:
     cfg = {**DEFAULT_LIMITS, **dict(config or {})}
-    max_context_chars = _int_config(cfg, "max_context_chars", DEFAULT_LIMITS["max_context_chars"])
-    min_score = _float_config(cfg, "min_score", DEFAULT_LIMITS["min_score"])
+    max_context_chars = _int_config(cfg, "max_context_chars", int(DEFAULT_LIMITS["max_context_chars"]))
+    min_score = _float_config(cfg, "min_score", float(DEFAULT_LIMITS["min_score"]))
     warnings: list[str] = []
     hit_counts: dict[str, int] = {}
     dropped_counts: dict[str, int] = {}
@@ -97,10 +98,7 @@ def assemble_everos_context(
 
 
 def _data(response: dict[str, Any] | None) -> dict[str, Any]:
-    if not isinstance(response, dict):
-        return {}
-    data = response.get("data", response)
-    return data if isinstance(data, dict) else {}
+    return response_data(response)
 
 
 def _profile_items(data: dict[str, Any]) -> list[Any]:
@@ -137,11 +135,7 @@ def _agent_case_items(data: dict[str, Any]) -> list[Any]:
 
 
 def _as_list(value: Any) -> list[Any]:
-    if value is None:
-        return []
-    if isinstance(value, list):
-        return value
-    return [value]
+    return _normalized_as_list(value)
 
 
 def _sort_items(items: list[Any]) -> list[Any]:
@@ -231,7 +225,8 @@ def _render_item(section: str, item: Any) -> str:
 
 
 def _render_profile(item: dict[str, Any]) -> str:
-    profile_data = item.get("profile_data") if isinstance(item.get("profile_data"), dict) else item
+    raw_profile_data = item.get("profile_data")
+    profile_data: dict[str, Any] = raw_profile_data if isinstance(raw_profile_data, dict) else item
     parts: list[str] = []
     for key in ("explicit_info", "implicit_traits", "preferences", "facts", "traits"):
         for value in _as_list(profile_data.get(key)):

@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 
 def test_endpoint_whitelist_excludes_group_sender_storage():
     from everos_hermes.schemas import CLOUD_V1_ENDPOINTS, OUT_OF_SCOPE_ENDPOINTS

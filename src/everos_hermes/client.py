@@ -8,6 +8,7 @@ from typing import Any, Mapping
 
 from .env import get_env
 from .formatting import strip_vectors
+from .redaction import sanitized_error_message
 from .schemas import (
     build_filters,
     normalize_rank_order,
@@ -133,8 +134,7 @@ class EverOSClient:
         rank_by: str = "timestamp",
         rank_order: str = "desc",
     ) -> dict[str, Any]:
-        if group_id is not None:
-            raise ValueError("group memory is out of scope for this EverOS-Hermes release")
+        _reject_group_memory_scope(group_id)
         normalized_rank_order = normalize_rank_order(rank_order)
         validate_get_params(memory_type, page, page_size, rank_by, normalized_rank_order)
         resolved_filters = build_filters(user_id=user_id, session_id=session_id, filters=filters)
@@ -167,8 +167,7 @@ class EverOSClient:
         include_vectors: bool = False,
         timeout: float | None = None,
     ) -> dict[str, Any]:
-        if group_id is not None:
-            raise ValueError("group memory is out of scope for this EverOS-Hermes release")
+        _reject_group_memory_scope(group_id)
         resolved_memory_types = list(memory_types or DEFAULT_MEMORY_TYPES)
         normalized_method = method.strip().lower()
         validate_search_params(normalized_method, resolved_memory_types, top_k, radius)
@@ -194,9 +193,9 @@ class EverOSClient:
         group_id: str | None = None,
         session_id: str | None = None,
     ) -> dict[str, Any]:
-        if group_id is not None:
-            raise ValueError("group memory is out of scope for this EverOS-Hermes release")
+        _reject_group_memory_scope(group_id)
         validate_delete_request(memory_id=memory_id, user_id=user_id, session_id=session_id)
+        body: dict[str, Any]
         if memory_id:
             body = {"memory_id": memory_id}
             mode = "single"
@@ -242,6 +241,11 @@ def _drop_none(obj: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in obj.items() if v is not None}
 
 
+def _reject_group_memory_scope(group_id: str | None) -> None:
+    if group_id is not None:
+        raise ValueError("group memory is out of scope for this EverOS-Hermes release")
+
+
 def _http_error_to_everos_error(exc: urllib.error.HTTPError) -> EverOSError:
     raw = ""
     try:
@@ -265,7 +269,8 @@ def _http_error_to_everos_error(exc: urllib.error.HTTPError) -> EverOSError:
             detail = ": ".join(bits)
     except Exception:
         pass
-    return EverOSError(f"EverOS API error {detail or exc.reason}")
+    safe_detail = sanitized_error_message(detail or str(exc.reason))
+    return EverOSError(f"EverOS API error {safe_detail}")
 
 
 def _timeout_error(method: str, path: str) -> EverOSTimeoutError:

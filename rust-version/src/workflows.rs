@@ -1,23 +1,14 @@
-use crate::agent_visibility::{audit_agent_visibility, build_agent_visibility_report};
+use crate::agent_visibility::{
+    audit_agent_visibility_with_options, build_agent_visibility_report,
+    workflow_status_from_agent_visibility,
+};
 use crate::client::{DEFAULT_MEMORY_TYPES, EverOSClient, EverOSError};
+use crate::redaction::{error_payload, sanitized_error_message};
+use crate::response_normalization::count_hits;
 use serde_json::{Value, json};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
-
-const SEARCH_KEYS: [&str; 11] = [
-    "episodes",
-    "profiles",
-    "raw_messages",
-    "agent_memory",
-    "agent_cases",
-    "agent_skills",
-    "cases",
-    "skills",
-    "items",
-    "results",
-    "memories",
-];
 
 pub fn success_envelope(workflow: &str, status: &str) -> serde_json::Map<String, Value> {
     let mut payload = serde_json::Map::new();
@@ -35,7 +26,7 @@ pub fn error_envelope(workflow: &str, error_code: &str, message: &str) -> Value 
         "workflow": workflow,
         "status": "error",
         "error_code": error_code,
-        "message": message,
+        "message": sanitized_error_message(message),
         "retryable": false,
         "suggested_next_actions": ["inspect the validation error and retry with corrected arguments"]
     })
@@ -70,7 +61,7 @@ pub fn timeout_payload(operation: &str, err: &EverOSError) -> Value {
         "operation": operation,
         "status": "timeout",
         "error_code": "timeout",
-        "message": err.to_string(),
+        "message": sanitized_error_message(err),
         "retryable": true,
         "suggested_next_actions": [
             "search existing memories before retrying, because the server may have completed the request after the client timed out",
@@ -78,6 +69,27 @@ pub fn timeout_payload(operation: &str, err: &EverOSError) -> Value {
             "retry with a longer timeout only if search/status checks do not show the expected result"
         ]
     })
+}
+
+fn verification_error_payload(err: &EverOSError) -> Value {
+    let mut payload = error_payload("verification", err);
+    if let Some(map) = payload.as_object_mut() {
+        map.insert("verified".to_string(), Value::Bool(false));
+        map.insert("queries".to_string(), Value::Array(vec![]));
+        map.insert(
+            "suggested_next_actions".to_string(),
+            json!([
+                "the memory write was queued; inspect EverOS status/search before retrying verification",
+                "rerun verify_session_ingest with the same user_id/session_id before duplicating writes"
+            ]),
+        );
+    }
+    payload
+}
+
+fn verification_failed(verification: &Value) -> bool {
+    verification.get("operation").and_then(Value::as_str) == Some("verification")
+        && verification.get("ok") == Some(&Value::Bool(false))
 }
 
 pub fn save_result_payload(
@@ -312,24 +324,6 @@ fn is_cloud_403(err: &EverOSError) -> bool {
     text.contains("403") || text.contains("forbidden")
 }
 
-pub fn count_hits(response: &Value) -> usize {
-    let value = response.get("data").unwrap_or(response);
-    count_hits_value(value)
-}
-
-fn count_hits_value(value: &Value) -> usize {
-    if let Some(items) = value.as_array() {
-        return items.len();
-    }
-    let Some(map) = value.as_object() else {
-        return 0;
-    };
-    map.iter()
-        .filter(|(key, _child)| SEARCH_KEYS.contains(&key.as_str()))
-        .map(|(_key, child)| count_hits_value(child))
-        .sum()
-}
-
 #[allow(clippy::too_many_arguments)]
 pub fn verify_session_ingest(
     client: &EverOSClient,
@@ -349,6 +343,9 @@ pub fn verify_session_ingest(
             .collect()
     });
     let mut queries = Vec::new();
+    let reuse_agent_memory_search =
+        scope == "agent" && memory_types == ["agent_memory".to_string()];
+    let mut agent_search_responses: HashMap<String, Value> = HashMap::new();
     let clean_queries: Vec<String> = verification_queries
         .into_iter()
         .map(|query| query.trim().to_string())
@@ -370,6 +367,9 @@ pub fn verify_session_ingest(
             timeout,
         )?;
         let hit_count = count_hits(&response);
+        if reuse_agent_memory_search {
+            agent_search_responses.insert(query.clone(), response.clone());
+        }
         queries.push(json!({
             "query": query,
             "status": if hit_count > 0 { "hit" } else { "miss" },
@@ -393,7 +393,7 @@ pub fn verify_session_ingest(
         ("not_yet_searchable".to_string(), Value::Bool(false))
     };
     let agent_visibility = if scope == "agent" {
-        let visibility = audit_agent_visibility(
+        let visibility = audit_agent_visibility_with_options(
             client,
             user_id,
             session_id,
@@ -401,8 +401,14 @@ pub fn verify_session_ingest(
             top_k,
             timeout,
             20,
+            if reuse_agent_memory_search {
+                Some(&agent_search_responses)
+            } else {
+                None
+            },
+            false,
         );
-        status = agent_workflow_status(&visibility, &status).to_string();
+        status = workflow_status_from_agent_visibility(&visibility, &status).to_string();
         verified = if status == "verified" {
             Value::Bool(true)
         } else if matches!(
@@ -437,19 +443,6 @@ pub fn verify_session_ingest(
         );
     }
     Ok(Value::Object(payload))
-}
-
-fn agent_workflow_status(agent_visibility: &Value, fallback: &str) -> String {
-    match agent_visibility
-        .get("agent_visibility_status")
-        .and_then(Value::as_str)
-    {
-        Some("visible") => "verified".to_string(),
-        Some("partial") => "partially_verified".to_string(),
-        Some("not_visible") => "agent_not_visible".to_string(),
-        Some("error") => "agent_visibility_error".to_string(),
-        _ => fallback.to_string(),
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -492,7 +485,7 @@ pub fn save_and_verify(
         match client.flush_memories_scoped(user_id, session_id, &scope, flush_timeout) {
             Ok(response) => Some(flush_result_payload(&response)),
             Err(err @ EverOSError::Timeout { .. }) => Some(timeout_payload("flush", &err)),
-            Err(err) => return Err(err),
+            Err(err) => Some(error_payload("flush", &err)),
         }
     } else {
         None
@@ -501,7 +494,7 @@ pub fn save_and_verify(
         verification_queries.push(content.chars().take(200).collect());
     }
     let save = save_result_payload(&result, user_id, session_id, &scope, flush, flush_payload);
-    let verification = verify_session_ingest(
+    let verification = match verify_session_ingest(
         client,
         user_id,
         session_id,
@@ -510,11 +503,18 @@ pub fn save_and_verify(
         &scope,
         top_k,
         timeout,
-    )?;
-    let mut status = verification["status"]
-        .as_str()
-        .unwrap_or("queued")
-        .to_string();
+    ) {
+        Ok(value) => value,
+        Err(err) => verification_error_payload(&err),
+    };
+    let mut status = if verification_failed(&verification) {
+        "verification_error".to_string()
+    } else {
+        verification["status"]
+            .as_str()
+            .unwrap_or("queued")
+            .to_string()
+    };
     let agent_visibility = if scope == "agent" {
         let checks = verification
             .get("agent_visibility")
@@ -529,7 +529,7 @@ pub fn save_and_verify(
             Some(user_id),
             session_id,
         );
-        status = agent_workflow_status(&visibility, &status);
+        status = workflow_status_from_agent_visibility(&visibility, &status);
         Some(visibility)
     } else {
         None
@@ -580,7 +580,7 @@ fn submit_batch_with_adaptive_split(
                 "ok": false,
                 "message_count": batch.len(),
                 "payload_bytes": batch_payload_bytes(&batch),
-                "error": err.to_string(),
+                "error": sanitized_error_message(&err),
                 "retryable": true,
                 "split": true,
                 "split_reason": "cloud_403",
@@ -620,7 +620,7 @@ fn submit_batch_with_adaptive_split(
                 "ok": false,
                 "message_count": failed,
                 "payload_bytes": batch_payload_bytes(&batch),
-                "error": err.to_string(),
+                "error": sanitized_error_message(&err),
                 "retryable": true,
             }));
             (0, failed, 0)
@@ -723,7 +723,7 @@ pub fn import_and_verify(
         match client.flush_memories_scoped(user_id, session_id, &scope, flush_timeout) {
             Ok(response) => flush_result_payload(&response),
             Err(err @ EverOSError::Timeout { .. }) => timeout_payload("flush", &err),
-            Err(err) => return Err(err),
+            Err(err) => error_payload("flush", &err),
         }
     } else {
         json!({"ok":Value::Null,"status":"not_requested"})
@@ -731,7 +731,7 @@ pub fn import_and_verify(
     let verification = if verification_queries.is_empty() {
         json!({"status":"verification_skipped","verified":Value::Null,"queries":[]})
     } else {
-        verify_session_ingest(
+        match verify_session_ingest(
             client,
             user_id,
             session_id,
@@ -740,9 +740,14 @@ pub fn import_and_verify(
             &scope,
             top_k,
             timeout,
-        )?
+        ) {
+            Ok(value) => value,
+            Err(err) => verification_error_payload(&err),
+        }
     };
-    let status = if verification.get("verified") == Some(&Value::Bool(true)) {
+    let status = if verification_failed(&verification) && queued_count > 0 {
+        "verification_error"
+    } else if verification.get("verified") == Some(&Value::Bool(true)) {
         "verified"
     } else if verification.get("verified") == Some(&Value::Bool(false)) && queued_count > 0 {
         verification["status"]

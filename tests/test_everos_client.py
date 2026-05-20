@@ -221,6 +221,44 @@ def test_http_error_includes_everos_message(monkeypatch):
 
 
 
+def test_http_error_redacts_backend_secret_values_and_truncates(monkeypatch):
+    from everos_hermes.client import EverOSClient, EverOSError
+
+    bearer_token = "abc" + "+def/" + "ghi=~tail"
+    secret_value = "quoted," + "semi;" + "with]delimiters"
+
+    class FakeHTTPErrorBody:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def read(self):
+            return self.payload
+
+        def close(self):
+            return None
+
+    def fake_urlopen(req, timeout):
+        message = (
+            "backend failed api_" + "key=\"" + secret_value + "\" "
+            "Authorization: Bearer " + bearer_token + " request_id=req-42 " + ("x" * 1000)
+        )
+        payload = json.dumps({"code": "BackendFailure", "message": message}).encode()
+        raise urllib.error.HTTPError(req.full_url, 500, "Internal Server Error", hdrs=None, fp=FakeHTTPErrorBody(payload))
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    client = EverOSClient(api_key="sk-" + "test")
+
+    with pytest.raises(EverOSError) as exc:
+        client.get_task_status("task-1")
+
+    message = str(exc.value)
+    assert secret_value not in message
+    assert bearer_token not in message
+    assert "[REDACTED]" in message
+    assert "request_id=req-42" in message
+    assert len(message) < 650
+
+
 def test_add_memories_supports_scope_agent_and_agent_alias(monkeypatch):
     from everos_hermes.client import EverOSClient
 

@@ -74,6 +74,40 @@ def test_mcp_search_strips_vectors_unless_explicitly_requested(monkeypatch):
     assert "vector" not in rendered
 
 
+def test_mcp_direct_search_returns_sanitized_error_payload(monkeypatch):
+    from everos_hermes import mcp_server
+    from everos_hermes.client import EverOSError
+
+    bearer_token = "abc" + "+def/" + "ghi=~tail"
+    secret_value = "quoted," + "semi;" + "with]delimiters"
+
+    class FakeClient:
+        def search_memories(self, **kwargs):
+            raise EverOSError(
+                "backend failed tok"
+                + "en=\""
+                + secret_value
+                + "\" Authorization: Bearer "
+                + bearer_token
+                + " request_id=req-mcp"
+            )
+
+    monkeypatch.setenv("EVEROS_API_KEY", "sk-test")
+    monkeypatch.setenv("EVEROS_USER_ID", "u1")
+    monkeypatch.setattr(mcp_server, "make_client", lambda: FakeClient())
+
+    raw = asyncio.run(mcp_server.everos_search_memories(query="coffee"))
+    result = json.loads(raw)
+    rendered = json.dumps(result)
+
+    assert result["ok"] is False
+    assert secret_value not in rendered
+    assert bearer_token not in rendered
+    assert "[REDACTED]" in rendered
+    assert "request_id=req-mcp" in rendered
+
+
+
 def test_mcp_save_tool_adds_memory_and_flushes(monkeypatch):
     from everos_hermes import mcp_server
 
@@ -140,6 +174,57 @@ def test_mcp_save_tool_reports_flush_timeout_without_losing_task(monkeypatch):
     assert result["flush"]["ok"] is False
     assert result["flush"]["retryable"] is True
     assert "search" in result["flush"]["suggested_next_actions"][0]
+
+
+def test_mcp_save_tool_preserves_queue_payload_when_flush_has_non_timeout_error(monkeypatch):
+    from everos_hermes import mcp_server
+
+    class FakeClient:
+        def add_memories(self, **kwargs):
+            return {"data": {"status": "queued", "task_id": "task-queued"}}
+
+        def flush_memories(self, **kwargs):
+            raise RuntimeError("flush failed api_key=mcp-save-secret")
+
+    monkeypatch.setenv("EVEROS_API_KEY", "sk-test")
+    monkeypatch.setenv("EVEROS_USER_ID", "u1")
+    monkeypatch.setattr(mcp_server, "make_client", lambda: FakeClient())
+
+    result = json.loads(asyncio.run(mcp_server.everos_save_memory(content="queued before failure", session_id="sess-1", flush=True)))
+
+    assert result["saved"] is True
+    assert result["message_queued"] is True
+    assert result["task_id"] == "task-queued"
+    assert result["flush"]["ok"] is False
+    assert result["flush"]["status"] == "error"
+    assert "mcp-save-secret" not in json.dumps(result)
+
+
+def test_mcp_add_memories_preserves_queue_payload_when_flush_has_non_timeout_error(monkeypatch):
+    from everos_hermes import mcp_server
+
+    class FakeClient:
+        def add_memories(self, **kwargs):
+            return {"data": {"status": "queued", "task_id": "task-add"}}
+
+        def flush_memories(self, **kwargs):
+            raise RuntimeError("flush failed token=mcp-add-secret")
+
+    monkeypatch.setenv("EVEROS_API_KEY", "sk-test")
+    monkeypatch.setenv("EVEROS_USER_ID", "u1")
+    monkeypatch.setattr(mcp_server, "make_client", lambda: FakeClient())
+
+    result = json.loads(asyncio.run(mcp_server.everos_add_memories(
+        messages=[{"role": "user", "content": "queued", "timestamp": 1}],
+        session_id="sess-1",
+        flush=True,
+    )))
+
+    assert result["ok"] is True
+    assert result["add"]["data"]["task_id"] == "task-add"
+    assert result["flush"]["ok"] is False
+    assert result["flush"]["status"] == "error"
+    assert "mcp-add-secret" not in json.dumps(result)
 
 
 def test_mcp_flush_tool_passes_timeout_and_returns_actionable_timeout(monkeypatch):

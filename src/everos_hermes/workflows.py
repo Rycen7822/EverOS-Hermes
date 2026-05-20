@@ -5,23 +5,11 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .agent_visibility import audit_agent_visibility, build_agent_visibility_report
+from .agent_visibility import audit_agent_visibility, build_agent_visibility_report, workflow_status_from_agent_visibility
 from .client import DEFAULT_MEMORY_TYPES, EverOSClient, EverOSTimeoutError
+from .redaction import error_payload as generic_error_payload, sanitized_error_message
+from .response_normalization import count_hits
 from .schemas import normalize_scope, validate_messages
-
-SEARCH_KEYS = (
-    "episodes",
-    "profiles",
-    "raw_messages",
-    "agent_memory",
-    "agent_cases",
-    "agent_skills",
-    "cases",
-    "skills",
-    "items",
-    "results",
-    "memories",
-)
 
 
 def now_ms() -> int:
@@ -49,7 +37,7 @@ def error_envelope(*, workflow: str, error_code: str, message: str, retryable: b
         "workflow": workflow,
         "status": "error",
         "error_code": error_code,
-        "message": message,
+        "message": sanitized_error_message(message),
         "retryable": retryable,
         "suggested_next_actions": actions,
     }
@@ -65,7 +53,7 @@ def save_result_payload(
     scope: str,
     flush_requested: bool,
     flush_result: dict[str, Any] | None = None,
-    flush_error: EverOSTimeoutError | None = None,
+    flush_error: Exception | None = None,
 ) -> dict[str, Any]:
     data = result.get("data", {}) if isinstance(result, dict) else {}
     status = data.get("status", "") if isinstance(data, dict) else ""
@@ -84,8 +72,10 @@ def save_result_payload(
     }
     if flush_result is not None:
         payload["flush"] = flush_result_payload(flush_result)
-    elif flush_error is not None:
+    elif isinstance(flush_error, EverOSTimeoutError):
         payload["flush"] = timeout_payload("flush", flush_error)
+    elif flush_error is not None:
+        payload["flush"] = generic_error_payload("flush", flush_error)
     elif flush_requested:
         payload["flush"] = {"ok": False, "status": "missing", "error": "flush requested but no flush result was recorded"}
     else:
@@ -111,10 +101,22 @@ def timeout_payload(operation: str, exc: EverOSTimeoutError) -> dict[str, Any]:
         "operation": operation,
         "status": "timeout",
         "error_code": "timeout",
-        "message": str(exc),
+        "message": sanitized_error_message(exc),
         "retryable": bool(getattr(exc, "retryable", True)),
         "suggested_next_actions": list(getattr(exc, "suggested_next_actions", [])),
     }
+
+
+def verification_error_payload(exc: Exception) -> dict[str, Any]:
+    payload = generic_error_payload("verification", exc)
+    payload["status"] = "error"
+    payload["verified"] = False
+    payload["queries"] = []
+    payload["suggested_next_actions"] = [
+        "the memory write was queued; inspect EverOS status/search before retrying verification",
+        "rerun verify_session_ingest with the same user_id/session_id before duplicating writes",
+    ]
+    return payload
 
 
 def load_messages_from_file(file_path: str) -> list[dict[str, Any]]:
@@ -214,38 +216,6 @@ def _is_cloud_403(exc: Exception) -> bool:
     return "403" in text or "forbidden" in text
 
 
-def count_hits(response: dict[str, Any]) -> int:
-    data = response.get("data", response) if isinstance(response, dict) else {}
-    return _count_hits_value(data)
-
-
-def _count_hits_value(value: Any) -> int:
-    if isinstance(value, list):
-        return len(value)
-    if not isinstance(value, dict):
-        return 0
-    total = 0
-    for key, child in value.items():
-        if key in SEARCH_KEYS and isinstance(child, list):
-            total += len(child)
-        elif key in SEARCH_KEYS and isinstance(child, dict):
-            total += _count_hits_value(child)
-    return total
-
-
-def _agent_workflow_status(agent_visibility: dict[str, Any], fallback: str) -> str:
-    status = agent_visibility.get("agent_visibility_status")
-    if status == "visible":
-        return "verified"
-    if status == "partial":
-        return "partially_verified"
-    if status == "not_visible":
-        return "agent_not_visible"
-    if status == "error":
-        return "agent_visibility_error"
-    return fallback
-
-
 
 def verify_session_ingest(
     *,
@@ -261,9 +231,12 @@ def verify_session_ingest(
     resolved_scope = normalize_scope(scope)
     resolved_types = list(memory_types or DEFAULT_MEMORY_TYPES)
     queries: list[dict[str, Any]] = []
+    reuse_agent_memory_search = resolved_scope == "agent" and resolved_types == ["agent_memory"]
+    agent_search_responses: dict[str, dict[str, Any]] = {}
     for query in [q for q in verification_queries if str(q).strip()]:
+        query_text = str(query).strip()
         response = client.search_memories(
-            query=str(query),
+            query=query_text,
             user_id=user_id,
             session_id=session_id,
             method="hybrid",
@@ -274,8 +247,10 @@ def verify_session_ingest(
             timeout=timeout,
         )
         hit_count = count_hits(response)
+        if reuse_agent_memory_search:
+            agent_search_responses[query_text] = response
         queries.append({
-            "query": str(query),
+            "query": query_text,
             "status": "hit" if hit_count else "miss",
             "hit_count": hit_count,
             "response": response,
@@ -301,8 +276,9 @@ def verify_session_ingest(
             queries=list(verification_queries or []),
             top_k=top_k,
             timeout=timeout,
+            precomputed_search_responses=agent_search_responses if reuse_agent_memory_search else None,
         )
-        status = _agent_workflow_status(agent_visibility, status)
+        status = workflow_status_from_agent_visibility(agent_visibility, status)
         verified = status == "verified"
         if status in {"agent_not_visible", "partially_verified", "agent_visibility_error"}:
             verified = False
@@ -347,11 +323,13 @@ def save_and_verify(
         message["tool_call_id"] = tool_call_id
     result = client.add_memories(user_id=user_id, session_id=session_id, messages=[message], async_mode=True, scope=resolved_scope)
     flush_result = None
-    flush_error = None
+    flush_error: Exception | None = None
     if flush:
         try:
             flush_result = client.flush_memories(user_id=user_id, session_id=session_id, scope=resolved_scope, timeout=flush_timeout)
         except EverOSTimeoutError as exc:
+            flush_error = exc
+        except Exception as exc:
             flush_error = exc
     save_payload = save_result_payload(
         result=result,
@@ -367,17 +345,23 @@ def save_and_verify(
         queries.insert(0, verification_query)
     if not queries and content:
         queries = [content[:200]]
-    verification = verify_session_ingest(
-        client=client,
-        user_id=user_id,
-        session_id=session_id,
-        verification_queries=queries,
-        memory_types=memory_types,
-        scope=resolved_scope,
-        top_k=top_k,
-        timeout=timeout,
-    )
-    status = verification["status"] if verification.get("verified") is not None else "queued"
+    try:
+        verification = verify_session_ingest(
+            client=client,
+            user_id=user_id,
+            session_id=session_id,
+            verification_queries=queries,
+            memory_types=memory_types,
+            scope=resolved_scope,
+            top_k=top_k,
+            timeout=timeout,
+        )
+    except Exception as exc:
+        verification = verification_error_payload(exc)
+    if verification.get("operation") == "verification" and verification.get("ok") is False:
+        status = "verification_error"
+    else:
+        status = verification["status"] if verification.get("verified") is not None else "queued"
     agent_visibility = None
     if resolved_scope == "agent":
         verification_visibility = verification.get("agent_visibility", {}) if isinstance(verification, dict) else {}
@@ -388,7 +372,7 @@ def save_and_verify(
             user_id=user_id,
             session_id=session_id,
         )
-        status = _agent_workflow_status(agent_visibility, status)
+        status = workflow_status_from_agent_visibility(agent_visibility, status)
     payload = success_envelope(
         workflow="save_and_verify",
         status=status,
@@ -431,7 +415,7 @@ def import_and_verify(
     fatal_tokens = ("tool_call_id", "empty", "timestamp", "role", "message_id", "1..500")
     validation_warnings = [warning for warning in warnings if any(token in warning for token in fatal_tokens)]
     if dry_run:
-        actions = ["fix warnings before importing"] if warnings else ["rerun with dry_run=false to import messages"]
+        dry_run_actions = ["fix warnings before importing"] if warnings else ["rerun with dry_run=false to import messages"]
         return success_envelope(
             workflow=workflow,
             status="dry_run",
@@ -442,7 +426,7 @@ def import_and_verify(
             metrics=metrics,
             batches=[],
             verification={"status": "verification_skipped", "verified": None, "queries": []},
-            suggested_next_actions=actions,
+            suggested_next_actions=dry_run_actions,
         )
     if validation_warnings:
         return error_envelope(
@@ -491,7 +475,7 @@ def import_and_verify(
                     "ok": False,
                     "message_count": len(batch),
                     "payload_bytes": _json_bytes({"messages": batch}),
-                    "error": str(exc),
+                    "error": sanitized_error_message(exc),
                     "retryable": True,
                     "split": True,
                     "split_reason": "cloud_403",
@@ -506,7 +490,7 @@ def import_and_verify(
                 "ok": False,
                 "message_count": len(batch),
                 "payload_bytes": _json_bytes({"messages": batch}),
-                "error": str(exc),
+                "error": sanitized_error_message(exc),
                 "retryable": True,
             })
             return 0, len(batch), 0
@@ -522,17 +506,27 @@ def import_and_verify(
             flush_payload = flush_result_payload(client.flush_memories(user_id=user_id, session_id=session_id, scope=resolved_scope, timeout=flush_timeout))
         except EverOSTimeoutError as exc:
             flush_payload = timeout_payload("flush", exc)
-    verification = verify_session_ingest(
-        client=client,
-        user_id=user_id,
-        session_id=session_id,
-        verification_queries=list(verification_queries or []),
-        memory_types=memory_types,
-        scope=resolved_scope,
-        top_k=top_k,
-        timeout=timeout,
-    ) if verification_queries else {"status": "verification_skipped", "verified": None, "queries": []}
-    if verification.get("verified") is True:
+        except Exception as exc:
+            flush_payload = generic_error_payload("flush", exc)
+    if verification_queries:
+        try:
+            verification = verify_session_ingest(
+                client=client,
+                user_id=user_id,
+                session_id=session_id,
+                verification_queries=list(verification_queries),
+                memory_types=memory_types,
+                scope=resolved_scope,
+                top_k=top_k,
+                timeout=timeout,
+            )
+        except Exception as exc:
+            verification = verification_error_payload(exc)
+    else:
+        verification = {"status": "verification_skipped", "verified": None, "queries": []}
+    if verification.get("operation") == "verification" and verification.get("ok") is False and queued_count:
+        status = "verification_error"
+    elif verification.get("verified") is True:
         status = "verified"
     elif verification.get("verified") is False and queued_count:
         status = verification.get("status", "not_yet_searchable")
@@ -552,7 +546,7 @@ def import_and_verify(
             user_id=user_id,
             session_id=session_id,
         )
-        status = _agent_workflow_status(agent_visibility, status)
+        status = workflow_status_from_agent_visibility(agent_visibility, status)
     actions: list[str] = []
     if split_count:
         actions.append("Cloud 403 triggered adaptive batch splitting; keep batch_size small for long messages")

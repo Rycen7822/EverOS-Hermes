@@ -1,17 +1,22 @@
 from __future__ import annotations
 
-import json
 import time
 from typing import Any, Literal, TypedDict
 
 from mcp.server.fastmcp import FastMCP
 
 from .agent_visibility import build_agent_visibility_report
-from .client import DEFAULT_BASE_URL, DEFAULT_MEMORY_TYPES, EverOSClient, EverOSError, EverOSTimeoutError
+from .client import DEFAULT_BASE_URL, DEFAULT_MEMORY_TYPES, EverOSClient, EverOSTimeoutError
 from .env import get_env
 from .flush_retry import flush_memories_with_retry
 from .formatting import format_search_context, pretty_json, strip_vectors
+from .redaction import error_payload, sanitized_error_message
 from .schemas import GetMemoryType, MemoryScope, SearchMemoryType, delete_confirm_text, normalize_scope
+from .tool_payloads import (
+    flush_result_payload as _flush_result_payload,
+    save_result_payload as _save_result_payload,
+    timeout_payload as _timeout_payload,
+)
 from .workflows import import_and_verify, save_and_verify, verify_session_ingest
 
 mcp = FastMCP("everos_mcp")
@@ -66,68 +71,6 @@ def _render(response: dict[str, Any], response_format: str = "json") -> str:
     return pretty_json(response)
 
 
-def _flush_result_payload(response: dict[str, Any], *, attempt_count: int | None = None) -> WorkflowOutput:
-    data = response.get("data", {}) if isinstance(response, dict) else {}
-    payload: dict[str, Any] = {"ok": True}
-    if attempt_count is not None:
-        payload["attempt_count"] = attempt_count
-    if isinstance(data, dict):
-        if data.get("status"):
-            payload["status"] = data.get("status")
-        if data.get("request_id"):
-            payload["request_id"] = data.get("request_id")
-        if data.get("task_id"):
-            payload["task_id"] = data.get("task_id")
-        if data.get("message"):
-            payload["message"] = data.get("message")
-    return payload
-
-
-def _timeout_payload(operation: str, exc: EverOSTimeoutError) -> WorkflowOutput:
-    return {
-        "ok": False,
-        "operation": operation,
-        "error": str(exc),
-        "retryable": bool(getattr(exc, "retryable", True)),
-        "suggested_next_actions": list(getattr(exc, "suggested_next_actions", [])),
-    }
-
-
-def _save_result_payload(
-    *,
-    result: dict[str, Any],
-    user_id: str,
-    session_id: str | None,
-    scope: str = "personal",
-    flush_requested: bool,
-    flush_result: dict[str, Any] | None = None,
-    flush_error: EverOSTimeoutError | None = None,
-) -> WorkflowOutput:
-    data = result.get("data", {}) if isinstance(result, dict) else {}
-    status = data.get("status", "") if isinstance(data, dict) else ""
-    task_id = data.get("task_id", "") if isinstance(data, dict) else ""
-    payload: dict[str, Any] = {
-        "saved": True,
-        "message_queued": True,
-        "extraction_requested": bool(task_id or status in {"queued", "processing", "success"} or flush_requested),
-        "searchable": None,
-        "scope": scope,
-        "user_id": user_id,
-        "session_id": session_id,
-        "status": status,
-        "task_id": task_id,
-    }
-    if flush_result is not None:
-        payload["flush"] = _flush_result_payload(flush_result)
-    elif flush_error is not None:
-        payload["flush"] = _timeout_payload("flush", flush_error)
-    elif flush_requested:
-        payload["flush"] = {"ok": False, "error": "flush requested but no flush result was recorded"}
-    else:
-        payload["flush"] = {"ok": None, "status": "not_requested"}
-    return payload
-
-
 @mcp.tool(
     name="everos_save_memory",
     title="Save EverOS Memory",
@@ -178,6 +121,8 @@ async def everos_save_memory(
                 timeout=flush_timeout,
             )
         except EverOSTimeoutError as exc:
+            flush_error = exc
+        except Exception as exc:
             flush_error = exc
     payload = _save_result_payload(
         result=result,
@@ -234,6 +179,8 @@ async def everos_add_memories(
             payload: dict[str, Any] = {"ok": True, "add": result, "flush": _flush_result_payload(flush_result, attempt_count=attempt_count)}
         except EverOSTimeoutError as exc:
             payload = {"ok": True, "add": result, "flush": _timeout_payload("flush", exc)}
+        except Exception as exc:
+            payload = {"ok": True, "add": result, "flush": error_payload("flush", exc)}
     elif resolved_scope == "agent":
         payload = {"ok": True, "add": result}
     else:
@@ -277,6 +224,8 @@ async def everos_flush_memories(
         )
     except EverOSTimeoutError as exc:
         return pretty_json(_timeout_payload("flush", exc))
+    except Exception as exc:
+        return pretty_json(error_payload("flush", exc))
     if resolved_scope == "agent":
         flush_payload = _flush_result_payload(response, attempt_count=attempt_count)
         return pretty_json(
@@ -333,24 +282,29 @@ async def everos_search_memories(
         )
     except EverOSTimeoutError as exc:
         if method == "agentic" and fallback_to_hybrid:
-            response = client.search_memories(
-                query=query,
-                user_id=uid,
-                session_id=session_id,
-                filters=filters,
-                method="hybrid",
-                memory_types=resolved_types,
-                top_k=top_k,
-                radius=radius,
-                include_original_data=include_original_data,
-                include_vectors=include_vectors,
-                timeout=timeout,
-            )
+            try:
+                response = client.search_memories(
+                    query=query,
+                    user_id=uid,
+                    session_id=session_id,
+                    filters=filters,
+                    method="hybrid",
+                    memory_types=resolved_types,
+                    top_k=top_k,
+                    radius=radius,
+                    include_original_data=include_original_data,
+                    include_vectors=include_vectors,
+                    timeout=timeout,
+                )
+            except Exception as fallback_exc:
+                return pretty_json(error_payload("search", fallback_exc))
             response["fallback_used"] = True
-            response["fallback_reason"] = str(exc)
+            response["fallback_reason"] = sanitized_error_message(exc)
             fallback_used = True
         else:
             return pretty_json(_timeout_payload("search", exc))
+    except Exception as exc:
+        return pretty_json(error_payload("search", exc))
     if not include_vectors:
         response = strip_vectors(response)
     if fallback_used and isinstance(response, dict):
@@ -376,16 +330,19 @@ async def everos_get_memories(
 ) -> str:
     """Retrieve structured EverOS memories by memory_type with pagination."""
     uid = user_id or default_user_id()
-    response = make_client().get_memories(
-        user_id=uid,
-        session_id=session_id,
-        filters=filters,
-        memory_type=memory_type,
-        page=page,
-        page_size=page_size,
-        rank_by=rank_by,
-        rank_order=rank_order,
-    )
+    try:
+        response = make_client().get_memories(
+            user_id=uid,
+            session_id=session_id,
+            filters=filters,
+            memory_type=memory_type,
+            page=page,
+            page_size=page_size,
+            rank_by=rank_by,
+            rank_order=rank_order,
+        )
+    except Exception as exc:
+        return pretty_json(error_payload("get", exc))
     return _render(response, response_format)
 
 
@@ -412,7 +369,10 @@ async def everos_delete_memories(
         expected = delete_confirm_text(user_id, session_id)
         if confirm_scope_text != expected:
             return pretty_json({"error": f"confirm_scope_text must exactly match {expected!r}"})
-    return pretty_json(make_client().delete_memories(memory_id=memory_id, user_id=user_id, session_id=session_id))
+    try:
+        return pretty_json(make_client().delete_memories(memory_id=memory_id, user_id=user_id, session_id=session_id))
+    except Exception as exc:
+        return pretty_json(error_payload("delete", exc))
 
 
 @mcp.tool(
@@ -422,7 +382,10 @@ async def everos_delete_memories(
 )
 async def everos_get_task_status(task_id: str) -> str:
     """Check an asynchronous EverOS extraction task status."""
-    return pretty_json(make_client().get_task_status(task_id))
+    try:
+        return pretty_json(make_client().get_task_status(task_id))
+    except Exception as exc:
+        return pretty_json(error_payload("task_status", exc))
 
 
 @mcp.tool(
@@ -432,7 +395,10 @@ async def everos_get_task_status(task_id: str) -> str:
 )
 async def everos_get_settings() -> str:
     """Get current EverOS memory-space settings."""
-    return pretty_json(make_client().get_settings())
+    try:
+        return pretty_json(make_client().get_settings())
+    except Exception as exc:
+        return pretty_json(error_payload("get_settings", exc))
 
 
 @mcp.tool(
@@ -442,7 +408,10 @@ async def everos_get_settings() -> str:
 )
 async def everos_update_settings(settings: dict[str, Any], strict: bool = True, return_diff: bool = True) -> str:
     """Update EverOS memory-space settings. Only supplied fields are changed."""
-    return pretty_json(make_client().update_settings(settings, strict=strict, return_diff=return_diff))
+    try:
+        return pretty_json(make_client().update_settings(settings, strict=strict, return_diff=return_diff))
+    except Exception as exc:
+        return pretty_json(error_payload("update_settings", exc))
 
 
 @mcp.tool(

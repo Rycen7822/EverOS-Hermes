@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 import re
 import threading
 import time
@@ -10,14 +11,29 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .agent_visibility import audit_agent_visibility, build_agent_visibility_report
-from .client import DEFAULT_BASE_URL, DEFAULT_MEMORY_TYPES, EverOSClient, EverOSError, EverOSTimeoutError
+from .client import DEFAULT_BASE_URL, EverOSClient, EverOSError, EverOSTimeoutError
 from .context_assembler import assemble_everos_context
 from .env import get_env
 from .flush_retry import flush_memories_with_retry
 from .formatting import format_search_context, pretty_json
 from .policy import should_skip_capture, should_skip_recall, stable_query_key
+from .provider_config import (
+    _DEFAULT_CONFIG,
+    _SECRET_CONFIG_KEYS as _SECRET_CONFIG_KEYS,
+    _as_bool as _as_bool,
+    _load_config,
+    _normalize_config as _normalize_config,
+    _sanitize_config_values as _sanitize_config_values,
+    _save_config,
+)
+from .redaction import redact_text, sanitized_error_message
 from .schemas import normalize_scope
-from .trajectory import TrajectoryBuildResult, TrajectorySource, build_agent_trajectory_messages
+from .tool_payloads import (
+    flush_result_payload as _flush_result_payload,
+    save_result_payload as _save_result_payload,
+    timeout_payload as _timeout_payload,
+)
+from .trajectory import TrajectoryBuildOptions, TrajectoryBuildResult, TrajectorySource, build_agent_trajectory_messages_with_options
 from .workflows import import_and_verify, save_and_verify, verify_session_ingest
 
 try:
@@ -72,53 +88,6 @@ except Exception:  # pragma: no cover - used outside Hermes during standalone te
         def shutdown(self) -> None:
             return None
 
-
-_DEFAULT_CONFIG = {
-    "base_url": DEFAULT_BASE_URL,
-    "user_id": "",
-    "auto_recall": True,
-    "auto_capture": True,
-    "flush_after_turn": True,
-    "search_method": "hybrid",
-    "top_k": 5,
-    "memory_types": DEFAULT_MEMORY_TYPES,
-    "capture_agent_memory": False,
-    "agent_capture_mode": "parallel",
-    "agent_recall": False,
-    "agent_memory_types": ["agent_memory"],
-    "agent_flush_after_turn": True,
-    "agent_visibility_verify_after_write": False,
-    "agent_visibility_verify_after_flush": False,
-    "agent_visibility_queries": [],
-    "agent_visibility_top_k": 5,
-    "agent_visibility_timeout": 30.0,
-    "agent_visibility_get_page_size": 20,
-    "agent_visibility_retry_flush_attempts": 1,
-    "agent_visibility_retry_flush_backoff_ms": 250,
-    "agentic_timeout": 60.0,
-    "max_context_items": 8,
-    "timeout": 10.0,
-    "max_context_chars": 12000,
-    "include_recent_raw": False,
-    "recent_raw_top_k": 4,
-    "profile_max_items": 3,
-    "agent_skills_max_items": 4,
-    "agent_cases_max_items": 4,
-    "episodic_max_items": 6,
-    "min_score": 0.0,
-    "min_recall_query_chars": 8,
-    "prefetch_cache_enabled": True,
-    "prefetch_cache_ttl_seconds": 90,
-    "agent_trajectory_on_session_end": True,
-    "agent_trajectory_on_pre_compress": True,
-    "agent_trajectory_on_delegation": True,
-    "agent_summary_after_turn": True,
-    "agent_max_messages": 80,
-    "agent_max_message_chars": 8000,
-    "agent_max_tool_result_chars": 6000,
-    "agent_max_payload_chars": 60000,
-    "agent_dedupe_entries": 256,
-}
 
 _CONTEXT_STRIP_RE = re.compile(r"<memory-context>[\s\S]*?</memory-context>|<everos-context>[\s\S]*?</everos-context>", re.I)
 
@@ -261,198 +230,8 @@ VERIFY_SESSION_SCHEMA = {
 }
 
 
-def _load_config(hermes_home: str) -> dict[str, Any]:
-    config = dict(_DEFAULT_CONFIG)
-    path = Path(hermes_home) / "everos.json"
-    if path.exists():
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(raw, dict):
-                config.update({k: v for k, v in raw.items() if v is not None})
-        except Exception:
-            pass
-    return _normalize_config(config)
-
-
-def _save_config(values: dict[str, Any], hermes_home: str) -> None:
-    path = Path(hermes_home) / "everos.json"
-    existing: dict[str, Any] = {}
-    if path.exists():
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(raw, dict):
-                existing = raw
-        except Exception:
-            existing = {}
-    existing.update(values or {})
-    path.write_text(json.dumps(_normalize_config(existing), ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-
-def _normalize_config(config: dict[str, Any]) -> dict[str, Any]:
-    out = dict(_DEFAULT_CONFIG)
-    out.update(config or {})
-    for key in (
-        "auto_recall",
-        "auto_capture",
-        "flush_after_turn",
-        "capture_agent_memory",
-        "agent_recall",
-        "agent_flush_after_turn",
-        "agent_visibility_verify_after_write",
-        "agent_visibility_verify_after_flush",
-        "include_recent_raw",
-        "prefetch_cache_enabled",
-        "agent_trajectory_on_session_end",
-        "agent_trajectory_on_pre_compress",
-        "agent_trajectory_on_delegation",
-        "agent_summary_after_turn",
-    ):
-        out[key] = _as_bool(out.get(key), bool(_DEFAULT_CONFIG[key]))
-    try:
-        out["top_k"] = max(1, min(20, int(out.get("top_k", 5))))
-    except Exception:
-        out["top_k"] = 5
-    try:
-        out["timeout"] = max(1.0, min(60.0, float(out.get("timeout", 10.0))))
-    except Exception:
-        out["timeout"] = 10.0
-    try:
-        out["agentic_timeout"] = max(1.0, min(120.0, float(out.get("agentic_timeout", 60.0))))
-    except Exception:
-        out["agentic_timeout"] = 60.0
-    try:
-        out["agent_visibility_timeout"] = max(1.0, min(120.0, float(out.get("agent_visibility_timeout", 30.0))))
-    except Exception:
-        out["agent_visibility_timeout"] = 30.0
-    try:
-        out["max_context_items"] = max(1, min(50, int(out.get("max_context_items", 8))))
-    except Exception:
-        out["max_context_items"] = 8
-    for key, low, high in (
-        ("max_context_chars", 1000, 50000),
-        ("recent_raw_top_k", 0, 20),
-        ("profile_max_items", 0, 20),
-        ("agent_skills_max_items", 0, 20),
-        ("agent_cases_max_items", 0, 20),
-        ("episodic_max_items", 0, 20),
-        ("min_recall_query_chars", 0, 200),
-        ("prefetch_cache_ttl_seconds", 1, 600),
-        ("agent_max_messages", 1, 200),
-        ("agent_max_message_chars", 100, 20000),
-        ("agent_max_tool_result_chars", 100, 20000),
-        ("agent_max_payload_chars", 1000, 200000),
-        ("agent_dedupe_entries", 16, 4096),
-        ("agent_visibility_top_k", 1, 20),
-        ("agent_visibility_get_page_size", 1, 100),
-        ("agent_visibility_retry_flush_attempts", 1, 5),
-        ("agent_visibility_retry_flush_backoff_ms", 0, 2000),
-    ):
-        try:
-            out[key] = max(low, min(high, int(out.get(key, _DEFAULT_CONFIG[key]))))
-        except Exception:
-            out[key] = _DEFAULT_CONFIG[key]
-    try:
-        out["min_score"] = max(0.0, min(1.0, float(out.get("min_score", 0.0))))
-    except Exception:
-        out["min_score"] = 0.0
-    method = str(out.get("search_method", "hybrid")).strip().lower()
-    out["search_method"] = method if method in {"keyword", "vector", "hybrid", "agentic"} else "hybrid"
-    memory_types = out.get("memory_types")
-    if isinstance(memory_types, str):
-        memory_types = [part.strip() for part in memory_types.split(",") if part.strip()]
-    if not isinstance(memory_types, list) or not memory_types:
-        memory_types = DEFAULT_MEMORY_TYPES
-    out["memory_types"] = [str(item) for item in memory_types]
-    agent_memory_types = out.get("agent_memory_types")
-    if isinstance(agent_memory_types, str):
-        agent_memory_types = [part.strip() for part in agent_memory_types.split(",") if part.strip()]
-    if not isinstance(agent_memory_types, list) or not agent_memory_types:
-        agent_memory_types = ["agent_memory"]
-    out["agent_memory_types"] = [str(item) for item in agent_memory_types]
-    visibility_queries = out.get("agent_visibility_queries")
-    if isinstance(visibility_queries, str):
-        visibility_queries = [part.strip() for part in visibility_queries.split(",") if part.strip()]
-    if not isinstance(visibility_queries, list):
-        visibility_queries = []
-    out["agent_visibility_queries"] = [str(item) for item in visibility_queries if str(item).strip()]
-    mode = str(out.get("agent_capture_mode", "parallel")).strip().lower()
-    out["agent_capture_mode"] = mode if mode in {"parallel", "agent_only", "off"} else "parallel"
-    out["base_url"] = str(out.get("base_url") or DEFAULT_BASE_URL).strip() or DEFAULT_BASE_URL
-    out["user_id"] = str(out.get("user_id") or "").strip()
-    return out
-
-
-def _as_bool(value: Any, default: bool) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        lowered = value.strip().lower()
-        if lowered in ("1", "true", "yes", "y", "on"):
-            return True
-        if lowered in ("0", "false", "no", "n", "off"):
-            return False
-    return default
-
-
 def _tool_error(message: str) -> str:
-    return json.dumps({"error": message}, ensure_ascii=False)
-
-
-def _timeout_payload(operation: str, exc: EverOSTimeoutError) -> dict[str, Any]:
-    return {
-        "ok": False,
-        "operation": operation,
-        "error": str(exc),
-        "retryable": bool(getattr(exc, "retryable", True)),
-        "suggested_next_actions": list(getattr(exc, "suggested_next_actions", [])),
-    }
-
-
-def _flush_result_payload(response: dict[str, Any], *, attempt_count: int | None = None) -> dict[str, Any]:
-    data = response.get("data", {}) if isinstance(response, dict) else {}
-    payload: dict[str, Any] = {"ok": True}
-    if attempt_count is not None:
-        payload["attempt_count"] = attempt_count
-    if isinstance(data, dict):
-        for key in ("status", "request_id", "task_id", "message"):
-            if data.get(key):
-                payload[key] = data[key]
-    return payload
-
-
-def _save_result_payload(
-    *,
-    result: dict[str, Any],
-    user_id: str,
-    session_id: str | None,
-    scope: str = "personal",
-    flush_requested: bool,
-    flush_result: dict[str, Any] | None = None,
-    flush_error: EverOSTimeoutError | None = None,
-) -> dict[str, Any]:
-    data = result.get("data", {}) if isinstance(result, dict) else {}
-    status = data.get("status", "") if isinstance(data, dict) else ""
-    task_id = data.get("task_id", "") if isinstance(data, dict) else ""
-    payload: dict[str, Any] = {
-        "saved": True,
-        "message_queued": True,
-        "extraction_requested": bool(task_id or status in {"queued", "processing", "success"} or flush_requested),
-        "searchable": None,
-        "scope": scope,
-        "user_id": user_id,
-        "session_id": session_id,
-        "status": status,
-        "task_id": task_id,
-    }
-    if flush_result is not None:
-        payload["flush"] = _flush_result_payload(flush_result)
-    elif flush_error is not None:
-        payload["flush"] = _timeout_payload("flush", flush_error)
-    elif flush_requested:
-        payload["flush"] = {"ok": False, "error": "flush requested but no flush result was recorded"}
-    else:
-        payload["flush"] = {"ok": None, "status": "not_requested"}
-    return payload
+    return json.dumps({"error": redact_text(message)}, ensure_ascii=False)
 
 
 def _now_ms() -> int:
@@ -679,7 +458,7 @@ class EverOSMemoryProvider(MemoryProvider):
             )
             ok_count += 1
         except Exception as exc:
-            errors.append(f"personal:{_redact_error(str(exc))}")
+            errors.append(f"personal:{sanitized_error_message(exc)}")
             self._record_status("prefetch.personal", False, exc)
         if self._config.get("agent_recall"):
             try:
@@ -696,7 +475,7 @@ class EverOSMemoryProvider(MemoryProvider):
                 main_response = _merge_agent_response(main_response, agent_response)
                 ok_count += 1
             except Exception as exc:
-                errors.append(f"agent:{_redact_error(str(exc))}")
+                errors.append(f"agent:{sanitized_error_message(exc)}")
                 self._record_status("prefetch.agent", False, exc, agent=True)
         if self._config.get("include_recent_raw"):
             if session_id:
@@ -713,7 +492,7 @@ class EverOSMemoryProvider(MemoryProvider):
                     )
                     ok_count += 1
                 except Exception as exc:
-                    errors.append(f"raw:{_redact_error(str(exc))}")
+                    errors.append(f"raw:{sanitized_error_message(exc)}")
                     self._record_status("prefetch.raw", False, exc)
             else:
                 warnings.append("raw_recall_skipped_missing_session")
@@ -801,6 +580,8 @@ class EverOSMemoryProvider(MemoryProvider):
                     scope=scope,
                 )
             except EverOSTimeoutError as exc:
+                flush_error = exc
+            except Exception as exc:
                 flush_error = exc
         payload = _save_result_payload(
             result=result,
@@ -1007,15 +788,9 @@ class EverOSMemoryProvider(MemoryProvider):
                 f"{_truncate_for_memory(assistant_content, 4000)}\nOutcome: completed_or_partial\nReusable lesson hint: capture approach, correction, and verification if useful.",
             },
         ]
-        return build_agent_trajectory_messages(
+        return build_agent_trajectory_messages_with_options(
             messages,
-            session_id=session_id,
-            source="sync_turn",
-            now_ms=now_ms,
-            max_messages=2,
-            max_message_chars=self._config["agent_max_message_chars"],
-            max_tool_result_chars=self._config["agent_max_tool_result_chars"],
-            max_payload_chars=self._config["agent_max_payload_chars"],
+            self._trajectory_options(source="sync_turn", session_id=session_id, now_ms=now_ms, max_messages=2),
         )
 
     def _agent_visibility_queries(self, texts: list[str], *, session_id: str | None, markers: list[str] | None = None) -> list[str]:
@@ -1163,15 +938,9 @@ class EverOSMemoryProvider(MemoryProvider):
             {"role": "user", "timestamp": now, "content": str(task or "").strip()},
             {"role": "assistant", "timestamp": now + 1, "content": prefix + str(result or "").strip()},
         ]
-        built = build_agent_trajectory_messages(
+        built = build_agent_trajectory_messages_with_options(
             messages,
-            session_id=self._session_id,
-            source="delegation",
-            now_ms=now,
-            max_messages=self._config["agent_max_messages"],
-            max_message_chars=self._config["agent_max_message_chars"],
-            max_tool_result_chars=self._config["agent_max_tool_result_chars"],
-            max_payload_chars=self._config["agent_max_payload_chars"],
+            self._trajectory_options(source="delegation", session_id=self._session_id, now_ms=now),
         )
         if child:
             for message in built.messages:
@@ -1180,12 +949,24 @@ class EverOSMemoryProvider(MemoryProvider):
         self._write_agent_trajectory(built, session_id=self._session_id, flush_allowed=True, operation="delegation.agent")
 
     def _build_agent_trajectory_result(self, messages: list[dict[str, Any]], *, source: TrajectorySource) -> TrajectoryBuildResult:
-        return build_agent_trajectory_messages(
+        return build_agent_trajectory_messages_with_options(
             messages,
-            session_id=self._session_id,
+            self._trajectory_options(source=source, session_id=self._session_id, now_ms=_now_ms()),
+        )
+
+    def _trajectory_options(
+        self,
+        *,
+        source: TrajectorySource,
+        session_id: str,
+        now_ms: int,
+        max_messages: int | None = None,
+    ) -> TrajectoryBuildOptions:
+        return TrajectoryBuildOptions(
+            session_id=session_id,
             source=source,
-            now_ms=_now_ms(),
-            max_messages=self._config["agent_max_messages"],
+            now_ms=now_ms,
+            max_messages=max_messages if max_messages is not None else self._config["agent_max_messages"],
             max_message_chars=self._config["agent_max_message_chars"],
             max_tool_result_chars=self._config["agent_max_tool_result_chars"],
             max_payload_chars=self._config["agent_max_payload_chars"],
@@ -1211,7 +992,7 @@ class EverOSMemoryProvider(MemoryProvider):
     def _record_status(self, operation: str, ok: bool, exc: Exception | None = None, *, agent: bool = False) -> None:
         status = {"ok": ok, "operation": operation}
         if exc is not None:
-            status["error"] = _redact_error(str(exc))
+            status["error"] = sanitized_error_message(exc)
         if agent:
             self._last_agent_write_status = status
             self._last_agent_trajectory_status = dict(status)
@@ -1226,8 +1007,15 @@ class EverOSMemoryProvider(MemoryProvider):
             path = Path(self._hermes_home) / "everos.log"
             safe = {k: v for k, v in payload.items() if k in {"ok", "operation", "error", "scope", "status", "request_id", "task_id"}}
             path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(safe, ensure_ascii=False, sort_keys=True) + "\n")
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            try:
+                os.fchmod(fd, 0o600)
+                with os.fdopen(fd, "a", encoding="utf-8") as fh:
+                    fd = -1
+                    fh.write(json.dumps(safe, ensure_ascii=False, sort_keys=True) + "\n")
+            finally:
+                if fd != -1:
+                    os.close(fd)
         except Exception:
             return
 
@@ -1337,12 +1125,6 @@ def _truncate_for_memory(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + "…"
-
-
-def _redact_error(text: str) -> str:
-    text = re.sub(r"sk-[A-Za-z0-9_-]+", "sk-***", text or "")
-    text = re.sub(r"(?i)(api[_-]?key|authorization|token|secret)=\S+", r"\1=***", text)
-    return text[:500]
 
 
 def register(ctx: Any) -> None:

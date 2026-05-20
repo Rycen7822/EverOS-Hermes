@@ -3,10 +3,15 @@ use crate::client::{DEFAULT_MEMORY_TYPES, EverOSClient, EverOSError};
 use crate::env::get_env;
 use crate::flush_retry::flush_memories_with_retry;
 use crate::formatting::{format_search_context, pretty_json};
+use crate::redaction::{error_payload, sanitized_error_message};
 use crate::workflows;
 use serde_json::{Value, json};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+const MAX_FRAME_HEADER_LINE_BYTES: usize = 8 * 1024;
+const MAX_FRAME_HEADER_BYTES: usize = 64 * 1024;
+const MAX_FRAME_BODY_BYTES: usize = 16 * 1024 * 1024;
 
 pub const TOOL_NAMES: [&str; 13] = [
     "everos_save_memory",
@@ -52,19 +57,796 @@ pub fn run_stdio() -> anyhow::Result<()> {
 
 pub fn tool_definitions() -> Vec<Value> {
     vec![
-        json!({"name":"everos_save_memory","title":"Save EverOS Memory","description":"Queue one explicit text memory message for EverOS extraction. saved=true means accepted, not immediately searchable.","inputSchema":{"type":"object","properties":{"content":{"type":"string"},"user_id":{"type":"string"},"session_id":{"type":"string"},"scope":{"type":"string","enum":["personal","agent"],"default":"personal"},"role":{"type":"string","enum":["user","assistant","tool","system"]},"tool_call_id":{"type":"string","description":"Required when role=tool for agent memory."},"flush":{"type":"boolean","default":true},"async_mode":{"type":"boolean","default":true},"flush_timeout":{"type":"number"}},"required":["content"]},"annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":true}}),
-        json!({"name":"everos_add_memories","title":"Add EverOS Memory Messages","description":"Add one or more personal or agent-trajectory messages to EverOS. Prefer scope over deprecated agent alias.","inputSchema":{"type":"object","properties":{"messages":{"type":"array","items":{"type":"object"}},"user_id":{"type":"string"},"session_id":{"type":"string"},"scope":{"type":"string","enum":["personal","agent"],"default":"personal"},"async_mode":{"type":"boolean","default":true},"agent":{"type":"boolean"},"flush":{"type":"boolean","default":false},"flush_timeout":{"type":"number"}},"required":["messages"]},"annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":true}}),
-        json!({"name":"everos_flush_memories","title":"Flush EverOS Memories","description":"Trigger EverOS boundary detection and memory extraction immediately. Timeout errors are retryable; search/status checks should happen before retrying.","inputSchema":{"type":"object","properties":{"user_id":{"type":"string"},"session_id":{"type":"string"},"scope":{"type":"string","enum":["personal","agent"],"default":"personal"},"agent":{"type":"boolean"},"timeout":{"type":"number"}}},"annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}}),
-        json!({"name":"everos_search_memories","title":"Search EverOS Memories","description":"Search EverOS memory using keyword, vector, hybrid, or agentic retrieval. Vector fields are stripped by default even when include_original_data=true; set include_vectors=true only for debugging.","inputSchema":{"type":"object","properties":{"query":{"type":"string"},"user_id":{"type":"string"},"session_id":{"type":"string"},"filters":{"type":"object"},"method":{"type":"string","enum":["keyword","vector","hybrid","agentic"],"default":"hybrid"},"top_k":{"type":"integer","default":5,"minimum":-1,"maximum":100},"memory_types":{"type":"array","items":{"type":"string","enum":["episodic_memory","profile","raw_message","agent_memory"]}},"radius":{"type":"number","minimum":0,"maximum":1},"include_original_data":{"type":"boolean","default":false},"include_vectors":{"type":"boolean","default":false},"response_format":{"type":"string","enum":["json","markdown"],"default":"json"},"timeout":{"type":"number"},"fallback_to_hybrid":{"type":"boolean","default":true}},"required":["query"]},"annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}}),
-        json!({"name":"everos_get_memories","title":"Get EverOS Memories","description":"Retrieve structured EverOS memories by memory_type with pagination. get supports agent_case/agent_skill; search uses agent_memory.","inputSchema":{"type":"object","properties":{"user_id":{"type":"string"},"session_id":{"type":"string"},"filters":{"type":"object"},"memory_type":{"type":"string","enum":["episodic_memory","profile","agent_case","agent_skill"],"default":"episodic_memory"},"page":{"type":"integer","default":1},"page_size":{"type":"integer","default":20},"rank_by":{"type":"string","default":"timestamp"},"rank_order":{"type":"string","enum":["asc","desc"],"default":"desc"},"response_format":{"type":"string","enum":["json","markdown"],"default":"json"}}},"annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}}),
-        json!({"name":"everos_delete_memories","title":"Delete EverOS Memories","description":"Delete EverOS memory by exact memory_id, or batch-delete by explicit user/session when confirmed.","inputSchema":{"type":"object","properties":{"memory_id":{"type":"string"},"user_id":{"type":"string"},"session_id":{"type":"string"},"confirm":{"type":"boolean","default":false},"confirm_scope_text":{"type":"string"}}},"annotations":{"readOnlyHint":false,"destructiveHint":true,"idempotentHint":true,"openWorldHint":true}}),
-        json!({"name":"everos_get_task_status","title":"Get EverOS Task Status","description":"Check an asynchronous EverOS extraction task status.","inputSchema":{"type":"object","properties":{"task_id":{"type":"string"}},"required":["task_id"]},"annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}}),
-        json!({"name":"everos_get_settings","title":"Get EverOS Settings","description":"Get current EverOS memory-space settings.","inputSchema":{"type":"object","properties":{}},"annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}}),
-        json!({"name":"everos_update_settings","title":"Update EverOS Settings","description":"Update EverOS memory-space settings with strict schema validation by default.","inputSchema":{"type":"object","properties":{"settings":{"type":"object"},"strict":{"type":"boolean","default":true},"return_diff":{"type":"boolean","default":true}},"required":["settings"]},"annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}}),
-        json!({"name":"everos_batch_ingest","title":"Batch Ingest EverOS Memories","description":"Dry-run or execute batched EverOS ingest with optional flush and verification report.","inputSchema":{"type":"object","properties":{"messages":{"type":"array","items":{"type":"object"}},"file_path":{"type":"string"},"verification_queries":{"type":"array","items":{"type":"string"}},"user_id":{"type":"string"},"session_id":{"type":"string"},"scope":{"type":"string","enum":["personal","agent"],"default":"personal"},"dry_run":{"type":"boolean","default":false},"batch_size":{"type":"integer","default":50,"minimum":1,"maximum":100},"flush":{"type":"boolean","default":true},"flush_timeout":{"type":"number"},"memory_types":{"type":"array","items":{"type":"string","enum":["episodic_memory","profile","raw_message","agent_memory"]}},"top_k":{"type":"integer","default":5,"minimum":-1,"maximum":100},"timeout":{"type":"number"}}},"outputSchema":{"type":"object","properties":{"ok":{"type":"boolean"},"workflow":{"type":"string"},"status":{"type":"string"},"suggested_next_actions":{"type":"array","items":{"type":"string"}}}},"annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":true}}),
-        json!({"name":"everos_verify_session_ingest","title":"Verify EverOS Session Ingest","description":"Read-only verification for an existing user/session using sample search queries.","inputSchema":{"type":"object","properties":{"verification_queries":{"type":"array","items":{"type":"string"}},"user_id":{"type":"string"},"session_id":{"type":"string"},"scope":{"type":"string","enum":["personal","agent"],"default":"personal"},"memory_types":{"type":"array","items":{"type":"string","enum":["episodic_memory","profile","raw_message","agent_memory"]}},"top_k":{"type":"integer","default":5,"minimum":-1,"maximum":100},"timeout":{"type":"number"}},"required":["verification_queries"]},"outputSchema":{"type":"object","properties":{"ok":{"type":"boolean"},"workflow":{"type":"string"},"status":{"type":"string"},"suggested_next_actions":{"type":"array","items":{"type":"string"}}}},"annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}}),
-        json!({"name":"everos_save_and_verify","title":"Save and Verify EverOS Memory","description":"Queue one memory message, optionally flush, then verify searchability with sample queries.","inputSchema":{"type":"object","properties":{"content":{"type":"string"},"verification_query":{"type":"string"},"verification_queries":{"type":"array","items":{"type":"string"}},"user_id":{"type":"string"},"session_id":{"type":"string"},"scope":{"type":"string","enum":["personal","agent"],"default":"personal"},"role":{"type":"string","enum":["user","assistant","tool","system"]},"tool_call_id":{"type":"string","description":"Required when role=tool for agent memory."},"flush":{"type":"boolean","default":true},"flush_timeout":{"type":"number"},"memory_types":{"type":"array","items":{"type":"string","enum":["episodic_memory","profile","raw_message","agent_memory"]}},"top_k":{"type":"integer","default":5,"minimum":-1,"maximum":100},"timeout":{"type":"number"}},"required":["content"]},"outputSchema":{"type":"object","properties":{"ok":{"type":"boolean"},"workflow":{"type":"string"},"status":{"type":"string"},"suggested_next_actions":{"type":"array","items":{"type":"string"}}}},"annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":true}}),
-        json!({"name":"everos_import_and_verify","title":"Import and Verify EverOS Memories","description":"Batch-import messages or a local file, with dry-run validation, optional flush, and verification report.","inputSchema":{"type":"object","properties":{"messages":{"type":"array","items":{"type":"object"}},"file_path":{"type":"string"},"verification_queries":{"type":"array","items":{"type":"string"}},"user_id":{"type":"string"},"session_id":{"type":"string"},"scope":{"type":"string","enum":["personal","agent"],"default":"personal"},"dry_run":{"type":"boolean","default":false},"batch_size":{"type":"integer","default":50,"minimum":1,"maximum":100},"flush":{"type":"boolean","default":true},"flush_timeout":{"type":"number"},"memory_types":{"type":"array","items":{"type":"string","enum":["episodic_memory","profile","raw_message","agent_memory"]}},"top_k":{"type":"integer","default":5,"minimum":-1,"maximum":100},"timeout":{"type":"number"}}},"outputSchema":{"type":"object","properties":{"ok":{"type":"boolean"},"workflow":{"type":"string"},"status":{"type":"string"},"suggested_next_actions":{"type":"array","items":{"type":"string"}}}},"annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":true}}),
+        json!({
+            "name": "everos_save_memory",
+            "title": "Save EverOS Memory",
+            "description": "Queue one explicit text memory message for EverOS extraction. saved=true means accepted, not immediately searchable.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "content": {
+                        "type": "string"
+                    },
+                    "user_id": {
+                        "type": "string"
+                    },
+                    "session_id": {
+                        "type": "string"
+                    },
+                    "scope": {
+                        "type": "string",
+                        "enum": [
+                            "personal",
+                            "agent"
+                        ],
+                        "default": "personal"
+                    },
+                    "role": {
+                        "type": "string",
+                        "enum": [
+                            "user",
+                            "assistant",
+                            "tool",
+                            "system"
+                        ]
+                    },
+                    "tool_call_id": {
+                        "type": "string",
+                        "description": "Required when role=tool for agent memory."
+                    },
+                    "flush": {
+                        "type": "boolean",
+                        "default": true
+                    },
+                    "async_mode": {
+                        "type": "boolean",
+                        "default": true
+                    },
+                    "flush_timeout": {
+                        "type": "number"
+                    }
+                },
+                "required": [
+                    "content"
+                ]
+            },
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": true
+            }
+        }),
+        json!({
+            "name": "everos_add_memories",
+            "title": "Add EverOS Memory Messages",
+            "description": "Add one or more personal or agent-trajectory messages to EverOS. Prefer scope over deprecated agent alias.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "messages": {
+                        "type": "array",
+                        "items": {
+                            "type": "object"
+                        }
+                    },
+                    "user_id": {
+                        "type": "string"
+                    },
+                    "session_id": {
+                        "type": "string"
+                    },
+                    "scope": {
+                        "type": "string",
+                        "enum": [
+                            "personal",
+                            "agent"
+                        ],
+                        "default": "personal"
+                    },
+                    "async_mode": {
+                        "type": "boolean",
+                        "default": true
+                    },
+                    "agent": {
+                        "type": "boolean"
+                    },
+                    "flush": {
+                        "type": "boolean",
+                        "default": false
+                    },
+                    "flush_timeout": {
+                        "type": "number"
+                    }
+                },
+                "required": [
+                    "messages"
+                ]
+            },
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": true
+            }
+        }),
+        json!({
+            "name": "everos_flush_memories",
+            "title": "Flush EverOS Memories",
+            "description": "Trigger EverOS boundary detection and memory extraction immediately. Timeout errors are retryable; search/status checks should happen before retrying.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "user_id": {
+                        "type": "string"
+                    },
+                    "session_id": {
+                        "type": "string"
+                    },
+                    "scope": {
+                        "type": "string",
+                        "enum": [
+                            "personal",
+                            "agent"
+                        ],
+                        "default": "personal"
+                    },
+                    "agent": {
+                        "type": "boolean"
+                    },
+                    "timeout": {
+                        "type": "number"
+                    }
+                }
+            },
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": true
+            }
+        }),
+        json!({
+            "name": "everos_search_memories",
+            "title": "Search EverOS Memories",
+            "description": "Search EverOS memory using keyword, vector, hybrid, or agentic retrieval. Vector fields are stripped by default even when include_original_data=true; set include_vectors=true only for debugging.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string"
+                    },
+                    "user_id": {
+                        "type": "string"
+                    },
+                    "session_id": {
+                        "type": "string"
+                    },
+                    "filters": {
+                        "type": "object"
+                    },
+                    "method": {
+                        "type": "string",
+                        "enum": [
+                            "keyword",
+                            "vector",
+                            "hybrid",
+                            "agentic"
+                        ],
+                        "default": "hybrid"
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "default": 5,
+                        "minimum": -1,
+                        "maximum": 100
+                    },
+                    "memory_types": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": [
+                                "episodic_memory",
+                                "profile",
+                                "raw_message",
+                                "agent_memory"
+                            ]
+                        }
+                    },
+                    "radius": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1
+                    },
+                    "include_original_data": {
+                        "type": "boolean",
+                        "default": false
+                    },
+                    "include_vectors": {
+                        "type": "boolean",
+                        "default": false
+                    },
+                    "response_format": {
+                        "type": "string",
+                        "enum": [
+                            "json",
+                            "markdown"
+                        ],
+                        "default": "json"
+                    },
+                    "timeout": {
+                        "type": "number"
+                    },
+                    "fallback_to_hybrid": {
+                        "type": "boolean",
+                        "default": true
+                    }
+                },
+                "required": [
+                    "query"
+                ]
+            },
+            "annotations": {
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": true
+            }
+        }),
+        json!({
+            "name": "everos_get_memories",
+            "title": "Get EverOS Memories",
+            "description": "Retrieve structured EverOS memories by memory_type with pagination. get supports agent_case/agent_skill; search uses agent_memory.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "user_id": {
+                        "type": "string"
+                    },
+                    "session_id": {
+                        "type": "string"
+                    },
+                    "filters": {
+                        "type": "object"
+                    },
+                    "memory_type": {
+                        "type": "string",
+                        "enum": [
+                            "episodic_memory",
+                            "profile",
+                            "agent_case",
+                            "agent_skill"
+                        ],
+                        "default": "episodic_memory"
+                    },
+                    "page": {
+                        "type": "integer",
+                        "default": 1
+                    },
+                    "page_size": {
+                        "type": "integer",
+                        "default": 20
+                    },
+                    "rank_by": {
+                        "type": "string",
+                        "default": "timestamp"
+                    },
+                    "rank_order": {
+                        "type": "string",
+                        "enum": [
+                            "asc",
+                            "desc"
+                        ],
+                        "default": "desc"
+                    },
+                    "response_format": {
+                        "type": "string",
+                        "enum": [
+                            "json",
+                            "markdown"
+                        ],
+                        "default": "json"
+                    }
+                }
+            },
+            "annotations": {
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": true
+            }
+        }),
+        json!({
+            "name": "everos_delete_memories",
+            "title": "Delete EverOS Memories",
+            "description": "Delete EverOS memory by exact memory_id, or batch-delete by user/session when explicitly confirmed.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "memory_id": {
+                        "type": "string"
+                    },
+                    "user_id": {
+                        "type": "string"
+                    },
+                    "session_id": {
+                        "type": "string"
+                    },
+                    "confirm": {
+                        "type": "boolean",
+                        "default": false
+                    },
+                    "confirm_scope_text": {
+                        "type": "string"
+                    }
+                }
+            },
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": true,
+                "idempotentHint": true,
+                "openWorldHint": true
+            }
+        }),
+        json!({
+            "name": "everos_get_task_status",
+            "title": "Get EverOS Task Status",
+            "description": "Check an asynchronous EverOS extraction task status.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "task_id"
+                ]
+            },
+            "annotations": {
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": true
+            }
+        }),
+        json!({
+            "name": "everos_get_settings",
+            "title": "Get EverOS Settings",
+            "description": "Get current EverOS memory-space settings.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            },
+            "annotations": {
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": true
+            }
+        }),
+        json!({
+            "name": "everos_update_settings",
+            "title": "Update EverOS Settings",
+            "description": "Update EverOS memory-space settings.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "settings": {
+                        "type": "object"
+                    },
+                    "strict": {
+                        "type": "boolean",
+                        "default": true
+                    },
+                    "return_diff": {
+                        "type": "boolean",
+                        "default": true
+                    }
+                },
+                "required": [
+                    "settings"
+                ]
+            },
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": true
+            }
+        }),
+        json!({
+            "name": "everos_batch_ingest",
+            "title": "Batch Ingest EverOS Memories",
+            "description": "Dry-run or execute batched EverOS ingest with optional flush and verification report.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "messages": {
+                        "type": "array",
+                        "items": {
+                            "type": "object"
+                        }
+                    },
+                    "file_path": {
+                        "type": "string"
+                    },
+                    "verification_queries": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        }
+                    },
+                    "user_id": {
+                        "type": "string"
+                    },
+                    "session_id": {
+                        "type": "string"
+                    },
+                    "scope": {
+                        "type": "string",
+                        "enum": [
+                            "personal",
+                            "agent"
+                        ],
+                        "default": "personal"
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "default": false
+                    },
+                    "batch_size": {
+                        "type": "integer",
+                        "default": 50,
+                        "minimum": 1,
+                        "maximum": 100
+                    },
+                    "flush": {
+                        "type": "boolean",
+                        "default": true
+                    },
+                    "flush_timeout": {
+                        "type": "number"
+                    },
+                    "memory_types": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": [
+                                "episodic_memory",
+                                "profile",
+                                "raw_message",
+                                "agent_memory"
+                            ]
+                        }
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "default": 5,
+                        "minimum": -1,
+                        "maximum": 100
+                    },
+                    "timeout": {
+                        "type": "number"
+                    }
+                }
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "ok": {
+                        "type": "boolean"
+                    },
+                    "workflow": {
+                        "type": "string"
+                    },
+                    "status": {
+                        "type": "string"
+                    },
+                    "suggested_next_actions": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        }
+                    }
+                }
+            },
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": true
+            }
+        }),
+        json!({
+            "name": "everos_verify_session_ingest",
+            "title": "Verify EverOS Session Ingest",
+            "description": "Verify that an existing user/session is searchable by running read-only sample queries.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "verification_queries": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        }
+                    },
+                    "user_id": {
+                        "type": "string"
+                    },
+                    "session_id": {
+                        "type": "string"
+                    },
+                    "scope": {
+                        "type": "string",
+                        "enum": [
+                            "personal",
+                            "agent"
+                        ],
+                        "default": "personal"
+                    },
+                    "memory_types": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": [
+                                "episodic_memory",
+                                "profile",
+                                "raw_message",
+                                "agent_memory"
+                            ]
+                        }
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "default": 5,
+                        "minimum": -1,
+                        "maximum": 100
+                    },
+                    "timeout": {
+                        "type": "number"
+                    }
+                },
+                "required": [
+                    "verification_queries"
+                ]
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "ok": {
+                        "type": "boolean"
+                    },
+                    "workflow": {
+                        "type": "string"
+                    },
+                    "status": {
+                        "type": "string"
+                    },
+                    "suggested_next_actions": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        }
+                    }
+                }
+            },
+            "annotations": {
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": true
+            }
+        }),
+        json!({
+            "name": "everos_save_and_verify",
+            "title": "Save and Verify EverOS Memory",
+            "description": "Queue one memory message, optionally flush, then verify searchability with sample queries.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "content": {
+                        "type": "string"
+                    },
+                    "verification_query": {
+                        "type": "string"
+                    },
+                    "verification_queries": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        }
+                    },
+                    "user_id": {
+                        "type": "string"
+                    },
+                    "session_id": {
+                        "type": "string"
+                    },
+                    "scope": {
+                        "type": "string",
+                        "enum": [
+                            "personal",
+                            "agent"
+                        ],
+                        "default": "personal"
+                    },
+                    "role": {
+                        "type": "string",
+                        "enum": [
+                            "user",
+                            "assistant",
+                            "tool",
+                            "system"
+                        ]
+                    },
+                    "tool_call_id": {
+                        "type": "string",
+                        "description": "Required when role=tool for agent memory."
+                    },
+                    "flush": {
+                        "type": "boolean",
+                        "default": true
+                    },
+                    "flush_timeout": {
+                        "type": "number"
+                    },
+                    "memory_types": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": [
+                                "episodic_memory",
+                                "profile",
+                                "raw_message",
+                                "agent_memory"
+                            ]
+                        }
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "default": 5,
+                        "minimum": -1,
+                        "maximum": 100
+                    },
+                    "timeout": {
+                        "type": "number"
+                    }
+                },
+                "required": [
+                    "content"
+                ]
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "ok": {
+                        "type": "boolean"
+                    },
+                    "workflow": {
+                        "type": "string"
+                    },
+                    "status": {
+                        "type": "string"
+                    },
+                    "suggested_next_actions": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        }
+                    }
+                }
+            },
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": true
+            }
+        }),
+        json!({
+            "name": "everos_import_and_verify",
+            "title": "Import and Verify EverOS Memories",
+            "description": "Batch-import messages or a local file, then flush/poll-compatible verify with sample queries.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "messages": {
+                        "type": "array",
+                        "items": {
+                            "type": "object"
+                        }
+                    },
+                    "file_path": {
+                        "type": "string"
+                    },
+                    "verification_queries": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        }
+                    },
+                    "user_id": {
+                        "type": "string"
+                    },
+                    "session_id": {
+                        "type": "string"
+                    },
+                    "scope": {
+                        "type": "string",
+                        "enum": [
+                            "personal",
+                            "agent"
+                        ],
+                        "default": "personal"
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "default": false
+                    },
+                    "batch_size": {
+                        "type": "integer",
+                        "default": 50,
+                        "minimum": 1,
+                        "maximum": 100
+                    },
+                    "flush": {
+                        "type": "boolean",
+                        "default": true
+                    },
+                    "flush_timeout": {
+                        "type": "number"
+                    },
+                    "memory_types": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": [
+                                "episodic_memory",
+                                "profile",
+                                "raw_message",
+                                "agent_memory"
+                            ]
+                        }
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "default": 5,
+                        "minimum": -1,
+                        "maximum": 100
+                    },
+                    "timeout": {
+                        "type": "number"
+                    }
+                }
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "ok": {
+                        "type": "boolean"
+                    },
+                    "workflow": {
+                        "type": "string"
+                    },
+                    "status": {
+                        "type": "string"
+                    },
+                    "suggested_next_actions": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        }
+                    }
+                }
+            },
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": true
+            }
+        }),
     ]
 }
 
@@ -96,7 +878,7 @@ pub fn handle_jsonrpc_message(request: &Value) -> Option<Value> {
             match call_tool(name, args) {
                 Ok(text) => json!({"content":[{"type":"text","text":text}],"isError":false}),
                 Err(err) => {
-                    json!({"content":[{"type":"text","text":format!("Error: {err}")}],"isError":true})
+                    json!({"content":[{"type":"text","text":format!("Error: {}", sanitized_error_message(&err))}],"isError":true})
                 }
             }
         }
@@ -154,7 +936,7 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
                 ) {
                     Ok((response, _attempt_count)) => Some(flush_result_payload(&response)),
                     Err(err @ EverOSError::Timeout { .. }) => Some(timeout_payload("flush", &err)),
-                    Err(err) => return Err(err.into()),
+                    Err(err) => Some(error_payload("flush", &err)),
                 }
             } else {
                 None
@@ -208,18 +990,39 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
                             "flush": flush_result_payload_with_attempt(&response, Some(attempt_count)),
                         });
                         if scope == "agent" {
-                            add_agent_visibility(&mut payload, Some(true), Some(&uid), session_id.as_deref());
+                            add_agent_visibility(
+                                &mut payload,
+                                Some(true),
+                                Some(&uid),
+                                session_id.as_deref(),
+                            );
                         }
                         Ok(pretty_json(&payload))
                     }
                     Err(err @ EverOSError::Timeout { .. }) => {
                         let mut payload = json!({"ok": true, "add": result, "flush": timeout_payload("flush", &err)});
                         if scope == "agent" {
-                            add_agent_visibility(&mut payload, Some(true), Some(&uid), session_id.as_deref());
+                            add_agent_visibility(
+                                &mut payload,
+                                Some(true),
+                                Some(&uid),
+                                session_id.as_deref(),
+                            );
                         }
                         Ok(pretty_json(&payload))
                     }
-                    Err(err) => Err(err.into()),
+                    Err(err) => {
+                        let mut payload = json!({"ok": true, "add": result, "flush": error_payload("flush", &err)});
+                        if scope == "agent" {
+                            add_agent_visibility(
+                                &mut payload,
+                                Some(true),
+                                Some(&uid),
+                                session_id.as_deref(),
+                            );
+                        }
+                        Ok(pretty_json(&payload))
+                    }
                 }
             } else if scope == "agent" {
                 let mut payload = json!({"ok": true, "add": result});
@@ -329,7 +1132,10 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
                     )?;
                     if let Some(map) = response.as_object_mut() {
                         map.insert("fallback_used".into(), Value::Bool(true));
-                        map.insert("fallback_reason".into(), Value::String(err.to_string()));
+                        map.insert(
+                            "fallback_reason".into(),
+                            Value::String(sanitized_error_message(&err)),
+                        );
                     }
                     response
                 }
@@ -524,29 +1330,36 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
 }
 
 pub fn read_frame<R: BufRead + Read>(reader: &mut R) -> io::Result<Option<Value>> {
-    let mut first = String::new();
-    loop {
-        first.clear();
-        let n = reader.read_line(&mut first)?;
-        if n == 0 {
+    let first = loop {
+        let Some(line) = read_bounded_line(reader, true)? else {
             return Ok(None);
+        };
+        if !line.trim().is_empty() {
+            break line;
         }
-        if !first.trim().is_empty() {
-            break;
-        }
-    }
+    };
     if first.trim_start().starts_with('{') {
         let value = serde_json::from_str(first.trim())
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
         return Ok(Some(value));
     }
+    validate_header_line(&first)?;
+    let mut header_bytes = first.len();
     let mut content_length = parse_content_length(&first);
-    let mut line = String::new();
     loop {
-        line.clear();
-        let n = reader.read_line(&mut line)?;
-        if n == 0 {
-            return Ok(None);
+        let Some(line) = read_bounded_line(reader, false)? else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unexpected EOF while reading MCP headers",
+            ));
+        };
+        validate_header_line(&line)?;
+        header_bytes += line.len();
+        if header_bytes > MAX_FRAME_HEADER_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "MCP headers exceed maximum size",
+            ));
         }
         if line == "\r\n" || line == "\n" || line.trim().is_empty() {
             break;
@@ -561,11 +1374,80 @@ pub fn read_frame<R: BufRead + Read>(reader: &mut R) -> io::Result<Option<Value>
             "missing Content-Length",
         ));
     };
+    if length > MAX_FRAME_BODY_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "MCP frame body exceeds maximum size",
+        ));
+    }
     let mut body = vec![0; length];
     reader.read_exact(&mut body)?;
     let value = serde_json::from_slice(&body)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
     Ok(Some(value))
+}
+
+fn read_bounded_line<R: BufRead>(
+    reader: &mut R,
+    first_frame_line: bool,
+) -> io::Result<Option<String>> {
+    let mut out = Vec::new();
+    let mut limit = if first_frame_line {
+        None
+    } else {
+        Some(MAX_FRAME_HEADER_LINE_BYTES)
+    };
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            if out.is_empty() {
+                return Ok(None);
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unexpected EOF while reading MCP line",
+            ));
+        }
+        if first_frame_line && limit.is_none() {
+            match available.iter().find(|byte| !byte.is_ascii_whitespace()) {
+                Some(byte) if *byte == b'{' => limit = Some(MAX_FRAME_BODY_BYTES),
+                Some(_) => limit = Some(MAX_FRAME_HEADER_LINE_BYTES),
+                None => {}
+            }
+        }
+        let max_len = limit.unwrap_or(MAX_FRAME_BODY_BYTES);
+        let newline_pos = available.iter().position(|byte| *byte == b'\n');
+        let take = newline_pos.map_or(available.len(), |pos| pos + 1);
+        if out.len() + take > max_len {
+            return Err(line_limit_error(max_len));
+        }
+        out.extend_from_slice(&available[..take]);
+        reader.consume(take);
+        if newline_pos.is_some() {
+            let line = String::from_utf8(out)
+                .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+            return Ok(Some(line));
+        }
+    }
+}
+
+fn line_limit_error(limit: usize) -> io::Error {
+    let message = if limit == MAX_FRAME_BODY_BYTES {
+        "JSON-RPC line frame exceeds maximum body size"
+    } else {
+        "MCP header line exceeds maximum size"
+    };
+    io::Error::new(io::ErrorKind::InvalidData, message)
+}
+
+fn validate_header_line(line: &str) -> io::Result<()> {
+    if line.len() > MAX_FRAME_HEADER_LINE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "MCP header line exceeds maximum size",
+        ));
+    }
+    Ok(())
 }
 
 pub fn write_frame<W: Write>(writer: &mut W, value: &Value) -> io::Result<()> {
@@ -617,7 +1499,7 @@ fn timeout_payload(operation: &str, err: &EverOSError) -> Value {
     json!({
         "ok": false,
         "operation": operation,
-        "error": err.to_string(),
+        "error": sanitized_error_message(err),
         "retryable": true,
         "suggested_next_actions": [
             "search existing memories before retrying, because the server may have completed the request after the client timed out",

@@ -2,14 +2,21 @@ use everos_hermes_rust::client::{DEFAULT_BASE_URL, DEFAULT_MEMORY_TYPES, EverOSC
 use everos_hermes_rust::context_assembler::{ContextAssemblyConfig, assemble_everos_context};
 use everos_hermes_rust::env::{get_env, read_dotenv};
 use everos_hermes_rust::formatting::{format_search_context, strip_vectors};
-use everos_hermes_rust::mcp::TOOL_NAMES;
+use everos_hermes_rust::mcp::{TOOL_NAMES, tool_definitions};
 use everos_hermes_rust::policy::{should_skip_capture, should_skip_recall, stable_query_key};
-use everos_hermes_rust::provider::{EverOSProvider, ProviderConfig, ProviderInit, load_config};
-use everos_hermes_rust::trajectory::build_agent_trajectory_messages;
+use everos_hermes_rust::provider::{
+    EverOSProvider, ProviderConfig, ProviderInit, load_config, provider_tool_schemas,
+};
+use everos_hermes_rust::trajectory::{
+    TrajectoryBuildOptions, build_agent_trajectory_messages,
+    build_agent_trajectory_messages_with_options,
+};
 use serde_json::{Value, json};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
@@ -92,6 +99,158 @@ fn n_request_server(response: Value, count: usize) -> (String, thread::JoinHandl
             );
             stream.write_all(reply.as_bytes()).unwrap();
             requests.push(raw);
+        }
+        requests
+    });
+    (format!("http://{addr}"), handle)
+}
+
+fn snapshot_json(name: &str) -> Value {
+    let raw = fs::read_to_string(format!("../tests/contracts/{name}")).unwrap();
+    serde_json::from_str(&raw).unwrap()
+}
+
+fn simplify_provider_property(schema: &Value) -> Value {
+    let mut out = serde_json::Map::new();
+    for key in ["type", "enum", "default", "description"] {
+        if let Some(value) = schema.get(key) {
+            out.insert(key.to_string(), value.clone());
+        }
+    }
+    Value::Object(out)
+}
+
+fn sorted_string_values(value: Option<&Value>) -> Vec<String> {
+    let mut values = value
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    values.sort();
+    values
+}
+
+fn provider_schema_snapshot() -> Value {
+    Value::Array(
+        provider_tool_schemas()
+            .into_iter()
+            .map(|schema| {
+                let params = &schema["parameters"];
+                let properties = params["properties"].as_object().unwrap();
+                let mut simplified = serde_json::Map::<String, Value>::new();
+                let mut keys = properties.keys().cloned().collect::<Vec<_>>();
+                keys.sort();
+                for key in keys {
+                    simplified.insert(key.clone(), simplify_provider_property(properties.get(&key).unwrap()));
+                }
+                json!({
+                    "name": schema["name"],
+                    "description": schema.get("description").cloned().unwrap_or(Value::String(String::new())),
+                    "required": sorted_string_values(params.get("required")),
+                    "properties": simplified,
+                })
+            })
+            .collect(),
+    )
+}
+
+fn description_summary(value: Option<&Value>) -> String {
+    let text = value.and_then(Value::as_str).unwrap_or_default();
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if let Some((first, _)) = collapsed.split_once(". ") {
+        format!("{first}.")
+    } else {
+        collapsed
+    }
+}
+
+fn mcp_schema_snapshot() -> Value {
+    Value::Array(
+        tool_definitions()
+            .into_iter()
+            .map(|schema| {
+                let input = &schema["inputSchema"];
+                let properties = input["properties"].as_object().unwrap();
+                let mut property_names = properties.keys().cloned().collect::<Vec<_>>();
+                property_names.sort();
+                let annotations = schema
+                    .get("annotations")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
+                json!({
+                    "name": schema["name"],
+                    "title": schema["title"],
+                    "description_summary": description_summary(schema.get("description")),
+                    "required": sorted_string_values(input.get("required")),
+                    "properties": property_names,
+                    "annotations": annotations,
+                })
+            })
+            .collect(),
+    )
+}
+
+fn provider_config_contract() -> Value {
+    let raw = fs::read_to_string("../tests/contracts/provider_config_contract.json").unwrap();
+    serde_json::from_str(&raw).unwrap()
+}
+
+fn settings_validation_contract() -> Value {
+    let raw = fs::read_to_string("../tests/contracts/settings_validation_cases.json").unwrap();
+    serde_json::from_str(&raw).unwrap()
+}
+
+fn response_normalization_contract() -> Value {
+    let raw = fs::read_to_string("../tests/contracts/response_normalization_cases.json").unwrap();
+    serde_json::from_str(&raw).unwrap()
+}
+
+fn provider_config_usize_field(config: &ProviderConfig, key: &str) -> usize {
+    match key {
+        "max_context_chars" => config.max_context_chars,
+        "recent_raw_top_k" => config.recent_raw_top_k,
+        "profile_max_items" => config.profile_max_items,
+        "agent_skills_max_items" => config.agent_skills_max_items,
+        "agent_cases_max_items" => config.agent_cases_max_items,
+        "episodic_max_items" => config.episodic_max_items,
+        "min_recall_query_chars" => config.min_recall_query_chars,
+        "prefetch_cache_ttl_seconds" => config.prefetch_cache_ttl_seconds as usize,
+        "agent_max_messages" => config.agent_max_messages,
+        "agent_max_message_chars" => config.agent_max_message_chars,
+        "agent_max_tool_result_chars" => config.agent_max_tool_result_chars,
+        "agent_max_payload_chars" => config.agent_max_payload_chars,
+        "agent_dedupe_entries" => config.agent_dedupe_entries,
+        other => panic!("unsupported provider config contract field: {other}"),
+    }
+}
+
+fn keep_alive_two_request_server() -> (String, thread::JoinHandle<Vec<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        drop(listener);
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut requests = Vec::new();
+        for index in 0..2 {
+            requests.push(read_http_request(&mut stream));
+            let body = json!({"data": {"request_index": index + 1}}).to_string();
+            let connection = if index == 0 { "keep-alive" } else { "close" };
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: {}\r\n\r\n{}",
+                body.len(),
+                connection,
+                body
+            );
+            stream.write_all(reply.as_bytes()).unwrap();
+            stream.flush().unwrap();
         }
         requests
     });
@@ -237,6 +396,26 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 fn parse_http_body(raw: &str) -> Value {
     let body = raw.split("\r\n\r\n").nth(1).unwrap_or("");
     serde_json::from_str(body).unwrap()
+}
+
+#[test]
+fn client_reuses_http_connection_for_consecutive_requests() {
+    let (base_url, handle) = keep_alive_two_request_server();
+    let client = EverOSClient::new("key", &base_url, 1.0).unwrap();
+
+    let first = client
+        .request_json("GET", "/api/v1/settings", None, None)
+        .unwrap();
+    let second = client
+        .request_json("GET", "/api/v1/settings", None, None)
+        .unwrap();
+
+    assert_eq!(first["data"]["request_index"], 1);
+    assert_eq!(second["data"]["request_index"], 2);
+    let requests = handle.join().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0].starts_with("GET /api/v1/settings HTTP/1.1"));
+    assert!(requests[1].starts_with("GET /api/v1/settings HTTP/1.1"));
 }
 
 #[test]
@@ -401,6 +580,114 @@ fn formatting_renders_episode_and_profile_context() {
 }
 
 #[test]
+fn agent_visibility_workflow_status_mapping_is_stable() {
+    use everos_hermes_rust::agent_visibility::workflow_status_from_agent_visibility;
+
+    assert_eq!(
+        workflow_status_from_agent_visibility(
+            &json!({"agent_visibility_status":"visible"}),
+            "fallback"
+        ),
+        "verified"
+    );
+    assert_eq!(
+        workflow_status_from_agent_visibility(
+            &json!({"agent_visibility_status":"partial"}),
+            "fallback"
+        ),
+        "partially_verified"
+    );
+    assert_eq!(
+        workflow_status_from_agent_visibility(
+            &json!({"agent_visibility_status":"not_visible"}),
+            "fallback"
+        ),
+        "agent_not_visible"
+    );
+    assert_eq!(
+        workflow_status_from_agent_visibility(
+            &json!({"agent_visibility_status":"error"}),
+            "fallback"
+        ),
+        "agent_visibility_error"
+    );
+    assert_eq!(
+        workflow_status_from_agent_visibility(
+            &json!({"agent_visibility_status":"unchecked"}),
+            "fallback"
+        ),
+        "fallback"
+    );
+}
+
+#[test]
+fn provider_tool_schemas_match_snapshot() {
+    assert_eq!(
+        provider_schema_snapshot(),
+        snapshot_json("provider_tools.snapshot.json")
+    );
+}
+
+#[test]
+fn mcp_tool_schemas_match_snapshot() {
+    assert_eq!(
+        mcp_schema_snapshot(),
+        snapshot_json("mcp_tools.snapshot.json")
+    );
+}
+
+#[test]
+fn provider_config_contract_clamps_drift_prone_fields() {
+    let contract = provider_config_contract();
+    let fields = contract["fields"].as_object().unwrap();
+    let defaults = ProviderConfig::default();
+    for (key, spec) in fields {
+        assert_eq!(
+            provider_config_usize_field(&defaults, key),
+            spec["default"].as_u64().unwrap() as usize,
+            "default for {key}"
+        );
+    }
+
+    let home = temp_home("provider_config_contract_min");
+    let below_min = Value::Object(
+        fields
+            .iter()
+            .filter(|(_, spec)| spec["min"].as_u64().unwrap() > 0)
+            .map(|(key, _)| (key.clone(), json!(0)))
+            .collect(),
+    );
+    fs::write(home.join("everos.json"), below_min.to_string()).unwrap();
+    let loaded = load_config(&home);
+    for (key, spec) in fields {
+        if spec["min"].as_u64().unwrap() > 0 {
+            assert_eq!(
+                provider_config_usize_field(&loaded, key),
+                spec["min"].as_u64().unwrap() as usize,
+                "min clamp for {key}"
+            );
+        }
+    }
+
+    let home = temp_home("provider_config_contract_max");
+    let above_max = Value::Object(
+        fields
+            .iter()
+            .map(|(key, spec)| (key.clone(), json!(spec["max"].as_u64().unwrap() + 1)))
+            .collect(),
+    );
+    fs::write(home.join("everos.json"), above_max.to_string()).unwrap();
+    let loaded = load_config(&home);
+    for (key, spec) in fields {
+        assert_eq!(
+            provider_config_usize_field(&loaded, key),
+            spec["max"].as_u64().unwrap() as usize,
+            "max clamp for {key}"
+        );
+    }
+}
+
+#[test]
 fn provider_agent_visibility_config_defaults_and_load_overrides() {
     let defaults = ProviderConfig::default();
     assert!(!defaults.agent_visibility_verify_after_write);
@@ -527,6 +814,57 @@ fn provider_save_tool_adds_memory_and_flushes() {
     assert_eq!(response["task_id"], "task-9");
     assert!(request.starts_with("POST /api/v1/memories HTTP/1.1"));
     assert_eq!(parse_http_body(&request)["user_id"], "u1");
+
+    remove_env("HERMES_HOME");
+}
+
+#[test]
+fn provider_save_tool_preserves_queue_payload_when_flush_has_non_timeout_error() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let home = temp_home("provider_save_flush_error");
+    let (base_url, handle) = sequenced_status_request_server(
+        vec![
+            (
+                200,
+                json!({"data":{"status":"queued","task_id":"task-provider-flush"}}),
+            ),
+            (
+                500,
+                json!({"error":"flush failed token=provider-secret sk-provider-secret"}),
+            ),
+        ],
+        500,
+    );
+    fs::write(
+        home.join(".env"),
+        format!("EVEROS_API_KEY=test-key\nEVEROS_USER_ID=u1\nEVEROS_BASE_URL={base_url}\n"),
+    )
+    .unwrap();
+    remove_env("EVEROS_API_KEY");
+    remove_env("EVEROS_USER_ID");
+    remove_env("EVEROS_BASE_URL");
+    set_env("HERMES_HOME", home.to_str().unwrap());
+
+    let provider = EverOSProvider::initialize(ProviderInit::for_test("sess-1", &home)).unwrap();
+    let raw = provider
+        .handle_tool_call(
+            "everos_memory_save",
+            json!({"content":"User prefers pytest.","flush":true}),
+        )
+        .unwrap();
+    let response: Value = serde_json::from_str(&raw).unwrap();
+    let requests = handle.join().unwrap();
+
+    assert_eq!(requests.len(), 2);
+    assert_eq!(response["saved"], true);
+    assert_eq!(response["message_queued"], true);
+    assert_eq!(response["status"], "queued");
+    assert_eq!(response["task_id"], "task-provider-flush");
+    assert_eq!(response["flush"]["ok"], false);
+    assert_eq!(response["flush"]["status"], "error");
+    let rendered = response.to_string();
+    assert!(rendered.contains("[REDACTED]"));
+    assert!(!rendered.contains("provider-secret"));
 
     remove_env("HERMES_HOME");
 }
@@ -748,18 +1086,24 @@ fn mcp_save_and_verify_agent_scope_reports_structured_visibility() {
     );
     assert_eq!(response["agent_visibility"]["agent_raw_queued"], true);
     assert_eq!(response["agent_visibility"]["verification_user_id"], "u1");
-    assert_eq!(response["agent_visibility"]["verification_session_id"], "sess-agent");
+    assert_eq!(
+        response["agent_visibility"]["verification_session_id"],
+        "sess-agent"
+    );
     let visibility_checks = response["agent_visibility"]["agent_visibility_checks"]
         .as_array()
         .unwrap();
-    assert!(visibility_checks.iter().all(|check| check["user_id"] == "u1"));
-    assert!(visibility_checks
-        .iter()
-        .all(|check| check["session_id"] == "sess-agent"));
-    assert_eq!(
-        visibility_checks.len(),
-        3
+    assert!(
+        visibility_checks
+            .iter()
+            .all(|check| check["user_id"] == "u1")
     );
+    assert!(
+        visibility_checks
+            .iter()
+            .all(|check| check["session_id"] == "sess-agent")
+    );
+    assert_eq!(visibility_checks.len(), 3);
     assert_eq!(
         paths,
         vec![
@@ -781,6 +1125,199 @@ fn mcp_save_and_verify_agent_scope_reports_structured_visibility() {
     remove_env("EVEROS_API_KEY");
     remove_env("EVEROS_USER_ID");
     remove_env("EVEROS_BASE_URL");
+}
+
+#[test]
+fn provider_save_config_drops_api_key_and_uses_private_permissions() {
+    let home = temp_home("provider_save_config_private_permissions");
+    everos_hermes_rust::provider::save_config(
+        &json!({"api_key":"secret-config-key","user_id":"u1","base_url":"https://example.test"}),
+        &home,
+    )
+    .unwrap();
+
+    let config_path = home.join("everos.json");
+    let text = fs::read_to_string(&config_path).unwrap();
+    assert!(!text.contains("secret-config-key"));
+    assert!(!text.contains("api_key"));
+    assert_eq!(load_config(&home).user_id, "u1");
+    #[cfg(unix)]
+    assert_eq!(
+        fs::metadata(&config_path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}
+
+#[test]
+fn mcp_save_memory_preserves_queue_payload_when_flush_has_non_timeout_error() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let (base_url, handle) = sequenced_status_request_server(
+        vec![
+            (
+                200,
+                json!({"data":{"status":"queued","task_id":"task-save"}}),
+            ),
+            (
+                500,
+                json!({"message":"flush failed api_key=flush-secret","request_id":"req-1"}),
+            ),
+        ],
+        500,
+    );
+    set_env("EVEROS_API_KEY", "test-key");
+    set_env("EVEROS_BASE_URL", &base_url);
+    set_env("EVEROS_USER_ID", "u1");
+
+    let raw = everos_hermes_rust::mcp::call_tool(
+        "everos_save_memory",
+        json!({"content":"User prefers pytest.","session_id":"sess-1","flush":true}),
+    )
+    .unwrap();
+    let response: Value = serde_json::from_str(&raw).unwrap();
+    let rendered = response.to_string();
+    let requests = handle.join().unwrap();
+
+    assert_eq!(requests.len(), 2);
+    assert_eq!(response["saved"], true);
+    assert_eq!(response["message_queued"], true);
+    assert_eq!(response["task_id"], "task-save");
+    assert_eq!(response["flush"]["ok"], false);
+    assert_eq!(response["flush"]["status"], "error");
+    assert!(!rendered.contains("flush-secret"));
+    assert!(rendered.contains("[REDACTED]"));
+
+    remove_env("EVEROS_API_KEY");
+    remove_env("EVEROS_BASE_URL");
+    remove_env("EVEROS_USER_ID");
+}
+
+#[test]
+fn mcp_save_and_verify_preserves_save_payload_when_flush_has_non_timeout_error() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let (base_url, handle) = sequenced_status_request_server(
+        vec![
+            (
+                200,
+                json!({"data":{"status":"queued","task_id":"task-save-verify"}}),
+            ),
+            (
+                500,
+                json!({"message":"flush failed token=workflow-secret","request_id":"req-2"}),
+            ),
+            (200, json!({"data":{"episodes":[]}})),
+        ],
+        500,
+    );
+    set_env("EVEROS_API_KEY", "test-key");
+    set_env("EVEROS_BASE_URL", &base_url);
+    set_env("EVEROS_USER_ID", "u1");
+
+    let raw = everos_hermes_rust::mcp::call_tool(
+        "everos_save_and_verify",
+        json!({"content":"User prefers pytest.","session_id":"sess-1","flush":true,"verification_query":"pytest"}),
+    )
+    .unwrap();
+    let response: Value = serde_json::from_str(&raw).unwrap();
+    let rendered = response.to_string();
+    let requests = handle.join().unwrap();
+
+    assert_eq!(requests.len(), 3);
+    assert_eq!(response["save"]["saved"], true);
+    assert_eq!(response["save"]["message_queued"], true);
+    assert_eq!(response["save"]["task_id"], "task-save-verify");
+    assert_eq!(response["save"]["flush"]["ok"], false);
+    assert_eq!(response["save"]["flush"]["status"], "error");
+    assert_eq!(response["verification"]["status"], "not_yet_searchable");
+    assert!(!rendered.contains("workflow-secret"));
+    assert!(rendered.contains("[REDACTED]"));
+
+    remove_env("EVEROS_API_KEY");
+    remove_env("EVEROS_BASE_URL");
+    remove_env("EVEROS_USER_ID");
+}
+
+#[test]
+fn mcp_save_and_verify_preserves_save_payload_when_verification_has_error() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let (base_url, handle) = sequenced_status_request_server(
+        vec![
+            (
+                200,
+                json!({"data":{"status":"queued","task_id":"task-save-verify-error"}}),
+            ),
+            (
+                200,
+                json!({"data":{"status":"success","task_id":"task-flush"}}),
+            ),
+            (
+                500,
+                json!({"message":"search failed token=verify-secret","request_id":"req-verify"}),
+            ),
+        ],
+        500,
+    );
+    set_env("EVEROS_API_KEY", "test-key");
+    set_env("EVEROS_BASE_URL", &base_url);
+    set_env("EVEROS_USER_ID", "u1");
+
+    let raw = everos_hermes_rust::mcp::call_tool(
+        "everos_save_and_verify",
+        json!({"content":"User prefers pytest.","session_id":"sess-1","flush":true,"verification_query":"pytest"}),
+    )
+    .unwrap();
+    let response: Value = serde_json::from_str(&raw).unwrap();
+    let rendered = response.to_string();
+    let requests = handle.join().unwrap();
+
+    assert_eq!(requests.len(), 3);
+    assert_eq!(response["ok"], true);
+    assert_eq!(response["status"], "verification_error");
+    assert_eq!(response["save"]["saved"], true);
+    assert_eq!(response["save"]["message_queued"], true);
+    assert_eq!(response["save"]["task_id"], "task-save-verify-error");
+    assert_eq!(response["verification"]["ok"], false);
+    assert_eq!(response["verification"]["status"], "error");
+    assert_eq!(response["verification"]["verified"], false);
+    assert!(!rendered.contains("verify-secret"));
+    assert!(rendered.contains("[REDACTED]"));
+
+    remove_env("EVEROS_API_KEY");
+    remove_env("EVEROS_BASE_URL");
+    remove_env("EVEROS_USER_ID");
+}
+
+#[test]
+fn mcp_jsonrpc_tool_error_redacts_backend_error_body() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let (base_url, handle) = sequenced_status_request_server(
+        vec![(
+            500,
+            json!({"message":"backend failed Authorization: Bearer backend-secret","request_id":"req-3"}),
+        )],
+        500,
+    );
+    set_env("EVEROS_API_KEY", "test-key");
+    set_env("EVEROS_BASE_URL", &base_url);
+    set_env("EVEROS_USER_ID", "u1");
+
+    let response = everos_hermes_rust::mcp::handle_jsonrpc_message(&json!({
+        "jsonrpc":"2.0",
+        "id":1,
+        "method":"tools/call",
+        "params":{"name":"everos_search_memories","arguments":{"query":"coffee"}}
+    }))
+    .unwrap();
+    let rendered = response.to_string();
+    let requests = handle.join().unwrap();
+
+    assert_eq!(requests.len(), 1);
+    assert_eq!(response["result"]["isError"], true);
+    assert!(!rendered.contains("backend-secret"));
+    assert!(rendered.contains("[REDACTED]"));
+
+    remove_env("EVEROS_API_KEY");
+    remove_env("EVEROS_BASE_URL");
+    remove_env("EVEROS_USER_ID");
 }
 
 #[test]
@@ -1216,6 +1753,64 @@ fn mcp_batch_ingest_batches_flushes_and_verifies() {
 }
 
 #[test]
+fn mcp_import_and_verify_preserves_batch_payload_when_verification_has_error() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let (base_url, handle) = sequenced_status_request_server(
+        vec![
+            (
+                200,
+                json!({"data":{"status":"queued","task_id":"task-import"}}),
+            ),
+            (
+                200,
+                json!({"data":{"status":"success","task_id":"task-flush"}}),
+            ),
+            (
+                500,
+                json!({"message":"search failed token=import-verify-secret","request_id":"req-import-verify"}),
+            ),
+        ],
+        500,
+    );
+    set_env("EVEROS_API_KEY", "test-key");
+    set_env("EVEROS_USER_ID", "u1");
+    set_env("EVEROS_BASE_URL", &base_url);
+
+    let raw = everos_hermes_rust::mcp::call_tool(
+        "everos_import_and_verify",
+        json!({
+            "session_id":"sess-import-verify",
+            "batch_size":2,
+            "flush":true,
+            "verification_queries":["Alpha"],
+            "messages":[
+                {"role":"user","content":"Alpha","timestamp":1},
+                {"role":"assistant","content":"Beta","timestamp":2}
+            ]
+        }),
+    )
+    .unwrap();
+    let response: Value = serde_json::from_str(&raw).unwrap();
+    let rendered = response.to_string();
+    let requests = handle.join().unwrap();
+
+    assert_eq!(requests.len(), 3);
+    assert_eq!(response["ok"], true);
+    assert_eq!(response["status"], "verification_error");
+    assert_eq!(response["queued_count"], 2);
+    assert_eq!(response["failed_count"], 0);
+    assert_eq!(response["verification"]["ok"], false);
+    assert_eq!(response["verification"]["status"], "error");
+    assert_eq!(response["verification"]["verified"], false);
+    assert!(!rendered.contains("import-verify-secret"));
+    assert!(rendered.contains("[REDACTED]"));
+
+    remove_env("EVEROS_API_KEY");
+    remove_env("EVEROS_USER_ID");
+    remove_env("EVEROS_BASE_URL");
+}
+
+#[test]
 fn mcp_batch_ingest_splits_cloud_403_batches() {
     let _guard = ENV_LOCK.lock().unwrap();
     let (base_url, handle) = sequenced_status_request_server(
@@ -1351,6 +1946,62 @@ fn mcp_verify_session_ingest_is_read_only_and_reports_misses() {
 }
 
 #[test]
+fn mcp_verify_session_ingest_agent_scope_reuses_agent_memory_search_and_compacts_visibility_checks()
+{
+    let _guard = ENV_LOCK.lock().unwrap();
+    let (base_url, handle) = sequenced_request_server(
+        vec![
+            json!({"data":{"agent_memory":[{"id":"agent-1","content":"found"}]}}),
+            json!({"data":{"agent_memory":[{"id":"duplicate-agent-1"}]}}),
+            json!({"data":{"agent_cases":[]}}),
+            json!({"data":{"agent_skills":[]}}),
+        ],
+        500,
+    );
+    set_env("EVEROS_API_KEY", "test-key");
+    set_env("EVEROS_USER_ID", "u1");
+    set_env("EVEROS_BASE_URL", &base_url);
+
+    let raw = everos_hermes_rust::mcp::call_tool(
+        "everos_verify_session_ingest",
+        json!({
+            "session_id":"sess-agent",
+            "verification_queries":["found"],
+            "memory_types":["agent_memory"],
+            "scope":"agent"
+        }),
+    )
+    .unwrap();
+    let response: Value = serde_json::from_str(&raw).unwrap();
+    let requests = handle.join().unwrap();
+    let visibility_checks = response["agent_visibility"]["agent_visibility_checks"]
+        .as_array()
+        .unwrap();
+
+    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        response["agent_visibility"]["agent_visibility_status"],
+        "partial"
+    );
+    assert_eq!(visibility_checks.len(), 3);
+    assert!(
+        visibility_checks
+            .iter()
+            .all(|check| check.get("response").is_none())
+    );
+    assert_eq!(visibility_checks[0]["kind"], "search");
+    assert_eq!(
+        visibility_checks[0]["memory_types"],
+        json!(["agent_memory"])
+    );
+    assert_eq!(visibility_checks[0]["hit_count"], 1);
+
+    remove_env("EVEROS_API_KEY");
+    remove_env("EVEROS_USER_ID");
+    remove_env("EVEROS_BASE_URL");
+}
+
+#[test]
 fn provider_workflow_tools_run_save_and_verify() {
     let _guard = ENV_LOCK.lock().unwrap();
     let home = temp_home("provider_save_verify");
@@ -1387,6 +2038,79 @@ fn provider_workflow_tools_run_save_and_verify() {
     assert_eq!(requests.len(), 3);
 
     remove_env("HERMES_HOME");
+}
+
+#[test]
+fn response_normalization_contract_cases_match_python() {
+    use everos_hermes_rust::response_normalization::{
+        as_list, count_hits, response_data, response_summary,
+    };
+
+    let contract = response_normalization_contract();
+    for case in contract["cases"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let response = &case["response"];
+        let mut keys: Vec<String> = response_data(Some(response)).keys().cloned().collect();
+        keys.sort();
+        let expected_keys: Vec<String> = case["expected_data_keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(keys, expected_keys, "{name}");
+        assert_eq!(
+            count_hits(response),
+            case["expected_hit_count"].as_u64().unwrap() as usize,
+            "{name}"
+        );
+        assert_eq!(
+            response_summary(response),
+            case["expected_summary"],
+            "{name}"
+        );
+    }
+
+    for case in contract["as_list_cases"].as_array().unwrap() {
+        let input = case.get("input").filter(|value| !value.is_null());
+        assert_eq!(as_list(input), case["expected"].as_array().unwrap().clone());
+    }
+}
+
+#[test]
+fn settings_validation_contract_cases_match_python() {
+    let contract = settings_validation_contract();
+    for case in contract["cases"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let settings = case["settings"].clone();
+        let strict = case["strict"].as_bool().unwrap();
+        let valid = case["valid"].as_bool().unwrap();
+        let (base_url, handle) = if valid {
+            sequenced_request_server(vec![json!({"data":{"status":"updated"}})], 150)
+        } else {
+            sequenced_request_server(vec![json!({"data":{"should_not_send":true}})], 150)
+        };
+        let client = EverOSClient::new("test-key", &base_url, 0.2).unwrap();
+        let result = client.update_settings(settings, strict, false);
+        let requests = handle.join().unwrap();
+        if valid {
+            assert!(result.is_ok(), "{name} should be valid: {result:?}");
+            assert_eq!(requests.len(), 1, "{name} should send one PUT request");
+            assert!(requests[0].starts_with("PUT /api/v1/settings HTTP/1.1"));
+            assert_eq!(parse_http_body(&requests[0]), case["normalized"]);
+        } else {
+            assert!(result.is_err(), "{name} should be rejected locally");
+            let err = result.unwrap_err().to_string();
+            assert!(
+                err.contains(case["error_contains"].as_str().unwrap()),
+                "{name} unexpected error: {err}"
+            );
+            assert!(
+                requests.is_empty(),
+                "{name} should fail before HTTP, got {requests:?}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -1722,6 +2446,46 @@ fn provider_sync_turn_capture_agent_memory_posts_personal_and_agent_endpoints() 
     );
 
     remove_env("HERMES_HOME");
+}
+
+#[test]
+fn rust_trajectory_options_builder_matches_legacy_signature() {
+    let messages = vec![
+        json!({"role":"system","content":"hidden"}),
+        json!({"role":"user","content":"hello","timestamp":1_700_000_000u64}),
+        json!({"role":"assistant","content":"world","timestamp":1_700_000_001u64}),
+    ];
+    let options = TrajectoryBuildOptions {
+        session_id: "sess-options".to_string(),
+        source: "pre_compress".to_string(),
+        now_ms: Some(1_800_000_000_000),
+        max_messages: 10,
+        max_message_chars: 100,
+        max_tool_result_chars: 50,
+        max_payload_chars: 10_000,
+        include_system: true,
+    };
+
+    let via_options = build_agent_trajectory_messages_with_options(&messages, &options);
+    let legacy = build_agent_trajectory_messages(
+        &messages,
+        "sess-options",
+        "pre_compress",
+        Some(1_800_000_000_000),
+        10,
+        100,
+        50,
+        10_000,
+        true,
+    );
+
+    assert_eq!(via_options, legacy);
+    let roles: Vec<_> = via_options
+        .messages
+        .iter()
+        .map(|message| message["role"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(roles, vec!["system", "user", "assistant"]);
 }
 
 #[test]
@@ -2128,33 +2892,41 @@ fn provider_cli_routes_messages_precompress_session_end_and_delegation() {
         "hermes_home": home.to_string_lossy(),
         "platform":"cli",
         "agent_identity":"default"
-    })
-    .to_string();
-    let messages_json = json!([
+    });
+    let messages = json!([
         {"role":"user","timestamp":1,"content":"run cli hook test"},
         {"role":"assistant","timestamp":2,"content":"done"}
-    ])
-    .to_string();
+    ]);
 
-    let run_provider = |args: Vec<String>| {
-        Command::new(bin)
+    let run_provider = |args: Vec<String>, payload: Value| {
+        let mut child = Command::new(bin)
             .args(args)
             .env_remove("EVEROS_API_KEY")
             .env_remove("EVEROS_USER_ID")
             .env_remove("EVEROS_BASE_URL")
             .env("HERMES_HOME", &home)
-            .output()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .as_mut()
             .unwrap()
+            .write_all(payload.to_string().as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
     };
 
-    let precompress = run_provider(vec![
-        "provider".into(),
-        "on-pre-compress".into(),
-        "--state-json".into(),
-        state.clone(),
-        "--messages-json".into(),
-        messages_json.clone(),
-    ]);
+    let precompress = run_provider(
+        vec![
+            "provider".into(),
+            "on-pre-compress".into(),
+            "--payload-stdin".into(),
+        ],
+        json!({"state": state.clone(), "messages": messages.clone()}),
+    );
     assert!(
         precompress.status.success(),
         "{}",
@@ -2165,32 +2937,33 @@ fn provider_cli_routes_messages_precompress_session_end_and_delegation() {
             .contains("EverOS captured 2 agent trajectory messages")
     );
 
-    let session_end = run_provider(vec![
-        "provider".into(),
-        "on-session-end".into(),
-        "--state-json".into(),
-        state.clone(),
-        "--messages-json".into(),
-        messages_json,
-    ]);
+    let session_end = run_provider(
+        vec![
+            "provider".into(),
+            "on-session-end".into(),
+            "--payload-stdin".into(),
+        ],
+        json!({"state": state.clone(), "messages": messages}),
+    );
     assert!(
         session_end.status.success(),
         "{}",
         String::from_utf8_lossy(&session_end.stderr)
     );
 
-    let delegation = run_provider(vec![
-        "provider".into(),
-        "on-delegation".into(),
-        "--state-json".into(),
-        state,
-        "--task".into(),
-        "investigate child task".into(),
-        "--result".into(),
-        "fixed in subagent".into(),
-        "--child-session-id".into(),
-        "child-cli".into(),
-    ]);
+    let delegation = run_provider(
+        vec![
+            "provider".into(),
+            "on-delegation".into(),
+            "--payload-stdin".into(),
+        ],
+        json!({
+            "state": state,
+            "task": "investigate child task",
+            "result": "fixed in subagent",
+            "child_session_id": "child-cli"
+        }),
+    );
     assert!(
         delegation.status.success(),
         "{}",
@@ -2288,4 +3061,18 @@ fn read_frame<R: Read>(reader: &mut R) -> Value {
     let mut body = vec![0u8; len];
     reader.read_exact(&mut body).unwrap();
     serde_json::from_slice(&body).unwrap()
+}
+
+#[test]
+fn rust_cli_provider_helper_names_make_short_lived_boundary_explicit() {
+    let source = include_str!("../src/cli.rs");
+    assert!(source.contains("short-lived compatibility shim"));
+    assert!(source.contains("fn short_lived_provider_payload"));
+    assert!(source.contains("fn short_lived_provider_from_payload"));
+    assert!(source.contains("fn apply_short_lived_provider_state"));
+    assert!(source.contains("fn normalize_short_lived_provider_init"));
+    assert!(!source.contains("fn provider_payload("));
+    assert!(!source.contains("fn provider_from_payload("));
+    assert!(!source.contains("fn apply_state_value("));
+    assert!(!source.contains("fn normalize_provider_init("));
 }

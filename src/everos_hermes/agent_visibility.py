@@ -4,6 +4,8 @@ import time
 from typing import Any
 
 from .client import EverOSError, EverOSTimeoutError
+from .redaction import sanitized_error_message
+from .response_normalization import count_hits, response_summary
 
 
 def build_agent_visibility_report(
@@ -49,6 +51,19 @@ def build_agent_visibility_report(
     return report
 
 
+def workflow_status_from_agent_visibility(agent_visibility: dict[str, Any], fallback: str) -> str:
+    status = agent_visibility.get("agent_visibility_status")
+    if status == "visible":
+        return "verified"
+    if status == "partial":
+        return "partially_verified"
+    if status == "not_visible":
+        return "agent_not_visible"
+    if status == "error":
+        return "agent_visibility_error"
+    return fallback
+
+
 def audit_agent_visibility(
     *,
     client: Any,
@@ -58,9 +73,12 @@ def audit_agent_visibility(
     top_k: int = 5,
     timeout: float | None = None,
     get_page_size: int = 20,
+    precomputed_search_responses: dict[str, dict[str, Any]] | None = None,
+    include_responses: bool = False,
 ) -> dict[str, Any]:
     checks: list[dict[str, Any]] = []
     clean_queries = [str(query).strip() for query in queries if str(query).strip()]
+    precomputed = precomputed_search_responses or {}
 
     for query in clean_queries:
         started = time.perf_counter()
@@ -72,21 +90,22 @@ def audit_agent_visibility(
             "query": query,
         }
         try:
-            response = client.search_memories(
-                query=query,
-                user_id=user_id,
-                session_id=session_id,
-                method="hybrid",
-                memory_types=["agent_memory"],
-                top_k=top_k,
-                include_original_data=False,
-                include_vectors=False,
-                timeout=timeout,
-            )
-            hit_count = _count_hits(response)
-            check.update({"status": "hit" if hit_count else "miss", "hit_count": hit_count, "response": response})
+            response = precomputed.get(query)
+            if response is None:
+                response = client.search_memories(
+                    query=query,
+                    user_id=user_id,
+                    session_id=session_id,
+                    method="hybrid",
+                    memory_types=["agent_memory"],
+                    top_k=top_k,
+                    include_original_data=False,
+                    include_vectors=False,
+                    timeout=timeout,
+                )
+            _record_successful_check(check, response, include_responses=include_responses)
         except (EverOSError, EverOSTimeoutError) as exc:
-            check.update({"status": "error", "hit_count": 0, "error": str(exc)})
+            check.update({"status": "error", "hit_count": 0, "error": sanitized_error_message(exc)})
         finally:
             check["latency_ms"] = _elapsed_ms(started)
         checks.append(check)
@@ -102,10 +121,9 @@ def audit_agent_visibility(
                 page=1,
                 page_size=get_page_size,
             )
-            hit_count = _count_hits(response)
-            check.update({"status": "hit" if hit_count else "miss", "hit_count": hit_count, "response": response})
+            _record_successful_check(check, response, include_responses=include_responses)
         except (EverOSError, EverOSTimeoutError) as exc:
-            check.update({"status": "error", "hit_count": 0, "error": str(exc)})
+            check.update({"status": "error", "hit_count": 0, "error": sanitized_error_message(exc)})
         finally:
             check["latency_ms"] = _elapsed_ms(started)
         checks.append(check)
@@ -119,10 +137,11 @@ def audit_agent_visibility(
     )
 
 
-def _count_hits(response: dict[str, Any]) -> int:
-    from .workflows import count_hits
-
-    return count_hits(response)
+def _record_successful_check(check: dict[str, Any], response: dict[str, Any], *, include_responses: bool = False) -> None:
+    hit_count = count_hits(response)
+    check.update({"status": "hit" if hit_count else "miss", "hit_count": hit_count, "response_summary": response_summary(response)})
+    if include_responses:
+        check["response"] = response
 
 
 def _elapsed_ms(started: float) -> float:

@@ -1,0 +1,328 @@
+[
+  {
+    "description": "Queue an explicit long-term memory message in EverOS and optionally request extraction; saved=true does not guarantee a structured memory is immediately searchable. Agent scope returns agent_visibility=unchecked unless verification is enabled.",
+    "name": "everos_memory_save",
+    "properties": {
+      "content": {
+        "description": "Memory content to store.",
+        "type": "string"
+      },
+      "flush": {
+        "description": "Trigger EverOS extraction immediately. Default true.",
+        "type": "boolean"
+      },
+      "role": {
+        "description": "Message role. role=tool is only valid with scope=agent and requires tool_call_id.",
+        "enum": [
+          "user",
+          "assistant",
+          "tool",
+          "system"
+        ],
+        "type": "string"
+      },
+      "scope": {
+        "description": "Memory scope. Default personal.",
+        "enum": [
+          "personal",
+          "agent"
+        ],
+        "type": "string"
+      },
+      "session_id": {
+        "description": "Optional EverOS/Hermes session id.",
+        "type": "string"
+      },
+      "tool_call_id": {
+        "description": "Required when role=tool for agent memory.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "content"
+    ]
+  },
+  {
+    "description": "Search EverOS long-term memory using keyword, vector, hybrid, or agentic retrieval.",
+    "name": "everos_memory_search",
+    "properties": {
+      "filters": {
+        "description": "Optional Cloud v1 filters DSL. user_id is filled from provider config.",
+        "type": "object"
+      },
+      "include_original_data": {
+        "description": "Include Cloud original_data. Vectors remain stripped by default.",
+        "type": "boolean"
+      },
+      "include_vectors": {
+        "description": "Keep embedding/vector fields for debugging only.",
+        "type": "boolean"
+      },
+      "limit": {
+        "description": "Backward-compatible alias for top_k.",
+        "type": "integer"
+      },
+      "memory_types": {
+        "description": "Optional EverOS search memory types.",
+        "type": "array"
+      },
+      "method": {
+        "description": "Retrieval method. Default hybrid.",
+        "enum": [
+          "keyword",
+          "vector",
+          "hybrid",
+          "agentic"
+        ],
+        "type": "string"
+      },
+      "query": {
+        "description": "Search query.",
+        "type": "string"
+      },
+      "radius": {
+        "description": "Optional vector radius for vector/hybrid/agentic retrieval.",
+        "type": "number"
+      },
+      "response_format": {
+        "description": "Output format.",
+        "enum": [
+          "json",
+          "markdown"
+        ],
+        "type": "string"
+      },
+      "session_id": {
+        "description": "Optional session filter.",
+        "type": "string"
+      },
+      "top_k": {
+        "description": "Cloud top_k; -1 requests all matching results.",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "query"
+    ]
+  },
+  {
+    "description": "Get structured EverOS memories by type for the configured user.",
+    "name": "everos_memory_get",
+    "properties": {
+      "filters": {
+        "description": "Optional Cloud v1 filters DSL. user_id is filled from provider config.",
+        "type": "object"
+      },
+      "memory_type": {
+        "description": "Memory type to retrieve.",
+        "enum": [
+          "episodic_memory",
+          "profile",
+          "agent_case",
+          "agent_skill"
+        ],
+        "type": "string"
+      },
+      "page": {
+        "description": "Page number starting at 1.",
+        "type": "integer"
+      },
+      "page_size": {
+        "description": "Items per page, 1-100.",
+        "type": "integer"
+      },
+      "rank_by": {
+        "description": "Rank field. Default timestamp.",
+        "type": "string"
+      },
+      "rank_order": {
+        "description": "Rank order.",
+        "enum": [
+          "asc",
+          "desc"
+        ],
+        "type": "string"
+      },
+      "session_id": {
+        "description": "Optional session filter.",
+        "type": "string"
+      }
+    },
+    "required": []
+  },
+  {
+    "description": "Force EverOS memory extraction for the configured user/session. Timeout errors are retryable; search/status checks should happen before retrying. Agent scope reports flush separately from structured visibility and retries transient request-send failures once.",
+    "name": "everos_memory_flush",
+    "properties": {
+      "scope": {
+        "description": "Memory scope to flush.",
+        "enum": [
+          "personal",
+          "agent"
+        ],
+        "type": "string"
+      },
+      "session_id": {
+        "description": "Optional session id.",
+        "type": "string"
+      },
+      "timeout": {
+        "description": "Optional per-call timeout in seconds.",
+        "type": "number"
+      }
+    },
+    "required": []
+  },
+  {
+    "description": "Delete an EverOS memory by id. Requires confirm=true because this is destructive.",
+    "name": "everos_memory_forget",
+    "properties": {
+      "confirm": {
+        "description": "Must be true to delete.",
+        "type": "boolean"
+      },
+      "memory_id": {
+        "description": "Exact EverOS memory id to delete.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "confirm",
+      "memory_id"
+    ]
+  },
+  {
+    "description": "Queue one memory message, optionally flush extraction, then verify searchability with sample queries. Agent scope returns structured agent_visibility status.",
+    "name": "everos_memory_save_and_verify",
+    "properties": {
+      "content": {
+        "description": "Memory content to store.",
+        "type": "string"
+      },
+      "flush": {
+        "description": "Trigger extraction before verification. Default true.",
+        "type": "boolean"
+      },
+      "role": {
+        "description": "Message role; role=tool requires tool_call_id.",
+        "enum": [
+          "user",
+          "assistant",
+          "tool",
+          "system"
+        ],
+        "type": "string"
+      },
+      "scope": {
+        "description": "Memory scope.",
+        "enum": [
+          "personal",
+          "agent"
+        ],
+        "type": "string"
+      },
+      "session_id": {
+        "description": "Optional session id.",
+        "type": "string"
+      },
+      "tool_call_id": {
+        "description": "Required when role=tool for agent memory.",
+        "type": "string"
+      },
+      "top_k": {
+        "description": "Verification search top_k.",
+        "type": "integer"
+      },
+      "verification_queries": {
+        "description": "Additional verification queries.",
+        "type": "array"
+      },
+      "verification_query": {
+        "description": "Primary query used to verify recall.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "content"
+    ]
+  },
+  {
+    "description": "Batch-import messages or a local file, with dry-run validation, optional flush, and verification report.",
+    "name": "everos_memory_import_and_verify",
+    "properties": {
+      "batch_size": {
+        "description": "Messages per add_memories call.",
+        "type": "integer"
+      },
+      "dry_run": {
+        "description": "Validate and summarize without writing.",
+        "type": "boolean"
+      },
+      "file_path": {
+        "description": "Optional local JSON/JSONL/Markdown file to import.",
+        "type": "string"
+      },
+      "flush": {
+        "description": "Flush after importing. Default true.",
+        "type": "boolean"
+      },
+      "messages": {
+        "description": "Messages to import.",
+        "type": "array"
+      },
+      "scope": {
+        "description": "Memory scope.",
+        "enum": [
+          "personal",
+          "agent"
+        ],
+        "type": "string"
+      },
+      "session_id": {
+        "description": "Optional session id.",
+        "type": "string"
+      },
+      "top_k": {
+        "description": "Verification search top_k.",
+        "type": "integer"
+      },
+      "verification_queries": {
+        "description": "Queries used to verify recall.",
+        "type": "array"
+      }
+    },
+    "required": []
+  },
+  {
+    "description": "Read-only verification for an existing user/session using sample search queries. Agent scope returns structured agent_visibility status.",
+    "name": "everos_memory_verify_session",
+    "properties": {
+      "memory_types": {
+        "type": "array"
+      },
+      "scope": {
+        "description": "Memory scope.",
+        "enum": [
+          "personal",
+          "agent"
+        ],
+        "type": "string"
+      },
+      "session_id": {
+        "description": "Optional session id.",
+        "type": "string"
+      },
+      "top_k": {
+        "description": "Verification search top_k.",
+        "type": "integer"
+      },
+      "verification_queries": {
+        "description": "Queries used to verify recall.",
+        "type": "array"
+      }
+    },
+    "required": [
+      "verification_queries"
+    ]
+  }
+]

@@ -1,22 +1,16 @@
 from __future__ import annotations
 
-import copy
 import hashlib
 import json
-import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal
 
+from .redaction import redact_text, scrub_value, strip_context_blocks
+
 
 TrajectorySource = Literal["session_end", "pre_compress", "delegation", "sync_turn"]
-_CONTEXT_BLOCK_RE = re.compile(r"<(?P<tag>everos-context|memory-context)\b[^>]*>.*?</(?P=tag)>", re.IGNORECASE | re.DOTALL)
-_SECRET_PATTERNS = [
-    re.compile(r"Authorization:\s*Bearer\s+[A-Za-z0-9._\-]+", re.IGNORECASE),
-    re.compile(r"\bsk-[A-Za-z0-9]{12,}\b"),
-    re.compile(r"\b(api[_-]?key|token|password|secret)\s*[:=]\s*[^\s,;\]}]+", re.IGNORECASE),
-]
 
 
 @dataclass(slots=True)
@@ -29,6 +23,18 @@ class TrajectoryBuildResult:
     output_count: int
     dropped_count: int
     estimated_chars: int
+
+
+@dataclass(slots=True)
+class TrajectoryBuildOptions:
+    session_id: str
+    source: TrajectorySource
+    now_ms: int | None = None
+    max_messages: int = 80
+    max_message_chars: int = 8000
+    max_tool_result_chars: int = 6000
+    max_payload_chars: int = 60000
+    include_system: bool = False
 
 
 def build_agent_trajectory_messages(
@@ -44,7 +50,27 @@ def build_agent_trajectory_messages(
     include_system: bool = False,
 ) -> TrajectoryBuildResult:
     """Convert Hermes message history into bounded EverOS agent messages."""
-    base_now = int(now_ms if now_ms is not None else time.time() * 1000)
+    return build_agent_trajectory_messages_with_options(
+        messages,
+        TrajectoryBuildOptions(
+            session_id=session_id,
+            source=source,
+            now_ms=now_ms,
+            max_messages=max_messages,
+            max_message_chars=max_message_chars,
+            max_tool_result_chars=max_tool_result_chars,
+            max_payload_chars=max_payload_chars,
+            include_system=include_system,
+        ),
+    )
+
+
+def build_agent_trajectory_messages_with_options(
+    messages: list[dict[str, Any]],
+    options: TrajectoryBuildOptions,
+) -> TrajectoryBuildResult:
+    """Convert Hermes message history into bounded EverOS agent messages."""
+    base_now = int(options.now_ms if options.now_ms is not None else time.time() * 1000)
     warnings: list[str] = []
     output: list[dict[str, Any]] = []
     dropped_count = 0
@@ -55,7 +81,7 @@ def build_agent_trajectory_messages(
             dropped_count += 1
             warnings.append(f"dropped unsupported role at index {input_index}: {role or '<empty>'}")
             continue
-        if role == "system" and not include_system:
+        if role == "system" and not options.include_system:
             dropped_count += 1
             continue
         if role == "tool" and not str(raw.get("tool_call_id") or "").strip():
@@ -63,12 +89,12 @@ def build_agent_trajectory_messages(
             warnings.append(f"dropped tool message at index {input_index}: missing tool_call_id")
             continue
 
-        tool_calls = _scrub_value(raw.get("tool_calls")) if role == "assistant" and raw.get("tool_calls") else None
+        tool_calls = scrub_value(raw.get("tool_calls")) if role == "assistant" and raw.get("tool_calls") else None
         content = _content_to_text(raw.get("content"))
         if not content and role == "assistant" and tool_calls:
             content = "[Assistant requested tool calls]"
-        content = _strip_context_blocks(_redact_text(content)).strip()
-        limit = max_tool_result_chars if role == "tool" else max_message_chars
+        content = strip_context_blocks(redact_text(content)).strip()
+        limit = options.max_tool_result_chars if role == "tool" else options.max_message_chars
         content = _truncate(content, limit)
         if not content:
             dropped_count += 1
@@ -81,7 +107,7 @@ def build_agent_trajectory_messages(
             "content": content,
             "timestamp": timestamp,
             "message_id": _message_id(
-                session_id=session_id,
+                session_id=options.session_id,
                 input_index=input_index,
                 role=role,
                 tool_call_id=str(raw.get("tool_call_id") or ""),
@@ -89,7 +115,7 @@ def build_agent_trajectory_messages(
                 content=content,
                 tool_calls=tool_calls,
             ),
-            "source": source,
+            "source": options.source,
         }
         if role == "tool":
             message["tool_call_id"] = str(raw.get("tool_call_id")).strip()
@@ -97,13 +123,13 @@ def build_agent_trajectory_messages(
             message["tool_calls"] = tool_calls
         output.append(message)
 
-    if max_messages > 0 and len(output) > max_messages:
-        extra = len(output) - max_messages
-        output = output[-max_messages:]
+    if options.max_messages > 0 and len(output) > options.max_messages:
+        extra = len(output) - options.max_messages
+        output = output[-options.max_messages:]
         dropped_count += extra
         warnings.append(f"dropped {extra} oldest messages due to max_messages")
 
-    output, budget_dropped = _enforce_payload_budget(output, max_payload_chars)
+    output, budget_dropped = _enforce_payload_budget(output, options.max_payload_chars)
     if budget_dropped:
         dropped_count += budget_dropped
         warnings.append(f"dropped {budget_dropped} oldest messages due to max_payload_chars")
@@ -111,9 +137,9 @@ def build_agent_trajectory_messages(
     estimated_chars = _estimate_chars(output)
     return TrajectoryBuildResult(
         messages=output,
-        fingerprint=_fingerprint(session_id, output),
+        fingerprint=_fingerprint(options.session_id, output),
         warnings=warnings,
-        source=source,
+        source=options.source,
         input_count=len(messages),
         output_count=len(output),
         dropped_count=dropped_count,
@@ -127,27 +153,6 @@ def _content_to_text(value: Any) -> str:
     if isinstance(value, str):
         return value
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
-
-
-def _strip_context_blocks(text: str) -> str:
-    return _CONTEXT_BLOCK_RE.sub("", text)
-
-
-def _redact_text(text: str) -> str:
-    redacted = text
-    for pattern in _SECRET_PATTERNS:
-        redacted = pattern.sub("[REDACTED]", redacted)
-    return redacted
-
-
-def _scrub_value(value: Any) -> Any:
-    if isinstance(value, str):
-        return _strip_context_blocks(_redact_text(value))
-    if isinstance(value, list):
-        return [_scrub_value(item) for item in value]
-    if isinstance(value, dict):
-        return {str(key): _scrub_value(val) for key, val in value.items()}
-    return copy.deepcopy(value)
 
 
 def _truncate(text: str, limit: int) -> str:

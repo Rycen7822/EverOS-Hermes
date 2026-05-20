@@ -14,5 +14,8 @@ pub mod formatting;
 pub mod mcp;
 pub mod policy;
 pub mod provider;
+pub mod provider_tools;
+pub mod redaction;
+pub mod response_normalization;
 pub mod trajectory;
 pub mod workflows;

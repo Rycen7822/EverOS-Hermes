@@ -1,8 +1,7 @@
 use crate::formatting::compact_json;
-use regex::Regex;
+use crate::redaction::{redact_text, scrub_value, strip_context_blocks};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
-use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,6 +16,18 @@ pub struct TrajectoryBuildResult {
     pub estimated_chars: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrajectoryBuildOptions {
+    pub session_id: String,
+    pub source: String,
+    pub now_ms: Option<u128>,
+    pub max_messages: usize,
+    pub max_message_chars: usize,
+    pub max_tool_result_chars: usize,
+    pub max_payload_chars: usize,
+    pub include_system: bool,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn build_agent_trajectory_messages(
     messages: &[Value],
@@ -29,7 +40,26 @@ pub fn build_agent_trajectory_messages(
     max_payload_chars: usize,
     include_system: bool,
 ) -> TrajectoryBuildResult {
-    let base_now = now_ms.unwrap_or_else(current_ms);
+    build_agent_trajectory_messages_with_options(
+        messages,
+        &TrajectoryBuildOptions {
+            session_id: session_id.to_string(),
+            source: source.to_string(),
+            now_ms,
+            max_messages,
+            max_message_chars,
+            max_tool_result_chars,
+            max_payload_chars,
+            include_system,
+        },
+    )
+}
+
+pub fn build_agent_trajectory_messages_with_options(
+    messages: &[Value],
+    options: &TrajectoryBuildOptions,
+) -> TrajectoryBuildResult {
+    let base_now = options.now_ms.unwrap_or_else(current_ms);
     let mut warnings = Vec::new();
     let mut output = Vec::new();
     let mut dropped_count = 0usize;
@@ -53,7 +83,7 @@ pub fn build_agent_trajectory_messages(
             ));
             continue;
         }
-        if role == "system" && !include_system {
+        if role == "system" && !options.include_system {
             dropped_count += 1;
             continue;
         }
@@ -86,9 +116,9 @@ pub fn build_agent_trajectory_messages(
             .trim()
             .to_string();
         let limit = if role == "tool" {
-            max_tool_result_chars
+            options.max_tool_result_chars
         } else {
-            max_message_chars
+            options.max_message_chars
         };
         content = truncate(&content, limit);
         if content.trim().is_empty() {
@@ -107,7 +137,7 @@ pub fn build_agent_trajectory_messages(
         map.insert(
             "message_id".to_string(),
             Value::String(message_id(
-                session_id,
+                &options.session_id,
                 input_index,
                 &role,
                 &tool_call_id,
@@ -116,7 +146,7 @@ pub fn build_agent_trajectory_messages(
                 tool_calls.as_ref(),
             )),
         );
-        map.insert("source".to_string(), Value::String(source.to_string()));
+        map.insert("source".to_string(), Value::String(options.source.clone()));
         if role == "tool" {
             map.insert("tool_call_id".to_string(), Value::String(tool_call_id));
         }
@@ -126,8 +156,8 @@ pub fn build_agent_trajectory_messages(
         output.push(Value::Object(map));
     }
 
-    if max_messages > 0 && output.len() > max_messages {
-        let extra = output.len() - max_messages;
+    if options.max_messages > 0 && output.len() > options.max_messages {
+        let extra = output.len() - options.max_messages;
         output = output.split_off(extra);
         dropped_count += extra;
         warnings.push(format!(
@@ -135,7 +165,7 @@ pub fn build_agent_trajectory_messages(
         ));
     }
 
-    let (output, budget_dropped) = enforce_payload_budget(output, max_payload_chars);
+    let (output, budget_dropped) = enforce_payload_budget(output, options.max_payload_chars);
     if budget_dropped > 0 {
         dropped_count += budget_dropped;
         warnings.push(format!(
@@ -143,13 +173,13 @@ pub fn build_agent_trajectory_messages(
         ));
     }
     let estimated_chars = estimate_chars(&output);
-    let fingerprint = fingerprint(session_id, &output);
+    let fingerprint = fingerprint(&options.session_id, &output);
     let output_count = output.len();
     TrajectoryBuildResult {
         messages: output,
         fingerprint,
         warnings,
-        source: source.to_string(),
+        source: options.source.clone(),
         input_count: messages.len(),
         output_count,
         dropped_count,
@@ -168,49 +198,7 @@ fn content_to_text(value: Option<&Value>) -> String {
     match value {
         None | Some(Value::Null) => String::new(),
         Some(Value::String(text)) => text.clone(),
-        Some(other) => compact_json(other),
-    }
-}
-
-fn strip_context_blocks(text: &str) -> String {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"(?is)<everos-context\b[^>]*>.*?</everos-context>|<memory-context\b[^>]*>.*?</memory-context>").unwrap()
-    })
-    .replace_all(text, "")
-    .to_string()
-}
-
-fn redact_text(text: &str) -> String {
-    static AUTH_RE: OnceLock<Regex> = OnceLock::new();
-    static SK_RE: OnceLock<Regex> = OnceLock::new();
-    static KV_RE: OnceLock<Regex> = OnceLock::new();
-    let text = AUTH_RE
-        .get_or_init(|| Regex::new(r"(?i)Authorization:\s*Bearer\s+[A-Za-z0-9._\-]+").unwrap())
-        .replace_all(text, "[REDACTED]")
-        .to_string();
-    let text = SK_RE
-        .get_or_init(|| Regex::new(r"\bsk-[A-Za-z0-9]{12,}\b").unwrap())
-        .replace_all(&text, "[REDACTED]")
-        .to_string();
-    KV_RE
-        .get_or_init(|| {
-            Regex::new(r"(?i)\b(api[_-]?key|token|password|secret)\s*[:=]\s*[^\s,;\]}]+").unwrap()
-        })
-        .replace_all(&text, "[REDACTED]")
-        .to_string()
-}
-
-fn scrub_value(value: &Value) -> Value {
-    match value {
-        Value::String(text) => Value::String(strip_context_blocks(&redact_text(text))),
-        Value::Array(items) => Value::Array(items.iter().map(scrub_value).collect()),
-        Value::Object(map) => Value::Object(
-            map.iter()
-                .map(|(key, value)| (key.clone(), scrub_value(value)))
-                .collect(),
-        ),
-        other => other.clone(),
+        Some(other) => compact_json(&scrub_value(other)),
     }
 }
 
@@ -300,31 +288,31 @@ fn estimate_chars(messages: &[Value]) -> usize {
 }
 
 fn enforce_payload_budget(messages: Vec<Value>, max_payload_chars: usize) -> (Vec<Value>, usize) {
-    if max_payload_chars == 0 || estimate_chars(&messages) <= max_payload_chars {
+    let message_lengths: Vec<usize> = messages
+        .iter()
+        .map(|message| canonical_json(message).len())
+        .collect();
+    let mut estimated_chars: usize = message_lengths.iter().sum();
+    if max_payload_chars == 0 || estimated_chars <= max_payload_chars {
         return (messages, 0);
     }
-    let last_user_index = messages
+    let protected_start = messages
         .iter()
         .enumerate()
         .filter_map(|(index, message)| {
             (message.get("role").and_then(Value::as_str) == Some("user")).then_some(index)
         })
-        .next_back();
-    let protected_start = last_user_index.unwrap_or_else(|| messages.len().saturating_sub(1));
-    let protected = messages[protected_start..].to_vec();
-    let mut prefix = messages[..protected_start].to_vec();
-    let mut dropped = 0usize;
-    while !prefix.is_empty()
-        && estimate_chars(&[prefix.clone(), protected.clone()].concat()) > max_payload_chars
-    {
-        prefix.remove(0);
-        dropped += 1;
+        .next_back()
+        .unwrap_or_else(|| messages.len().saturating_sub(1));
+    let mut prefix_start = 0usize;
+    while prefix_start < protected_start && estimated_chars > max_payload_chars {
+        estimated_chars = estimated_chars.saturating_sub(message_lengths[prefix_start]);
+        prefix_start += 1;
     }
-    let combined = [prefix.clone(), protected.clone()].concat();
-    if estimate_chars(&combined) <= max_payload_chars {
-        return (combined, dropped);
+    if estimated_chars <= max_payload_chars {
+        return (messages[prefix_start..].to_vec(), prefix_start);
     }
-    (protected, dropped + prefix.len())
+    (messages[protected_start..].to_vec(), protected_start)
 }
 
 fn fingerprint(session_id: &str, messages: &[Value]) -> String {

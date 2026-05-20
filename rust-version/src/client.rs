@@ -1,10 +1,12 @@
 use crate::env::get_env;
 use crate::formatting::strip_vectors;
+use crate::redaction::redact_text;
 use reqwest::Method;
 use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{Map, Value, json};
 use std::path::Path;
+use std::sync::OnceLock;
 use std::time::Duration;
 use thiserror::Error;
 use url::Url;
@@ -84,12 +86,9 @@ impl EverOSClient {
         let method = Method::from_bytes(method_name.as_bytes())
             .map_err(|err| EverOSError::Request(err.to_string()))?;
         let effective_timeout = timeout.unwrap_or(self.timeout);
-        let client = Client::builder()
-            .timeout(Duration::from_secs_f64(effective_timeout.max(0.001)))
-            .build()
-            .map_err(|err| EverOSError::Request(err.to_string()))?;
-        let mut req = client
+        let mut req = shared_http_client()
             .request(method, &url)
+            .timeout(Duration::from_secs_f64(effective_timeout.max(0.001)))
             .header(AUTHORIZATION, format!("Bearer {}", self.api_key))
             .header(CONTENT_TYPE, "application/json")
             .header(ACCEPT, "application/json");
@@ -361,6 +360,11 @@ impl EverOSClient {
     }
 }
 
+fn shared_http_client() -> &'static Client {
+    static HTTP_CLIENT: OnceLock<Client> = OnceLock::new();
+    HTTP_CLIENT.get_or_init(Client::new)
+}
+
 pub fn normalize_base_url(url: &str) -> Result<String> {
     let url = if url.trim().is_empty() {
         DEFAULT_BASE_URL
@@ -402,17 +406,23 @@ pub fn drop_nulls(value: Value) -> Value {
     }
 }
 
+fn reject_group_memory_scope(group_id: Option<&str>, message: &str) -> Result<()> {
+    if group_id.filter(|value| !value.trim().is_empty()).is_some() {
+        return Err(EverOSError::Api(message.to_string()));
+    }
+    Ok(())
+}
+
 pub fn build_filters(
     user_id: Option<&str>,
     group_id: Option<&str>,
     session_id: Option<&str>,
     filters: Option<Value>,
 ) -> Result<Value> {
-    if group_id.filter(|value| !value.trim().is_empty()).is_some() {
-        return Err(EverOSError::Api(
-            "group memory is out of scope for this EverOS-Hermes release".to_string(),
-        ));
-    }
+    reject_group_memory_scope(
+        group_id,
+        "group memory is out of scope for this EverOS-Hermes release",
+    )?;
     let mut map = match filters {
         Some(Value::Object(map)) => map,
         Some(_) => return Err(EverOSError::Api("filters must be an object".to_string())),
@@ -618,12 +628,14 @@ fn validate_settings_update(settings: Value, strict: bool) -> Result<Value> {
     for (key, value) in map {
         match key.as_str() {
             "timezone" => {
-                if value
-                    .as_str()
-                    .is_none_or(|timezone| timezone.trim().is_empty())
-                {
+                let Some(timezone) = value.as_str() else {
                     return Err(EverOSError::Api(
                         "timezone must be an IANA timezone string".to_string(),
+                    ));
+                };
+                if !is_valid_iana_timezone(timezone) {
+                    return Err(EverOSError::Api(
+                        "timezone must be an IANA timezone string, e.g. Asia/Tokyo".to_string(),
                     ));
                 }
                 out.insert(key, value);
@@ -643,6 +655,28 @@ fn validate_settings_update(settings: Value, strict: bool) -> Result<Value> {
         }
     }
     Ok(Value::Object(out))
+}
+
+fn is_valid_iana_timezone(timezone: &str) -> bool {
+    if timezone.is_empty() || timezone != timezone.trim() || timezone.contains('\\') {
+        return false;
+    }
+    let path = Path::new(timezone);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return false;
+    }
+    [
+        "/usr/share/zoneinfo",
+        "/usr/share/lib/zoneinfo",
+        "/usr/lib/locale/TZ",
+    ]
+    .iter()
+    .map(Path::new)
+    .any(|root| root.join(path).is_file())
 }
 
 fn settings_diff(before: &Value, after: &Value, requested: &Value) -> Value {
@@ -684,11 +718,10 @@ fn validate_delete_request(
     group_id: Option<&str>,
     session_id: Option<&str>,
 ) -> Result<()> {
-    if group_id.filter(|value| !value.trim().is_empty()).is_some() {
-        return Err(EverOSError::Api(
-            "group delete is out of scope for this EverOS-Hermes release".to_string(),
-        ));
-    }
+    reject_group_memory_scope(
+        group_id,
+        "group delete is out of scope for this EverOS-Hermes release",
+    )?;
     let has_memory_id = memory_id.is_some_and(|value| !value.trim().is_empty());
     if has_memory_id && (user_id.is_some() || session_id.is_some()) {
         return Err(EverOSError::Api(
@@ -813,7 +846,12 @@ fn http_error_to_everos_error(status: u16, raw: &str, reason: &str) -> EverOSErr
         if let Some(code) = map.get("code").and_then(Value::as_str) {
             bits.push(code.to_string());
         }
-        if let Some(message) = map.get("message").and_then(Value::as_str) {
+        if let Some(message) = map
+            .get("message")
+            .or_else(|| map.get("error"))
+            .or_else(|| map.get("detail"))
+            .and_then(Value::as_str)
+        {
             bits.push(message.to_string());
         }
         if let Some(request_id) = map.get("request_id").and_then(Value::as_str) {
@@ -824,5 +862,5 @@ fn http_error_to_everos_error(status: u16, raw: &str, reason: &str) -> EverOSErr
     if detail.trim().is_empty() {
         detail = reason.to_string();
     }
-    EverOSError::Api(detail)
+    EverOSError::Api(redact_text(&detail))
 }

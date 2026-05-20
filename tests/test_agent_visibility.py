@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from everos_hermes.client import EverOSError
-from everos_hermes.agent_visibility import audit_agent_visibility, build_agent_visibility_report
+from everos_hermes.agent_visibility import (
+    audit_agent_visibility,
+    build_agent_visibility_report,
+    workflow_status_from_agent_visibility,
+)
 
 
 def test_build_agent_visibility_report_not_visible_when_all_checks_miss():
@@ -34,6 +38,14 @@ def test_build_agent_visibility_report_partial_when_search_hits_but_get_misses()
 
     assert report["agent_structured_visible"] is True
     assert report["agent_visibility_status"] == "partial"
+
+
+def test_workflow_status_from_agent_visibility_keeps_existing_mapping():
+    assert workflow_status_from_agent_visibility({"agent_visibility_status": "visible"}, "fallback") == "verified"
+    assert workflow_status_from_agent_visibility({"agent_visibility_status": "partial"}, "fallback") == "partially_verified"
+    assert workflow_status_from_agent_visibility({"agent_visibility_status": "not_visible"}, "fallback") == "agent_not_visible"
+    assert workflow_status_from_agent_visibility({"agent_visibility_status": "error"}, "fallback") == "agent_visibility_error"
+    assert workflow_status_from_agent_visibility({"agent_visibility_status": "unchecked"}, "fallback") == "fallback"
 
 
 def test_audit_agent_visibility_runs_search_and_agent_gets_independently():
@@ -69,6 +81,31 @@ def test_audit_agent_visibility_runs_search_and_agent_gets_independently():
     assert report["agent_visibility_checks"][1]["status"] == "miss"
     assert report["agent_visibility_checks"][2]["status"] == "miss"
     assert report["agent_visibility_status"] == "error"
+
+
+def test_audit_agent_visibility_redacts_error_text():
+    class FakeClient:
+        def search_memories(self, **kwargs):
+            raise EverOSError("backend failed api_key=visibility-secret Authorization: Bearer visibility-token")
+
+        def get_memories(self, **kwargs):
+            raise EverOSError("backend failed token=visibility-get-secret")
+
+    report = audit_agent_visibility(
+        client=FakeClient(),
+        user_id="u1",
+        session_id="s1",
+        queries=["agent marker"],
+        top_k=5,
+        timeout=30,
+        get_page_size=20,
+    )
+
+    rendered = str(report)
+    assert "visibility-secret" not in rendered
+    assert "visibility-token" not in rendered
+    assert "visibility-get-secret" not in rendered
+    assert "[REDACTED]" in rendered
 
 
 def test_audit_agent_visibility_counts_nested_agent_memory_shapes():

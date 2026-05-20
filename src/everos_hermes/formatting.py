@@ -35,7 +35,8 @@ def format_search_context(response: dict[str, Any], *, max_items: int = 5) -> st
         return ""
 
     lines: list[str] = []
-    agent_memory = data.get("agent_memory") if isinstance(data.get("agent_memory"), dict) else {}
+    agent_memory_raw = data.get("agent_memory")
+    agent_memory: dict[str, Any] = agent_memory_raw if isinstance(agent_memory_raw, dict) else {}
     episode_lines = _format_episodes(_as_list(data.get("episodes") or data.get("results") or data.get("memories")), max_items=max_items)
     profile_lines = _format_profiles(_as_list(data.get("profiles") or data.get("profile")), max_items=max_items)
     raw_lines = _format_raw_messages(_as_list(data.get("raw_messages")), max_items=max_items)

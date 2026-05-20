@@ -1,0 +1,296 @@
+[
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description_summary": "Queue one explicit text memory message for EverOS extraction.",
+    "name": "everos_save_memory",
+    "properties": [
+      "async_mode",
+      "content",
+      "flush",
+      "flush_timeout",
+      "role",
+      "scope",
+      "session_id",
+      "tool_call_id",
+      "user_id"
+    ],
+    "required": [
+      "content"
+    ],
+    "title": "Save EverOS Memory"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description_summary": "Add one or more personal or agent-trajectory messages to EverOS.",
+    "name": "everos_add_memories",
+    "properties": [
+      "agent",
+      "async_mode",
+      "flush",
+      "flush_timeout",
+      "messages",
+      "scope",
+      "session_id",
+      "user_id"
+    ],
+    "required": [
+      "messages"
+    ],
+    "title": "Add EverOS Memory Messages"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description_summary": "Trigger EverOS boundary detection and memory extraction immediately.",
+    "name": "everos_flush_memories",
+    "properties": [
+      "agent",
+      "scope",
+      "session_id",
+      "timeout",
+      "user_id"
+    ],
+    "required": [],
+    "title": "Flush EverOS Memories"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description_summary": "Search EverOS memory using keyword, vector, hybrid, or agentic retrieval.",
+    "name": "everos_search_memories",
+    "properties": [
+      "fallback_to_hybrid",
+      "filters",
+      "include_original_data",
+      "include_vectors",
+      "memory_types",
+      "method",
+      "query",
+      "radius",
+      "response_format",
+      "session_id",
+      "timeout",
+      "top_k",
+      "user_id"
+    ],
+    "required": [
+      "query"
+    ],
+    "title": "Search EverOS Memories"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description_summary": "Retrieve structured EverOS memories by memory_type with pagination.",
+    "name": "everos_get_memories",
+    "properties": [
+      "filters",
+      "memory_type",
+      "page",
+      "page_size",
+      "rank_by",
+      "rank_order",
+      "response_format",
+      "session_id",
+      "user_id"
+    ],
+    "required": [],
+    "title": "Get EverOS Memories"
+  },
+  {
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description_summary": "Delete EverOS memory by exact memory_id, or batch-delete by user/session when explicitly confirmed.",
+    "name": "everos_delete_memories",
+    "properties": [
+      "confirm",
+      "confirm_scope_text",
+      "memory_id",
+      "session_id",
+      "user_id"
+    ],
+    "required": [],
+    "title": "Delete EverOS Memories"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description_summary": "Check an asynchronous EverOS extraction task status.",
+    "name": "everos_get_task_status",
+    "properties": [
+      "task_id"
+    ],
+    "required": [
+      "task_id"
+    ],
+    "title": "Get EverOS Task Status"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description_summary": "Get current EverOS memory-space settings.",
+    "name": "everos_get_settings",
+    "properties": [],
+    "required": [],
+    "title": "Get EverOS Settings"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description_summary": "Update EverOS memory-space settings.",
+    "name": "everos_update_settings",
+    "properties": [
+      "return_diff",
+      "settings",
+      "strict"
+    ],
+    "required": [
+      "settings"
+    ],
+    "title": "Update EverOS Settings"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description_summary": "Dry-run or execute batched EverOS ingest with optional flush and verification report.",
+    "name": "everos_batch_ingest",
+    "properties": [
+      "batch_size",
+      "dry_run",
+      "file_path",
+      "flush",
+      "flush_timeout",
+      "memory_types",
+      "messages",
+      "scope",
+      "session_id",
+      "timeout",
+      "top_k",
+      "user_id",
+      "verification_queries"
+    ],
+    "required": [],
+    "title": "Batch Ingest EverOS Memories"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description_summary": "Verify that an existing user/session is searchable by running read-only sample queries.",
+    "name": "everos_verify_session_ingest",
+    "properties": [
+      "memory_types",
+      "scope",
+      "session_id",
+      "timeout",
+      "top_k",
+      "user_id",
+      "verification_queries"
+    ],
+    "required": [
+      "verification_queries"
+    ],
+    "title": "Verify EverOS Session Ingest"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description_summary": "Queue one memory message, optionally flush, then verify searchability with sample queries.",
+    "name": "everos_save_and_verify",
+    "properties": [
+      "content",
+      "flush",
+      "flush_timeout",
+      "memory_types",
+      "role",
+      "scope",
+      "session_id",
+      "timeout",
+      "tool_call_id",
+      "top_k",
+      "user_id",
+      "verification_queries",
+      "verification_query"
+    ],
+    "required": [
+      "content"
+    ],
+    "title": "Save and Verify EverOS Memory"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description_summary": "Batch-import messages or a local file, then flush/poll-compatible verify with sample queries.",
+    "name": "everos_import_and_verify",
+    "properties": [
+      "batch_size",
+      "dry_run",
+      "file_path",
+      "flush",
+      "flush_timeout",
+      "memory_types",
+      "messages",
+      "scope",
+      "session_id",
+      "timeout",
+      "top_k",
+      "user_id",
+      "verification_queries"
+    ],
+    "required": [],
+    "title": "Import and Verify EverOS Memories"
+  }
+]

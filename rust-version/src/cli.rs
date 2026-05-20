@@ -1,8 +1,9 @@
 use crate::mcp;
 use crate::provider::{EverOSProvider, ProviderInit, provider_tool_schemas, save_config};
 use anyhow::{Context, anyhow};
-use clap::{Args, Parser, Subcommand};
+use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
+use std::io::{self, Read};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -20,7 +21,7 @@ pub struct Cli {
 enum Commands {
     /// Run the local stdio MCP server.
     Mcp,
-    /// Hermes memory-provider helper commands used by the Python shim.
+    /// Hermes memory-provider helper commands used by the Python shim; short-lived compatibility shim.
     Provider {
         #[command(subcommand)]
         command: Box<ProviderCommand>,
@@ -38,89 +39,43 @@ enum ProviderCommand {
         #[arg(long)]
         hermes_home: PathBuf,
         #[arg(long)]
-        values_json: String,
+        payload_stdin: bool,
     },
-    SystemPrompt(StateArgs),
-    Prefetch {
-        #[command(flatten)]
-        state: StateArgs,
+    SystemPrompt {
         #[arg(long)]
-        query: String,
-        #[arg(long, default_value = "")]
-        session_id_override: String,
+        payload_stdin: bool,
+    },
+    Prefetch {
+        #[arg(long)]
+        payload_stdin: bool,
     },
     ToolCall {
-        #[command(flatten)]
-        state: StateArgs,
+        /// Tool name is non-sensitive; tool arguments must be supplied via --payload-stdin.
         #[arg(long)]
         tool_name: String,
-        #[arg(long, default_value = "{}")]
-        args_json: String,
+        #[arg(long)]
+        payload_stdin: bool,
     },
     SyncTurn {
-        #[command(flatten)]
-        state: StateArgs,
         #[arg(long)]
-        user_content: String,
-        #[arg(long)]
-        assistant_content: String,
-        #[arg(long, default_value = "")]
-        session_id_override: String,
+        payload_stdin: bool,
     },
     OnMemoryWrite {
-        #[command(flatten)]
-        state: StateArgs,
         #[arg(long)]
-        action: String,
-        #[arg(long)]
-        target: String,
-        #[arg(long)]
-        content: String,
-        #[arg(long, default_value = "null")]
-        metadata_json: String,
+        payload_stdin: bool,
     },
     OnSessionEnd {
-        #[command(flatten)]
-        state: StateArgs,
-        #[arg(long, default_value = "[]")]
-        messages_json: String,
+        #[arg(long)]
+        payload_stdin: bool,
     },
     OnPreCompress {
-        #[command(flatten)]
-        state: StateArgs,
-        #[arg(long, default_value = "[]")]
-        messages_json: String,
+        #[arg(long)]
+        payload_stdin: bool,
     },
     OnDelegation {
-        #[command(flatten)]
-        state: StateArgs,
         #[arg(long)]
-        task: String,
-        #[arg(long)]
-        result: String,
-        #[arg(long, default_value = "")]
-        child_session_id: String,
+        payload_stdin: bool,
     },
-}
-
-#[derive(Debug, Clone, Args, Default)]
-struct StateArgs {
-    #[arg(long)]
-    state_json: Option<String>,
-    #[arg(long, default_value = "")]
-    session_id: String,
-    #[arg(long)]
-    hermes_home: Option<PathBuf>,
-    #[arg(long, default_value = "cli")]
-    platform: String,
-    #[arg(long, default_value = "")]
-    user_id: String,
-    #[arg(long, default_value = "")]
-    user_name: String,
-    #[arg(long, default_value = "default")]
-    agent_identity: String,
-    #[arg(long, default_value = "")]
-    agent_context: String,
 }
 
 pub fn run() -> anyhow::Result<()> {
@@ -148,23 +103,21 @@ fn run_provider(command: ProviderCommand) -> anyhow::Result<()> {
         }
         ProviderCommand::SaveConfig {
             hermes_home,
-            values_json,
+            payload_stdin,
         } => {
-            let values: Value =
-                serde_json::from_str(&values_json).context("invalid --values-json")?;
+            let payload = read_required_payload(payload_stdin)?;
+            let values = payload.get("values").cloned().unwrap_or(payload);
             save_config(&values, &hermes_home)?;
             println!("{}", serde_json::to_string_pretty(&json!({"saved": true}))?);
         }
-        ProviderCommand::SystemPrompt(state) => {
-            let provider = provider_from_state(state)?;
+        ProviderCommand::SystemPrompt { payload_stdin } => {
+            let (_, provider) = short_lived_provider_payload(payload_stdin)?;
             println!("{}", provider.system_prompt_block());
         }
-        ProviderCommand::Prefetch {
-            state,
-            query,
-            session_id_override,
-        } => {
-            let provider = provider_from_state(state)?;
+        ProviderCommand::Prefetch { payload_stdin } => {
+            let (payload, provider) = short_lived_provider_payload(payload_stdin)?;
+            let query = payload_string(&payload, "query");
+            let session_id_override = payload_string(&payload, "session_id_override");
             let sid = if session_id_override.is_empty() {
                 None
             } else {
@@ -173,21 +126,18 @@ fn run_provider(command: ProviderCommand) -> anyhow::Result<()> {
             println!("{}", provider.prefetch(&query, sid));
         }
         ProviderCommand::ToolCall {
-            state,
             tool_name,
-            args_json,
+            payload_stdin,
         } => {
-            let provider = provider_from_state(state)?;
-            let args: Value = serde_json::from_str(&args_json).context("invalid --args-json")?;
+            let (payload, provider) = short_lived_provider_payload(payload_stdin)?;
+            let args = payload_value(&payload, "args", json!({}));
             println!("{}", provider.handle_tool_call(&tool_name, args)?);
         }
-        ProviderCommand::SyncTurn {
-            state,
-            user_content,
-            assistant_content,
-            session_id_override,
-        } => {
-            let provider = provider_from_state(state)?;
+        ProviderCommand::SyncTurn { payload_stdin } => {
+            let (payload, provider) = short_lived_provider_payload(payload_stdin)?;
+            let user_content = payload_string(&payload, "user_content");
+            let assistant_content = payload_string(&payload, "assistant_content");
+            let session_id_override = payload_string(&payload, "session_id_override");
             let sid = if session_id_override.is_empty() {
                 None
             } else {
@@ -199,48 +149,40 @@ fn run_provider(command: ProviderCommand) -> anyhow::Result<()> {
                 serde_json::to_string_pretty(&json!({"synced": true}))?
             );
         }
-        ProviderCommand::OnMemoryWrite {
-            state,
-            action,
-            target,
-            content,
-            metadata_json,
-        } => {
-            let provider = provider_from_state(state)?;
-            let metadata = serde_json::from_str::<Value>(&metadata_json).ok();
+        ProviderCommand::OnMemoryWrite { payload_stdin } => {
+            let (payload, provider) = short_lived_provider_payload(payload_stdin)?;
+            let action = payload_string(&payload, "action");
+            let target = payload_string(&payload, "target");
+            let content = payload_string(&payload, "content");
+            let metadata = match payload.get("metadata") {
+                Some(Value::Null) | None => None,
+                Some(value) => Some(value.clone()),
+            };
             provider.on_memory_write(&action, &target, &content, metadata)?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&json!({"queued": true}))?
             );
         }
-        ProviderCommand::OnSessionEnd {
-            state,
-            messages_json,
-        } => {
-            let provider = provider_from_state(state)?;
-            let messages = parse_messages_json(&messages_json)?;
+        ProviderCommand::OnSessionEnd { payload_stdin } => {
+            let (payload, provider) = short_lived_provider_payload(payload_stdin)?;
+            let messages = payload_messages(&payload)?;
             provider.on_session_end(&messages)?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&json!({"flushed": true}))?
             );
         }
-        ProviderCommand::OnPreCompress {
-            state,
-            messages_json,
-        } => {
-            let provider = provider_from_state(state)?;
-            let messages = parse_messages_json(&messages_json)?;
+        ProviderCommand::OnPreCompress { payload_stdin } => {
+            let (payload, provider) = short_lived_provider_payload(payload_stdin)?;
+            let messages = payload_messages(&payload)?;
             println!("{}", provider.on_pre_compress(&messages)?);
         }
-        ProviderCommand::OnDelegation {
-            state,
-            task,
-            result,
-            child_session_id,
-        } => {
-            let provider = provider_from_state(state)?;
+        ProviderCommand::OnDelegation { payload_stdin } => {
+            let (payload, provider) = short_lived_provider_payload(payload_stdin)?;
+            let task = payload_string(&payload, "task");
+            let result = payload_string(&payload, "result");
+            let child_session_id = payload_string(&payload, "child_session_id");
             let child = if child_session_id.is_empty() {
                 None
             } else {
@@ -256,62 +198,97 @@ fn run_provider(command: ProviderCommand) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn parse_messages_json(raw: &str) -> anyhow::Result<Vec<Value>> {
-    let value: Value = serde_json::from_str(raw).context("invalid --messages-json")?;
-    value
-        .as_array()
-        .cloned()
-        .ok_or_else(|| anyhow!("--messages-json must be a JSON array"))
+fn read_required_payload(enabled: bool) -> anyhow::Result<Value> {
+    if !enabled {
+        return Err(anyhow!(
+            "provider helper payloads must be supplied with --payload-stdin"
+        ));
+    }
+    let mut raw = String::new();
+    io::stdin()
+        .read_to_string(&mut raw)
+        .context("failed reading --payload-stdin")?;
+    if raw.trim().is_empty() {
+        return Ok(json!({}));
+    }
+    serde_json::from_str(&raw).context("invalid --payload-stdin JSON")
 }
 
-fn provider_from_state(args: StateArgs) -> anyhow::Result<EverOSProvider> {
-    let init = provider_init_from_state(args)?;
+// Provider subcommands are one-shot calls from the Python shim: payload in, one provider instance, response out.
+fn short_lived_provider_payload(payload_stdin: bool) -> anyhow::Result<(Value, EverOSProvider)> {
+    let payload = read_required_payload(payload_stdin)?;
+    let provider = short_lived_provider_from_payload(&payload)?;
+    Ok((payload, provider))
+}
+
+fn payload_string(payload: &Value, key: &str) -> String {
+    payload
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_default()
+}
+
+fn payload_value(payload: &Value, key: &str, fallback: Value) -> Value {
+    payload.get(key).cloned().unwrap_or(fallback)
+}
+
+fn payload_messages(payload: &Value) -> anyhow::Result<Vec<Value>> {
+    payload
+        .get("messages")
+        .unwrap_or(&Value::Array(Vec::new()))
+        .as_array()
+        .cloned()
+        .ok_or_else(|| anyhow!("payload messages must be a JSON array"))
+}
+
+fn short_lived_provider_from_payload(payload: &Value) -> anyhow::Result<EverOSProvider> {
+    let mut init = ProviderInit::default();
+    if let Some(state) = payload.get("state") {
+        apply_short_lived_provider_state(&mut init, state)?;
+    }
+    normalize_short_lived_provider_init(&mut init);
     Ok(EverOSProvider::initialize(init)?)
 }
 
-fn provider_init_from_state(args: StateArgs) -> anyhow::Result<ProviderInit> {
-    let mut init = ProviderInit {
-        session_id: args.session_id,
-        hermes_home: args.hermes_home,
-        platform: args.platform,
-        user_id: args.user_id,
-        user_name: args.user_name,
-        agent_identity: args.agent_identity,
-        agent_context: args.agent_context,
-    };
-    if let Some(raw) = args.state_json {
-        let value: Value = serde_json::from_str(&raw).context("invalid --state-json")?;
-        if let Some(text) = value.get("session_id").and_then(Value::as_str) {
-            init.session_id = text.to_string();
-        }
-        if let Some(text) = value
-            .get("hermes_home")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-        {
-            init.hermes_home = Some(PathBuf::from(text));
-        }
-        if let Some(text) = value.get("platform").and_then(Value::as_str) {
-            init.platform = text.to_string();
-        }
-        if let Some(text) = value.get("user_id").and_then(Value::as_str) {
-            init.user_id = text.to_string();
-        }
-        if let Some(text) = value.get("user_name").and_then(Value::as_str) {
-            init.user_name = text.to_string();
-        }
-        if let Some(text) = value.get("agent_identity").and_then(Value::as_str) {
-            init.agent_identity = text.to_string();
-        }
-        if let Some(text) = value.get("agent_context").and_then(Value::as_str) {
-            init.agent_context = text.to_string();
-        }
+fn apply_short_lived_provider_state(init: &mut ProviderInit, value: &Value) -> anyhow::Result<()> {
+    if !value.is_object() {
+        return Err(anyhow!("state must be a JSON object"));
     }
+    if let Some(text) = value.get("session_id").and_then(Value::as_str) {
+        init.session_id = text.to_string();
+    }
+    if let Some(text) = value
+        .get("hermes_home")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        init.hermes_home = Some(PathBuf::from(text));
+    }
+    if let Some(text) = value.get("platform").and_then(Value::as_str) {
+        init.platform = text.to_string();
+    }
+    if let Some(text) = value.get("user_id").and_then(Value::as_str) {
+        init.user_id = text.to_string();
+    }
+    if let Some(text) = value.get("user_name").and_then(Value::as_str) {
+        init.user_name = text.to_string();
+    }
+    if let Some(text) = value.get("agent_identity").and_then(Value::as_str) {
+        init.agent_identity = text.to_string();
+    }
+    if let Some(text) = value.get("agent_context").and_then(Value::as_str) {
+        init.agent_context = text.to_string();
+    }
+    normalize_short_lived_provider_init(init);
+    Ok(())
+}
+
+fn normalize_short_lived_provider_init(init: &mut ProviderInit) {
     if init.platform.trim().is_empty() {
         init.platform = "cli".to_string();
     }
     if init.agent_identity.trim().is_empty() {
         init.agent_identity = "default".to_string();
     }
-    Ok(init)
 }

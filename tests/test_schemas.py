@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 
@@ -99,3 +102,15 @@ def test_settings_validator_strict_timezone_and_llm_custom_setting():
         validate_settings_update({"timezone": "Tokyo"})
     with pytest.raises(ValueError, match="llm_custom_setting"):
         validate_settings_update({"llm_custom_setting": []})
+
+
+def test_settings_validation_contract_cases():
+    from everos_hermes.schemas import validate_settings_update
+
+    contract = json.loads((Path(__file__).parent / "contracts/settings_validation_cases.json").read_text())
+    for case in contract["cases"]:
+        if case["valid"]:
+            assert validate_settings_update(case["settings"], strict=case["strict"]) == case["normalized"], case["name"]
+        else:
+            with pytest.raises(ValueError, match=case["error_contains"]):
+                validate_settings_update(case["settings"], strict=case["strict"])
