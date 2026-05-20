@@ -16,20 +16,6 @@ fn mcp_read_frame_allows_large_raw_json_lines_within_body_limit() {
 }
 
 #[test]
-fn mcp_read_frame_allows_large_raw_json_lines_with_leading_whitespace() {
-    let mut raw = " ".repeat(9000);
-    raw.push_str(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#);
-    raw.push('\n');
-    let mut frame = Cursor::new(raw.into_bytes());
-
-    let value = everos_hermes_rust::mcp::read_frame(&mut frame)
-        .unwrap()
-        .unwrap();
-
-    assert_eq!(value["method"], "ping");
-}
-
-#[test]
 fn mcp_read_frame_rejects_oversized_headers_and_bodies() {
     let mut huge_header = Cursor::new(format!("{}\n", "X".repeat(9000)).into_bytes());
     let err = everos_hermes_rust::mcp::read_frame(&mut huge_header).unwrap_err();

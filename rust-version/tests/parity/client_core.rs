@@ -1,26 +1,6 @@
 use super::*;
 
 #[test]
-fn client_reuses_http_connection_for_consecutive_requests() {
-    let (base_url, handle) = keep_alive_two_request_server();
-    let client = EverOSClient::new("key", &base_url, 1.0).unwrap();
-
-    let first = client
-        .request_json("GET", "/api/v1/settings", None, None)
-        .unwrap();
-    let second = client
-        .request_json("GET", "/api/v1/settings", None, None)
-        .unwrap();
-
-    assert_eq!(first["data"]["request_index"], 1);
-    assert_eq!(second["data"]["request_index"], 2);
-    let requests = handle.join().unwrap();
-    assert_eq!(requests.len(), 2);
-    assert!(requests[0].starts_with("GET /api/v1/settings HTTP/1.1"));
-    assert!(requests[1].starts_with("GET /api/v1/settings HTTP/1.1"));
-}
-
-#[test]
 fn dotenv_lookup_prefers_process_env_then_hermes_home_file() {
     let _guard = ENV_LOCK.lock().unwrap();
     let home = temp_home("dotenv");

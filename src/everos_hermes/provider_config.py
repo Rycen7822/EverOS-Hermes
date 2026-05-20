@@ -112,26 +112,11 @@ def _normalize_config(config: dict[str, Any]) -> dict[str, Any]:
         "agent_summary_after_turn",
     ):
         out[key] = _as_bool(out.get(key), bool(_DEFAULT_CONFIG[key]))
-    try:
-        out["top_k"] = max(1, min(20, int(out.get("top_k", 5))))
-    except Exception:
-        out["top_k"] = 5
-    try:
-        out["timeout"] = max(1.0, min(60.0, float(out.get("timeout", 10.0))))
-    except Exception:
-        out["timeout"] = 10.0
-    try:
-        out["agentic_timeout"] = max(1.0, min(120.0, float(out.get("agentic_timeout", 60.0))))
-    except Exception:
-        out["agentic_timeout"] = 60.0
-    try:
-        out["agent_visibility_timeout"] = max(1.0, min(120.0, float(out.get("agent_visibility_timeout", 30.0))))
-    except Exception:
-        out["agent_visibility_timeout"] = 30.0
-    try:
-        out["max_context_items"] = max(1, min(50, int(out.get("max_context_items", 8))))
-    except Exception:
-        out["max_context_items"] = 8
+    out["top_k"] = _clamped(out.get("top_k", 5), 5, 1, 20, int)
+    out["timeout"] = _clamped(out.get("timeout", 10.0), 10.0, 1.0, 60.0, float)
+    out["agentic_timeout"] = _clamped(out.get("agentic_timeout", 60.0), 60.0, 1.0, 120.0, float)
+    out["agent_visibility_timeout"] = _clamped(out.get("agent_visibility_timeout", 30.0), 30.0, 1.0, 120.0, float)
+    out["max_context_items"] = _clamped(out.get("max_context_items", 8), 8, 1, 50, int)
     for key, low, high in (
         ("max_context_chars", 1000, 50000),
         ("recent_raw_top_k", 0, 20),
@@ -150,14 +135,8 @@ def _normalize_config(config: dict[str, Any]) -> dict[str, Any]:
         ("agent_visibility_get_page_size", 1, 100),
         ("agent_visibility_retry_flush_attempts", 1, 5),
     ):
-        try:
-            out[key] = max(low, min(high, int(out.get(key, _DEFAULT_CONFIG[key]))))
-        except Exception:
-            out[key] = _DEFAULT_CONFIG[key]
-    try:
-        out["min_score"] = max(0.0, min(1.0, float(out.get("min_score", 0.0))))
-    except Exception:
-        out["min_score"] = 0.0
+        out[key] = _clamped(out.get(key, _DEFAULT_CONFIG[key]), _DEFAULT_CONFIG[key], low, high, int)
+    out["min_score"] = _clamped(out.get("min_score", 0.0), 0.0, 0.0, 1.0, float)
     method = str(out.get("search_method", "hybrid")).strip().lower()
     out["search_method"] = method if method in {"keyword", "vector", "hybrid", "agentic"} else "hybrid"
     memory_types = out.get("memory_types")
@@ -195,3 +174,10 @@ def _as_bool(value: Any, default: bool) -> bool:
         if lowered in ("0", "false", "no", "n", "off"):
             return False
     return default
+
+
+def _clamped(value: Any, default: Any, low: Any, high: Any, cast: Any) -> Any:
+    try:
+        return max(low, min(high, cast(value)))
+    except Exception:
+        return default

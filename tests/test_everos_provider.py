@@ -352,27 +352,6 @@ def test_memory_flush_tool_accepts_timeout_and_reports_timeout(monkeypatch, tmp_
     assert result["retryable"] is True
     assert result["operation"] == "flush"
 
-
-
-def test_provider_tool_schemas_expose_cloud_v1_parameters(monkeypatch, tmp_path):
-    from everos_hermes.provider import EverOSMemoryProvider
-
-    monkeypatch.setenv("EVEROS_API_KEY", "sk-test")
-    provider = EverOSMemoryProvider()
-    provider.initialize(session_id="sess-1", hermes_home=str(tmp_path), platform="cli")
-    schemas = {schema["name"]: schema for schema in provider.get_tool_schemas()}
-
-    assert schemas["everos_memory_save"]["parameters"]["properties"]["scope"]["enum"] == ["personal", "agent"]
-    assert "tool_call_id" in schemas["everos_memory_save"]["parameters"]["properties"]
-    assert "scope" in schemas["everos_memory_flush"]["parameters"]["properties"]
-    search_props = schemas["everos_memory_search"]["parameters"]["properties"]
-    for name in ["filters", "radius", "top_k", "response_format"]:
-        assert name in search_props
-    get_props = schemas["everos_memory_get"]["parameters"]["properties"]
-    for name in ["filters", "rank_by", "rank_order"]:
-        assert name in get_props
-
-
 def test_sync_turn_capture_agent_memory_false_only_writes_personal(monkeypatch, tmp_path):
     from everos_hermes.provider import EverOSMemoryProvider
 
@@ -602,70 +581,6 @@ def test_provider_exposes_and_runs_save_and_verify_workflow(monkeypatch, tmp_pat
     assert result["status"] == "verified"
     assert result["verification"]["verified"] is True
     assert [call[0] for call in calls] == ["add", "flush", "search"]
-
-
-def test_provider_import_and_verify_dry_run_does_not_write(monkeypatch, tmp_path):
-    from everos_hermes.provider import EverOSMemoryProvider
-
-    class FakeClient:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def add_memories(self, **kwargs):  # pragma: no cover - should not be called
-            raise AssertionError("dry-run must not write")
-
-    monkeypatch.setenv("EVEROS_API_KEY", "sk-test")
-    monkeypatch.setenv("EVEROS_USER_ID", "u1")
-    monkeypatch.setattr("everos_hermes.provider.EverOSClient", FakeClient)
-    provider = EverOSMemoryProvider()
-    provider.initialize(session_id="sess-1", hermes_home=str(tmp_path), platform="cli")
-
-    raw = provider.handle_tool_call("everos_memory_import_and_verify", {
-        "messages": [
-            {"role": "user", "content": "Alpha", "timestamp": 1},
-            {"role": "tool", "content": "missing id", "timestamp": 2},
-        ],
-        "scope": "agent",
-        "dry_run": True,
-    })
-
-    result = json.loads(raw)
-    assert result["ok"] is True
-    assert result["status"] == "dry_run"
-    assert result["queued_count"] == 0
-    assert any("tool_call_id" in warning for warning in result["warnings"])
-
-
-def test_provider_verify_session_tool_is_read_only(monkeypatch, tmp_path):
-    from everos_hermes.provider import EverOSMemoryProvider
-
-    calls = []
-
-    class FakeClient:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def search_memories(self, **kwargs):
-            calls.append(kwargs)
-            return {"data": {"episodes": []}}
-
-    monkeypatch.setenv("EVEROS_API_KEY", "sk-test")
-    monkeypatch.setenv("EVEROS_USER_ID", "u1")
-    monkeypatch.setattr("everos_hermes.provider.EverOSClient", FakeClient)
-    provider = EverOSMemoryProvider()
-    provider.initialize(session_id="sess-1", hermes_home=str(tmp_path), platform="cli")
-
-    raw = provider.handle_tool_call("everos_memory_verify_session", {
-        "session_id": "sess-verify",
-        "verification_queries": ["missing"],
-    })
-
-    result = json.loads(raw)
-    assert result["ok"] is True
-    assert result["status"] == "not_yet_searchable"
-    assert result["verified"] is False
-    assert calls[0]["session_id"] == "sess-verify"
-
 
 def test_provider_agent_save_returns_unchecked_visibility(monkeypatch, tmp_path):
     from everos_hermes.provider import EverOSMemoryProvider

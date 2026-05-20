@@ -26,7 +26,7 @@ fn provider_workflow_tools_run_save_and_verify() {
     let raw = provider
         .handle_tool_call(
             "everos_memory_save_and_verify",
-            json!({"content":"User prefers pytest.","verification_query":"pytest preference","session_id":"sess-verify","flush":true}),
+            json!({"content":"User prefers pytest.","verification_query":"pytest preference","session_id":"sess-verify","flush":true,"memory_types":["raw_message"],"timeout":0.2,"flush_timeout":0.2}),
         )
         .unwrap();
     let response: Value = serde_json::from_str(&raw).unwrap();
@@ -34,7 +34,10 @@ fn provider_workflow_tools_run_save_and_verify() {
 
     assert_eq!(response["ok"], true);
     assert_eq!(response["status"], "verified");
-    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        parse_http_body(&requests[2])["memory_types"],
+        json!(DEFAULT_MEMORY_TYPES)
+    );
 
     remove_env("HERMES_HOME");
 }

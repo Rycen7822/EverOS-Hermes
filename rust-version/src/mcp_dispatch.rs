@@ -51,9 +51,9 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
                     flush_timeout,
                     2,
                 ) {
-                    Ok((response, _attempt_count)) => {
-                        Some(workflows::tool_flush_result_payload(&response))
-                    }
+                    Ok((response, _attempt_count)) => Some(
+                        workflows::tool_flush_result_payload_with_attempt(&response, None),
+                    ),
                     Err(err @ EverOSError::Timeout { .. }) => {
                         Some(workflows::tool_timeout_payload("flush", &err))
                     }

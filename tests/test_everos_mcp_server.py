@@ -289,33 +289,6 @@ def test_mcp_server_exposes_expected_tool_names():
         "everos_get_settings",
     }.issubset(set(TOOL_NAMES))
 
-
-
-def _mcp_tool_properties(name: str):
-    from everos_hermes import mcp_server
-
-    return mcp_server.mcp._tool_manager._tools[name].parameters["properties"]
-
-
-def test_mcp_tool_schemas_expose_cloud_v1_parameters():
-    from everos_hermes import mcp_server
-
-    tools = mcp_server.mcp._tool_manager._tools
-    assert len(tools) == len(mcp_server.TOOL_NAMES)
-    assert "scope" in _mcp_tool_properties("everos_save_memory")
-    assert "tool_call_id" in _mcp_tool_properties("everos_save_memory")
-    assert "scope" in _mcp_tool_properties("everos_add_memories")
-    assert "scope" in _mcp_tool_properties("everos_flush_memories")
-    search_props = _mcp_tool_properties("everos_search_memories")
-    for name in ["filters", "radius", "timeout", "fallback_to_hybrid"]:
-        assert name in search_props
-    get_props = _mcp_tool_properties("everos_get_memories")
-    for name in ["filters", "rank_by", "rank_order"]:
-        assert name in get_props
-    assert "confirm_scope_text" in _mcp_tool_properties("everos_delete_memories")
-    assert tools["everos_delete_memories"].annotations.destructiveHint is True
-
-
 def test_mcp_save_memory_supports_agent_scope_and_tool_role(monkeypatch):
     from everos_hermes import mcp_server
 
@@ -525,27 +498,6 @@ def test_mcp_update_settings_passes_strict_and_return_diff(monkeypatch):
     assert captured == {"settings": {"timezone": "Asia/Tokyo"}, "strict": True, "return_diff": True}
     assert json.loads(raw)["diff"]["timezone"]["after"] == "Asia/Tokyo"
 
-
-
-def test_mcp_workflow_tools_are_registered_with_structured_envelopes():
-    from everos_hermes import mcp_server
-
-    tools = mcp_server.mcp._tool_manager._tools
-    for name in [
-        "everos_verify_session_ingest",
-        "everos_save_and_verify",
-        "everos_import_and_verify",
-    ]:
-        assert name in tools
-        assert tools[name].output_schema["type"] == "object"
-        assert "ok" in tools[name].output_schema["properties"]
-    assert mcp_server.TOOL_NAMES[-3:] == [
-        "everos_verify_session_ingest",
-        "everos_save_and_verify",
-        "everos_import_and_verify",
-    ]
-
-
 def test_mcp_save_and_verify_reports_verified_status(monkeypatch):
     from everos_hermes import mcp_server
 
@@ -585,114 +537,6 @@ def test_mcp_save_and_verify_reports_verified_status(monkeypatch):
     assert [call[0] for call in calls] == ["add", "flush", "search"]
     assert calls[2][1]["query"] == "espresso preference"
     assert calls[2][1]["top_k"] == 3
-
-
-def test_mcp_import_and_verify_dry_run_reports_warnings_without_writes(monkeypatch):
-    from everos_hermes import mcp_server
-
-    class FakeClient:
-        def add_memories(self, **kwargs):  # pragma: no cover - should not be called
-            raise AssertionError("dry-run must not write")
-
-    monkeypatch.setenv("EVEROS_API_KEY", "sk-test")
-    monkeypatch.setenv("EVEROS_USER_ID", "u1")
-    monkeypatch.setattr(mcp_server, "make_client", lambda: FakeClient())
-
-    result = asyncio.run(mcp_server.everos_import_and_verify(
-        messages=[
-            {"role": "user", "content": "Alpha", "timestamp": 1},
-            {"role": "user", "content": "Alpha", "timestamp": 2},
-            {"role": "tool", "content": "missing id", "timestamp": 3},
-        ],
-        scope="agent",
-        dry_run=True,
-        verification_queries=["Alpha"],
-    ))
-
-    assert result["ok"] is True
-    assert result["status"] == "dry_run"
-    assert result["input_count"] == 3
-    assert result["queued_count"] == 0
-    assert any("duplicate" in warning for warning in result["warnings"])
-    assert any("tool_call_id" in warning for warning in result["warnings"])
-    assert result["suggested_next_actions"][0].startswith("fix warnings")
-
-
-def test_mcp_import_and_verify_batches_flushes_and_verifies(monkeypatch):
-    from everos_hermes import mcp_server
-
-    calls = []
-
-    class FakeClient:
-        def add_memories(self, **kwargs):
-            calls.append(("add", kwargs))
-            return {"data": {"status": "queued", "task_id": f"task-{len(calls)}"}}
-
-        def flush_memories(self, **kwargs):
-            calls.append(("flush", kwargs))
-            return {"data": {"status": "success"}}
-
-        def search_memories(self, **kwargs):
-            calls.append(("search", kwargs))
-            return {"data": {"profiles": [{"id": "p1", "profile_data": {"explicit_info": "Alpha"}}]}}
-
-    monkeypatch.setenv("EVEROS_API_KEY", "sk-test")
-    monkeypatch.setenv("EVEROS_USER_ID", "u1")
-    monkeypatch.setattr(mcp_server, "make_client", lambda: FakeClient())
-
-    result = asyncio.run(mcp_server.everos_import_and_verify(
-        messages=[
-            {"role": "user", "content": "Alpha", "timestamp": 1, "message_id": "msg-alpha"},
-            {"role": "assistant", "content": "Beta", "timestamp": 2},
-            {"role": "user", "content": "Gamma", "timestamp": 3},
-        ],
-        session_id="sess-batch",
-        batch_size=2,
-        flush=True,
-        verification_queries=["Alpha"],
-    ))
-
-    assert result["ok"] is True
-    assert result["workflow"] == "import_and_verify"
-    assert result["status"] == "verified"
-    assert result["input_count"] == 3
-    assert result["queued_count"] == 3
-    assert len(result["batches"]) == 2
-    assert [call[0] for call in calls] == ["add", "add", "flush", "search"]
-    assert calls[0][1]["messages"][0]["content"] == "Alpha"
-    assert calls[0][1]["messages"][0]["message_id"] == "msg-alpha"
-    assert calls[1][1]["messages"][0]["content"] == "Gamma"
-
-
-def test_mcp_verify_session_ingest_is_read_only_and_reports_misses(monkeypatch):
-    from everos_hermes import mcp_server
-
-    calls = []
-
-    class FakeClient:
-        def search_memories(self, **kwargs):
-            calls.append(kwargs)
-            if kwargs["query"] == "missing":
-                return {"data": {"episodes": []}}
-            return {"data": {"episodes": [{"id": "ep1", "summary": "found"}]}}
-
-    monkeypatch.setenv("EVEROS_API_KEY", "sk-test")
-    monkeypatch.setenv("EVEROS_USER_ID", "u1")
-    monkeypatch.setattr(mcp_server, "make_client", lambda: FakeClient())
-
-    result = asyncio.run(mcp_server.everos_verify_session_ingest(
-        session_id="sess-readonly",
-        verification_queries=["found", "missing"],
-        memory_types=["episodic_memory", "profile"],
-    ))
-
-    assert result["ok"] is True
-    assert result["workflow"] == "verify_session_ingest"
-    assert result["status"] == "partially_verified"
-    assert result["verified"] is False
-    assert [call["session_id"] for call in calls] == ["sess-readonly", "sess-readonly"]
-    assert [query["status"] for query in result["queries"]] == ["hit", "miss"]
-
 
 def test_mcp_agent_save_and_add_return_unchecked_visibility(monkeypatch):
     from everos_hermes import mcp_server

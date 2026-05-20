@@ -318,8 +318,6 @@ def save_and_verify(
                 scope=resolved_scope,
                 timeout=flush_timeout,
             )
-        except EverOSTimeoutError as exc:
-            flush_error = exc
         except Exception as exc:
             flush_error = exc
     save_payload = save_result_payload(

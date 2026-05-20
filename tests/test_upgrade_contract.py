@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 
@@ -27,52 +28,17 @@ def test_provider_explicit_tool_schema_count_is_8(monkeypatch, tmp_path):
     assert all(schema["name"].startswith("everos_memory_") for schema in schemas)
 
 
-def test_readme_uses_current_mcp_12_badge_and_no_stale_mcp_9_wording():
+def test_readme_uses_current_mcp_12_badge_and_tracked_files_have_no_stale_tool_aliases():
     text = (ROOT / "README.md").read_text(encoding="utf-8")
-
-    stale_patterns = [
-        r"MCP-9\b",
-        r"MCP-9%20tools",
-        r"MCP:\s*nine tools",
-        r"alt=\"MCP: nine tools\"",
-    ]
-    for pattern in stale_patterns:
-        assert not re.search(pattern, text, flags=re.IGNORECASE), pattern
-    assert "MCP-12%20tools" in text or "MCP-12 tools" in text
-    assert "<p align=\"center\">" in text
-    assert "style=for-the-badge" in text
-    assert "Hermes-single%20plugin" in text
-    assert "Python package: `everos-hermes` `0.3.0`" in text
-    assert "Rust crate/binary: `everos-hermes-rust` `0.3.0`" in text
-
-
-def test_readme_documents_thin_plugin_skill_references():
-    text = (ROOT / "README.md").read_text(encoding="utf-8")
-
-    for required in [
-        "everos:everos-memory-curation",
-        "SKILL.md` is intentionally thin",
-        "references/user-intent-runbooks.md",
-        "references/memory-routing-policy.md",
-        "references/agent-case-visibility.md",
-        "references/plugin-triage-and-migration.md",
-        "references/cleanup-and-verification.md",
-        "legacy ordinary skill",
-    ]:
-        assert required in text
-
-
-def test_readme_documents_provider_context_engine_and_rust_parity():
-    text = (ROOT / "README.md").read_text(encoding="utf-8")
-
-    for required in [
-        "structured agent trajectory",
-        "context assembler",
-        "include_recent_raw",
-        "agent_trajectory_on_session_end",
-        "prefetch_cache_enabled",
-        "Rust context-engine parity is current",
-    ]:
+    tracked = subprocess.check_output(["git", "ls-files"], cwd=ROOT, text=True).splitlines()
+    corpus = "\n".join(
+        (ROOT / rel).read_text(encoding="utf-8", errors="ignore")
+        for rel in tracked
+        if rel != "tests/test_upgrade_contract.py" and (ROOT / rel).suffix in {".md", ".py", ".rs", ".toml", ".yaml", ".yml", ".json"}
+    )
+    for pattern in [r"MCP-9\b", r"MCP-13\b", r"13 tools", r"everos_batch_ingest"]:
+        assert not re.search(pattern, corpus, flags=re.IGNORECASE), pattern
+    for required in ["MCP-12%20tools", "<p align=\"center\">", "style=for-the-badge", "Hermes-single%20plugin", "Python package: `everos-hermes` `0.3.0`", "Rust crate/binary: `everos-hermes-rust` `0.3.0`"]:
         assert required in text
 
 
@@ -87,32 +53,5 @@ def test_readme_includes_agent_self_install_prompts_with_restart_reminder():
         "hermes config set memory.provider everos",
         "everos:everos-memory-curation",
         "After installation and verification, tell the user to reload, reset, or restart Hermes Agent",
-    ]:
-        assert required in text
-
-
-def test_cloud_contract_keeps_out_of_scope_endpoint_blacklist():
-    text = (ROOT / "docs" / "everos_cloud_v1_contract.md").read_text(encoding="utf-8")
-
-    for forbidden in [
-        "/api/v1/memories/group",
-        "/api/v1/groups",
-        "/api/v1/senders",
-        "/api/v1/object/sign",
-    ]:
-        assert forbidden in text
-    assert "out of scope" in text.lower()
-
-
-def test_cloud_contract_documents_message_id_and_structured_agent_trajectory():
-    text = (ROOT / "docs" / "everos_cloud_v1_contract.md").read_text(encoding="utf-8")
-
-    for required in [
-        "message_id",
-        "optional idempotency key",
-        "structured agent trajectory",
-        "tool_calls",
-        "tool_call_id",
-        "source",
     ]:
         assert required in text

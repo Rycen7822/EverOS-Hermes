@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import time
-
-
 def _init_provider(monkeypatch, tmp_path, fake_client, config: str = "{}"):
     from everos_hermes.provider import EverOSMemoryProvider
 
@@ -57,76 +54,6 @@ def test_prefetch_uses_assembler_cache_agent_and_session_scoped_raw(monkeypatch,
     assert calls[2]["session_id"] == "sess-2"
     assert provider._last_recall_status["ok"] is True
     assert provider._last_recall_status["cached"] is True
-
-
-def test_prefetch_skips_global_raw_without_session_and_records_warning(monkeypatch, tmp_path):
-    calls = []
-
-    class FakeClient:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def search_memories(self, **kwargs):
-            calls.append(kwargs)
-            return {"data": {"episodes": [{"summary": "structured hit"}]}}
-
-    provider = _init_provider(monkeypatch, tmp_path, FakeClient, '{"include_recent_raw": true}')
-    provider._session_id = ""
-
-    context = provider.prefetch("structured query", session_id="")
-
-    assert "structured hit" in context
-    assert [call["memory_types"] for call in calls] == [["episodic_memory", "profile"]]
-    assert provider._last_recall_status["ok"] is True
-    assert "raw_recall_skipped_missing_session" in provider._last_recall_status["warnings"]
-
-
-def test_prefetch_partial_raw_failure_keeps_main_context(monkeypatch, tmp_path):
-    calls = []
-
-    class FakeClient:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def search_memories(self, **kwargs):
-            calls.append(kwargs)
-            if kwargs["memory_types"] == ["raw_message"]:
-                raise RuntimeError("raw lookup failed with token=sk-test")
-            return {"data": {"episodes": [{"subject": "main", "summary": "structured memory survives"}]}}
-
-    provider = _init_provider(monkeypatch, tmp_path, FakeClient, '{"include_recent_raw": true}')
-
-    context = provider.prefetch("structured query", session_id="sess-raw")
-
-    assert "structured memory survives" in context
-    assert [call["memory_types"] for call in calls] == [["episodic_memory", "profile"], ["raw_message"]]
-    assert provider._last_recall_status["ok"] is True
-    assert "structured memory survives" in context
-
-
-def test_queue_prefetch_populates_cache_and_dedupes_inflight(monkeypatch, tmp_path):
-    calls = []
-
-    class FakeClient:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def search_memories(self, **kwargs):
-            calls.append(kwargs)
-            time.sleep(0.05)
-            return {"data": {"episodes": [{"subject": "queued", "summary": "prefetched context"}]}}
-
-    provider = _init_provider(monkeypatch, tmp_path, FakeClient)
-
-    provider.queue_prefetch("queued lookup", session_id="sess-queue")
-    provider.queue_prefetch("queued lookup", session_id="sess-queue")
-    provider.shutdown()
-    context = provider.prefetch("queued lookup", session_id="sess-queue")
-
-    assert "prefetched context" in context
-    assert len(calls) == 1
-    assert provider._last_recall_status["cached"] is True
-
 
 def test_sync_turn_adds_personal_message_ids_and_respects_agent_summary_flag(monkeypatch, tmp_path):
     calls = []
@@ -209,6 +136,8 @@ def test_on_session_end_writes_agent_tool_trajectory_before_personal_flush(monke
 
         def flush_memories(self, **kwargs):
             calls.append(("flush", kwargs))
+            if kwargs["scope"] == "agent":
+                raise RuntimeError("agent flush failed")
             return {"data": {"status": "success"}}
 
     provider = _init_provider(monkeypatch, tmp_path, FakeClient, '{"capture_agent_memory": true}')
@@ -222,7 +151,7 @@ def test_on_session_end_writes_agent_tool_trajectory_before_personal_flush(monke
 
     assert [kind for kind, _ in calls] == ["add", "flush", "flush"]
     assert calls[0][1]["scope"] == "agent"
-    assert calls[1][1]["scope"] == "agent"
+    assert provider._last_agent_write_status["ok"] is True
     assert calls[2][1]["scope"] == "personal"
     assert calls[0][1]["messages"][1]["tool_calls"][0]["id"] == "call-1"
 

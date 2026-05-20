@@ -214,94 +214,109 @@ fn normalize_config_from_value(config: &mut ProviderConfig, value: &Value) {
             *slot = as_bool(Some(value), *slot);
         }
     }
-    if let Some(value) = map.get("top_k").and_then(Value::as_u64) {
-        config.top_k = value.clamp(1, 20);
-    }
-    if let Some(value) = map.get("max_context_items").and_then(Value::as_u64) {
-        config.max_context_items = value.clamp(1, 50);
-    }
-    if let Some(value) = map.get("timeout").and_then(Value::as_f64) {
-        config.timeout = value.clamp(1.0, 60.0);
-    }
-    if let Some(value) = map.get("agentic_timeout").and_then(Value::as_f64) {
-        config.agentic_timeout = value.clamp(1.0, 120.0);
-    }
-    if let Some(value) = map.get("agent_visibility_timeout").and_then(Value::as_f64) {
-        config.agent_visibility_timeout = value.clamp(1.0, 120.0);
-    }
-    if let Some(value) = map.get("agent_visibility_top_k").and_then(Value::as_u64) {
-        config.agent_visibility_top_k = (value as usize).clamp(1, 20);
-    }
-    if let Some(value) = map
-        .get("agent_visibility_get_page_size")
-        .and_then(Value::as_u64)
-    {
-        config.agent_visibility_get_page_size = (value as usize).clamp(1, 100);
-    }
-    if let Some(value) = map
-        .get("agent_visibility_retry_flush_attempts")
-        .and_then(Value::as_u64)
-    {
-        config.agent_visibility_retry_flush_attempts = (value as usize).clamp(1, 5);
-    }
-    if let Some(value) = map.get("max_context_chars").and_then(Value::as_u64) {
-        config.max_context_chars = (value as usize).clamp(1_000, 50_000);
-    }
-    if let Some(value) = map.get("recent_raw_top_k").and_then(Value::as_u64) {
-        config.recent_raw_top_k = (value as usize).clamp(0, 20);
-    }
-    if let Some(value) = map.get("profile_max_items").and_then(Value::as_u64) {
-        config.profile_max_items = (value as usize).clamp(0, 20);
-    }
-    if let Some(value) = map.get("agent_skills_max_items").and_then(Value::as_u64) {
-        config.agent_skills_max_items = (value as usize).clamp(0, 20);
-    }
-    if let Some(value) = map.get("agent_cases_max_items").and_then(Value::as_u64) {
-        config.agent_cases_max_items = (value as usize).clamp(0, 20);
-    }
-    if let Some(value) = map.get("episodic_max_items").and_then(Value::as_u64) {
-        config.episodic_max_items = (value as usize).clamp(0, 20);
-    }
-    if let Some(value) = map.get("min_score").and_then(Value::as_f64) {
-        config.min_score = value.clamp(0.0, 1.0);
-    }
-    if let Some(value) = map.get("min_recall_query_chars").and_then(Value::as_u64) {
-        config.min_recall_query_chars = (value as usize).clamp(0, 200);
-    }
-    if let Some(value) = map
-        .get("prefetch_cache_ttl_seconds")
-        .and_then(Value::as_u64)
-    {
-        config.prefetch_cache_ttl_seconds = value.clamp(1, 600);
-    }
-    if let Some(value) = map.get("agent_max_messages").and_then(Value::as_u64) {
-        config.agent_max_messages = (value as usize).clamp(1, 200);
-    }
-    if let Some(value) = map.get("agent_max_message_chars").and_then(Value::as_u64) {
-        config.agent_max_message_chars = (value as usize).clamp(100, 20_000);
-    }
-    if let Some(value) = map
-        .get("agent_max_tool_result_chars")
-        .and_then(Value::as_u64)
-    {
-        config.agent_max_tool_result_chars = (value as usize).clamp(100, 20_000);
-    }
-    if let Some(value) = map.get("agent_max_payload_chars").and_then(Value::as_u64) {
-        config.agent_max_payload_chars = (value as usize).clamp(1_000, 200_000);
-    }
-    if let Some(value) = map.get("agent_dedupe_entries").and_then(Value::as_u64) {
-        config.agent_dedupe_entries = (value as usize).clamp(16, 4_096);
-    }
+    let c = &mut *config;
+    let set_u64 = |key: &str, slot: &mut u64, low: u64, high: u64| {
+        if let Some(value) = map.get(key).and_then(Value::as_u64) {
+            *slot = value.clamp(low, high);
+        }
+    };
+    set_u64("top_k", &mut c.top_k, 1, 20);
+    set_u64("max_context_items", &mut c.max_context_items, 1, 50);
+    set_u64(
+        "prefetch_cache_ttl_seconds",
+        &mut c.prefetch_cache_ttl_seconds,
+        1,
+        600,
+    );
+    let set_f64 = |key: &str, slot: &mut f64, low: f64, high: f64| {
+        if let Some(value) = map.get(key).and_then(Value::as_f64) {
+            *slot = value.clamp(low, high);
+        }
+    };
+    set_f64("timeout", &mut c.timeout, 1.0, 60.0);
+    set_f64("agentic_timeout", &mut c.agentic_timeout, 1.0, 120.0);
+    set_f64(
+        "agent_visibility_timeout",
+        &mut c.agent_visibility_timeout,
+        1.0,
+        120.0,
+    );
+    set_f64("min_score", &mut c.min_score, 0.0, 1.0);
+    let set_usize = |key: &str, slot: &mut usize, low: usize, high: usize| {
+        if let Some(value) = map.get(key).and_then(Value::as_u64) {
+            *slot = (value as usize).clamp(low, high);
+        }
+    };
+    set_usize(
+        "agent_visibility_top_k",
+        &mut c.agent_visibility_top_k,
+        1,
+        20,
+    );
+    set_usize(
+        "agent_visibility_get_page_size",
+        &mut c.agent_visibility_get_page_size,
+        1,
+        100,
+    );
+    set_usize(
+        "agent_visibility_retry_flush_attempts",
+        &mut c.agent_visibility_retry_flush_attempts,
+        1,
+        5,
+    );
+    set_usize("max_context_chars", &mut c.max_context_chars, 1_000, 50_000);
+    set_usize("recent_raw_top_k", &mut c.recent_raw_top_k, 0, 20);
+    set_usize("profile_max_items", &mut c.profile_max_items, 0, 20);
+    set_usize(
+        "agent_skills_max_items",
+        &mut c.agent_skills_max_items,
+        0,
+        20,
+    );
+    set_usize("agent_cases_max_items", &mut c.agent_cases_max_items, 0, 20);
+    set_usize("episodic_max_items", &mut c.episodic_max_items, 0, 20);
+    set_usize(
+        "min_recall_query_chars",
+        &mut c.min_recall_query_chars,
+        0,
+        200,
+    );
+    set_usize("agent_max_messages", &mut c.agent_max_messages, 1, 200);
+    set_usize(
+        "agent_max_message_chars",
+        &mut c.agent_max_message_chars,
+        100,
+        20_000,
+    );
+    set_usize(
+        "agent_max_tool_result_chars",
+        &mut c.agent_max_tool_result_chars,
+        100,
+        20_000,
+    );
+    set_usize(
+        "agent_max_payload_chars",
+        &mut c.agent_max_payload_chars,
+        1_000,
+        200_000,
+    );
+    set_usize(
+        "agent_dedupe_entries",
+        &mut c.agent_dedupe_entries,
+        16,
+        4_096,
+    );
     if let Some(mode) = map.get("agent_capture_mode").and_then(Value::as_str) {
         let mode = mode.trim().to_ascii_lowercase();
         if matches!(mode.as_str(), "parallel" | "agent_only" | "off") {
-            config.agent_capture_mode = mode;
+            c.agent_capture_mode = mode;
         }
     }
     if let Some(method) = map.get("search_method").and_then(Value::as_str) {
         let method = method.trim().to_ascii_lowercase();
         if matches!(method.as_str(), "keyword" | "vector" | "hybrid" | "agentic") {
-            config.search_method = method;
+            c.search_method = method;
         }
     }
     if let Some(types) = map.get("memory_types") {
@@ -321,17 +336,17 @@ fn normalize_config_from_value(config: &mut ProviderConfig, value: &Value) {
             Vec::new()
         };
         if !parsed.is_empty() {
-            config.memory_types = parsed;
+            c.memory_types = parsed;
         }
     }
     if let Some(types) = map.get("agent_memory_types") {
         let parsed = parse_string_list(types);
         if !parsed.is_empty() {
-            config.agent_memory_types = parsed;
+            c.agent_memory_types = parsed;
         }
     }
     if let Some(queries) = map.get("agent_visibility_queries") {
-        config.agent_visibility_queries = parse_string_list(queries);
+        c.agent_visibility_queries = parse_string_list(queries);
     }
 }
 
@@ -343,7 +358,6 @@ pub(crate) fn as_bool(value: Option<&Value>, default: bool) -> bool {
             "0" | "false" | "no" | "n" | "off" => false,
             _ => default,
         },
-        Some(Value::Number(number)) => number.as_i64().map(|value| value != 0).unwrap_or(default),
         _ => default,
     }
 }

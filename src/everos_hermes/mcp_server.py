@@ -119,8 +119,6 @@ async def everos_save_memory(
                 scope=resolved_scope,
                 timeout=flush_timeout,
             )
-        except EverOSTimeoutError as exc:
-            flush_error = exc
         except Exception as exc:
             flush_error = exc
     payload = _save_result_payload(

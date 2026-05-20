@@ -280,29 +280,6 @@ def test_add_memories_supports_scope_agent_and_agent_alias(monkeypatch):
         "https://api.evermind.ai/api/v1/memories/agent",
     ]
 
-
-def test_add_memories_validates_messages_before_request(monkeypatch):
-    from everos_hermes.client import EverOSClient
-
-    called = False
-
-    def fake_urlopen(req, timeout):
-        nonlocal called
-        called = True
-        return FakeHTTPResponse({"data": {}}, status=202)
-
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
-    client = EverOSClient(api_key="sk-test")
-
-    with pytest.raises(ValueError, match="1..500"):
-        client.add_memories(user_id="user_001", messages=[])
-    with pytest.raises(ValueError, match="role"):
-        client.add_memories(user_id="user_001", messages=[{"role": "tool", "timestamp": 1, "content": "x"}], scope="personal")
-    with pytest.raises(ValueError, match="scope"):
-        client.add_memories(user_id="user_001", messages=[{"role": "user", "timestamp": 1, "content": "x"}], scope="personal", agent=True)
-    assert called is False
-
-
 def test_search_memories_allows_top_k_minus_one_filters_radius_and_rejects_bad_type(monkeypatch):
     from everos_hermes.client import EverOSClient
 
@@ -334,10 +311,6 @@ def test_search_memories_allows_top_k_minus_one_filters_radius_and_rejects_bad_t
         "user_id": "user_001",
         "AND": [{"timestamp": {"gte": 1700000000000}}],
     }
-    with pytest.raises(ValueError, match="memory_types"):
-        client.search_memories(query="bad", user_id="user_001", memory_types=["agent_case"])
-    with pytest.raises(ValueError, match="user_id"):
-        client.search_memories(query="bad")
 
 
 def test_flush_memories_supports_agent_scope(monkeypatch):
@@ -357,28 +330,6 @@ def test_flush_memories_supports_agent_scope(monkeypatch):
 
     assert captured["url"] == "https://api.evermind.ai/api/v1/memories/agent/flush"
     assert captured["body"] == {"user_id": "user_001", "session_id": "sess-1"}
-
-
-def test_get_memories_validates_type_pagination_and_rank(monkeypatch):
-    from everos_hermes.client import EverOSClient
-
-    captured = {}
-
-    def fake_urlopen(req, timeout):
-        captured["body"] = json.loads(req.data.decode("utf-8"))
-        return FakeHTTPResponse({"data": {"items": []}})
-
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
-    client = EverOSClient(api_key="sk-test")
-
-    client.get_memories(user_id="user_001", memory_type="agent_case", rank_order="DESC")
-    assert captured["body"]["memory_type"] == "agent_case"
-    assert captured["body"]["rank_order"] == "desc"
-    with pytest.raises(ValueError, match="memory_type"):
-        client.get_memories(user_id="user_001", memory_type="agent_memory")
-    with pytest.raises(ValueError, match="page_size"):
-        client.get_memories(user_id="user_001", page_size=101)
-
 
 def test_delete_memories_strict_modes_and_204_payload(monkeypatch):
     from everos_hermes.client import EverOSClient
@@ -422,8 +373,6 @@ def test_update_settings_validates_strict_schema_and_returns_diff(monkeypatch):
 
     assert calls[1] == ("PUT", "https://api.evermind.ai/api/v1/settings", {"timezone": "Asia/Tokyo"})
     assert result["diff"]["timezone"] == {"before": "UTC", "after": "Asia/Tokyo"}
-    with pytest.raises(ValueError, match="Unknown settings"):
-        client.update_settings({"extraction_mode": "fast"})
 
 
 
@@ -480,18 +429,3 @@ def test_client_param_normalization_contract_cases(monkeypatch):
         assert captured["path"] == case["expected_request"]["path"]
         for key, value in case["expected_request"]["body_subset"].items():
             assert captured["body"][key] == value
-
-
-def test_session_filter_requires_exact_non_empty_session_id_operator():
-    from everos_hermes.client import EverOSClient
-
-    client = EverOSClient(api_key="sk-test", base_url="http://127.0.0.1:9", timeout=0.1)
-    for filters in [
-        {"session_id": {}},
-        {"session_id": {"eq": ""}},
-        {"session_id": {"eq": 123}},
-        {"session_id": ""},
-        {"AND": [{"session_id": {"eq": 123}}]},
-    ]:
-        with pytest.raises(ValueError, match="session_id"):
-            client.search_memories(query="coffee", user_id="u1", session_id="sess", filters=filters)

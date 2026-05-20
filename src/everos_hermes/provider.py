@@ -430,8 +430,6 @@ class EverOSMemoryProvider(MemoryProvider):
                     session_id=session_id,
                     scope=scope,
                 )
-            except EverOSTimeoutError as exc:
-                flush_error = exc
             except Exception as exc:
                 flush_error = exc
         payload = _save_result_payload(
@@ -680,15 +678,13 @@ class EverOSMemoryProvider(MemoryProvider):
         if not self._remember_agent_fingerprint(result.fingerprint):
             self._last_agent_write_status = {"ok": True, "scope": "agent", "deduped": True, "operation": operation}
             return False
+        queued = False
         try:
             add = self._client.add_memories(user_id=self._user_id, session_id=session_id, messages=result.messages, async_mode=True, scope="agent")
+            queued = True
             self._last_agent_write_status = {
-                "ok": True,
-                "scope": "agent",
-                "task_id": _task_id(add),
-                "operation": operation,
-                "output_count": result.output_count,
-                "warnings": result.warnings,
+                "ok": True, "scope": "agent", "task_id": _task_id(add), "operation": operation,
+                "output_count": result.output_count, "warnings": result.warnings,
             }
             flush_payload: dict[str, Any] | None = None
             if flush_allowed and self._config.get("agent_flush_after_turn"):
@@ -711,6 +707,8 @@ class EverOSMemoryProvider(MemoryProvider):
             )
             return True
         except Exception as exc:
+            if queued:
+                return True
             self._agent_saved_fingerprints.pop(result.fingerprint, None)
             self._record_status(operation, False, exc, agent=True)
             return False

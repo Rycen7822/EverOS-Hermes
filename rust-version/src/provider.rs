@@ -920,10 +920,6 @@ impl EverOSProvider {
         if !verification_query.trim().is_empty() {
             queries.insert(0, verification_query.trim().to_string());
         }
-        let memory_types = args
-            .get("memory_types")
-            .map(parse_string_list)
-            .filter(|items| !items.is_empty());
         let scope = normalize_scope_arg(&value_string(args, "scope"));
         let role = optional_value_string(args, "role");
         let tool_call_id = optional_value_string(args, "tool_call_id");
@@ -936,11 +932,11 @@ impl EverOSProvider {
             role.as_deref(),
             tool_call_id.as_deref(),
             as_bool(args.get("flush"), true),
-            float_or_none(args.get("flush_timeout")),
+            None,
             queries,
-            memory_types,
+            None,
             int_between(args.get("top_k"), -1, 100, self.config.top_k),
-            float_or_none(args.get("timeout")),
+            None,
         )?;
         Ok(pretty_json(&result))
     }
@@ -957,10 +953,6 @@ impl EverOSProvider {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        let memory_types = args
-            .get("memory_types")
-            .map(parse_string_list)
-            .filter(|items| !items.is_empty());
         let file_path = optional_value_string(args, "file_path");
         let scope = normalize_scope_arg(&value_string(args, "scope"));
         let result = workflows::import_and_verify(
@@ -973,11 +965,11 @@ impl EverOSProvider {
             as_bool(args.get("dry_run"), false),
             int_between(args.get("batch_size"), 1, 100, 50) as usize,
             as_bool(args.get("flush"), true),
-            float_or_none(args.get("flush_timeout")),
+            None,
             parse_string_list(args.get("verification_queries").unwrap_or(&Value::Null)),
-            memory_types,
+            None,
             int_between(args.get("top_k"), -1, 100, self.config.top_k),
-            float_or_none(args.get("timeout")),
+            None,
         )?;
         Ok(pretty_json(&result))
     }

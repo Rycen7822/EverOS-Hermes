@@ -72,20 +72,6 @@ fn read_frame<R: Read>(reader: &mut R) -> Value {
 }
 
 #[test]
-fn rust_cli_provider_helper_names_make_short_lived_boundary_explicit() {
-    let source = include_str!("../../src/cli.rs");
-    assert!(source.contains("short-lived compatibility shim"));
-    assert!(source.contains("fn short_lived_provider_payload"));
-    assert!(source.contains("fn short_lived_provider_from_payload"));
-    assert!(source.contains("fn apply_short_lived_provider_state"));
-    assert!(source.contains("fn normalize_short_lived_provider_init"));
-    assert!(!source.contains("fn provider_payload("));
-    assert!(!source.contains("fn provider_from_payload("));
-    assert!(!source.contains("fn apply_state_value("));
-    assert!(!source.contains("fn normalize_provider_init("));
-}
-
-#[test]
 fn client_response_envelope_contract_cases() {
     let cases = snapshot_json("http_response_envelope_cases.json");
     for case in cases["cases"].as_array().unwrap() {

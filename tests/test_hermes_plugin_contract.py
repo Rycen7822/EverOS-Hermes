@@ -19,14 +19,8 @@ RUST_PLUGIN_MANIFEST = RUST_PLUGIN_DIR / "plugin.yaml"
 RUST_PLUGIN_SKILL = RUST_PLUGIN_DIR / "resources" / "skills" / "everos-memory-curation" / "SKILL.md"
 LEGACY_REPO_SKILL = REPO_ROOT / "skills" / "software-development" / "everos-memory-curation" / "SKILL.md"
 
-EXPECTED_SKILL_REFERENCES = [
-    "user-intent-runbooks.md",
-    "memory-routing-policy.md",
-    "agent-case-visibility.md",
-    "agent-visibility-contract-audits.md",
-    "plugin-triage-and-migration.md",
-    "cleanup-and-verification.md",
-]
+EXPECTED_SKILL_REFERENCES = sorted(path.name for path in (PLUGIN_SKILL.parent / "references").glob("*.md"))
+assert len(EXPECTED_SKILL_REFERENCES) == 9
 
 EXPECTED_PLUGIN_TOOL_NAMES = {
     "everos_memory_save",
@@ -136,10 +130,8 @@ def test_plugin_bundles_curation_skill_instead_of_shipping_repo_level_skill():
     assert "## Reference Map" in text
     assert len(text) <= 6500, "SKILL.md must stay thin; heavy guidance belongs in references/*.md."
     for ref_name in EXPECTED_SKILL_REFERENCES:
-        assert f"references/{ref_name}" in text
         ref_path = PLUGIN_SKILL.parent / "references" / ref_name
-        assert ref_path.exists()
-        assert len(ref_path.read_text(encoding="utf-8")) > 500
+        assert ref_path.exists() and len(ref_path.read_text(encoding="utf-8")) > 500
     assert "### Agent Case Trajectory Recipe" not in text
     assert not LEGACY_REPO_SKILL.exists(), "EverOS curation guidance must be plugin-bundled, not a separate repo skill."
 
@@ -347,10 +339,11 @@ def test_skill_includes_agentmemory_style_operator_runbooks_and_guardrails():
         assert "Do not wait for the user to say" in skill_text
         assert "references/memory-routing-policy.md" in skill_text
         assert len(skill_text) <= 6500
-        for ref_name in EXPECTED_SKILL_REFERENCES:
-            assert f"references/{ref_name}" in skill_text
+        assert "Existing specialized references remain available under `references/`" in skill_text
         for heavy_marker in ["### Remember / save this", "### Agent Case Trajectory Recipe", "## Cleanup / Compression Checklist"]:
             assert heavy_marker not in skill_text, f"{skill_path} kept heavy section {heavy_marker} in SKILL.md"
+        for stale_marker in ["/home/xu", "For this user", "Rust low-level group methods exist"]:
+            assert stale_marker not in bundle_text, f"{skill_path} kept stale reference marker {stale_marker}"
         for section in expected_sections:
             assert section in bundle_text, f"{skill_path} missing {section}"
         for term in expected_terms:

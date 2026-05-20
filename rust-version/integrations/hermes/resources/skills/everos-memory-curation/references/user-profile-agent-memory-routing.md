@@ -12,17 +12,12 @@ Use this reference when USER PROFILE is near its character budget or the user as
 
 ## Safe migration sequence
 
-1. Classify entries:
-   - must-follow preference → keep as compact USER PROFILE fallback;
-   - workflow/procedure → skill or skill reference;
-   - solved-problem pattern → EverOS agent case;
-   - environment fact → local memory only if stable and hard to rediscover;
-   - task log/SHA/package hash/pressure cycle/raw transcript → do not save.
-2. Write compact agent memory/reference first when moving content out of USER PROFILE.
-3. Flush and verify agent visibility (`agent_memory` search plus `agent_case`/`agent_skill` get when available).
-4. If `agent_visibility_status` remains `not_visible`, do not delete mandatory preferences entirely; keep a short USER PROFILE/local-memory fallback.
-5. Remove or compress only entries that can be recovered from skills, references, or project/source files.
-6. Report both USER PROFILE usage after cleanup and agent-memory visibility status.
+1. Classify entries: must-follow preference, workflow/procedure, solved-problem pattern, stable environment fact, or skip.
+2. Write the compact skill/reference/agent case before removing detail from USER PROFILE.
+3. Flush and verify agent visibility with the same `user_id` and `session_id` used for the save.
+4. If visibility remains `not_visible`, keep a short USER PROFILE/local-memory fallback for mandatory preferences.
+5. Remove or compress only entries recoverable from skills, references, memories, or source files.
+6. Report USER PROFILE usage and agent-memory visibility status after cleanup.
 
 ## Known EverOS behavior
 
@@ -30,8 +25,8 @@ Agent-scope writes can return queued/extracted while structured `agent_memory`, 
 
 A real multi-message trajectory is more reliable for Cloud-visible `agent_case` extraction than a single compact assistant note. Use user intent → assistant diagnosis/action → tool verification with `tool_call_id` → assistant fix/lesson. When calling the Cloud API directly, include epoch-millisecond `timestamp` on every message. A result with visible `agent_case` but no `agent_skill` is `partial` visibility and is still useful for reusable case curation.
 
-For this user, automatic capture and agent recall are explicitly enabled in `/home/xu/.hermes/everos.json`; keep recall volume bounded and clean noisy captures rather than disabling capture by default.
+If automatic capture and agent recall are enabled, keep recall volume bounded and clean noisy captures rather than disabling capture by default.
 
 ## Good USER PROFILE target
 
-Aim to keep USER PROFILE comfortably below capacity (roughly half-full or less) by storing only high-priority preferences. Do not fill it with project-specific workflow details if those details can live in a skill reference or agent case.
+Keep USER PROFILE comfortably below capacity by storing only high-priority preferences. Do not fill it with project-specific workflow details if those details can live in a skill reference or agent case.

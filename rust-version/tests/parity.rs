@@ -7,10 +7,7 @@ use everos_hermes_rust::policy::{should_skip_capture, should_skip_recall, stable
 use everos_hermes_rust::provider::{
     EverOSProvider, ProviderConfig, ProviderInit, load_config, provider_tool_schemas,
 };
-use everos_hermes_rust::trajectory::{
-    TrajectoryBuildOptions, build_agent_trajectory_messages,
-    build_agent_trajectory_messages_with_options,
-};
+use everos_hermes_rust::trajectory::build_agent_trajectory_messages;
 use serde_json::{Value, json};
 use std::fs;
 use std::io::{Read, Write};
@@ -270,34 +267,6 @@ fn provider_config_usize_field(config: &ProviderConfig, key: &str) -> usize {
         "agent_dedupe_entries" => config.agent_dedupe_entries,
         other => panic!("unsupported provider config contract field: {other}"),
     }
-}
-
-fn keep_alive_two_request_server() -> (String, thread::JoinHandle<Vec<String>>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    let handle = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        drop(listener);
-        stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
-        let mut requests = Vec::new();
-        for index in 0..2 {
-            requests.push(read_http_request(&mut stream));
-            let body = json!({"data": {"request_index": index + 1}}).to_string();
-            let connection = if index == 0 { "keep-alive" } else { "close" };
-            let reply = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: {}\r\n\r\n{}",
-                body.len(),
-                connection,
-                body
-            );
-            stream.write_all(reply.as_bytes()).unwrap();
-            stream.flush().unwrap();
-        }
-        requests
-    });
-    (format!("http://{addr}"), handle)
 }
 
 fn sequenced_request_server(

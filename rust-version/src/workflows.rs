@@ -3,6 +3,7 @@ use crate::agent_visibility::{
     workflow_status_from_agent_visibility,
 };
 use crate::client::{DEFAULT_MEMORY_TYPES, EverOSClient, EverOSError};
+use crate::flush_retry::flush_memories_with_retry;
 use crate::redaction::{error_payload, sanitized_error_message};
 use crate::response_normalization::count_hits;
 use serde_json::{Value, json};
@@ -32,10 +33,6 @@ pub fn error_envelope(workflow: &str, error_code: &str, message: &str) -> Value 
     })
 }
 
-pub fn tool_flush_result_payload(response: &Value) -> Value {
-    tool_flush_result_payload_with_attempt(response, None)
-}
-
 pub fn tool_flush_result_payload_with_attempt(
     response: &Value,
     attempt_count: Option<usize>,
@@ -52,10 +49,6 @@ pub fn tool_flush_result_payload_with_attempt(
         }
     }
     Value::Object(payload)
-}
-
-pub fn flush_result_payload(response: &Value) -> Value {
-    flush_result_payload_with_attempt(response, None)
 }
 
 pub fn flush_result_payload_with_attempt(response: &Value, attempt_count: Option<usize>) -> Value {
@@ -549,15 +542,8 @@ pub fn save_and_verify(
         );
     }
     let result = client.add_memories_scoped(user_id, session_id, vec![message], true, &scope)?;
-    let flush_payload = if flush {
-        match client.flush_memories_scoped(user_id, session_id, &scope, flush_timeout) {
-            Ok(response) => Some(flush_result_payload(&response)),
-            Err(err @ EverOSError::Timeout { .. }) => Some(timeout_payload("flush", &err)),
-            Err(err) => Some(error_payload("flush", &err)),
-        }
-    } else {
-        None
-    };
+    let flush_payload =
+        flush.then(|| workflow_flush_payload(client, user_id, session_id, &scope, flush_timeout));
     if verification_queries.is_empty() {
         verification_queries.push(content.chars().take(200).collect());
     }
@@ -748,13 +734,23 @@ fn import_flush_payload(
     flush_timeout: Option<f64>,
 ) -> Value {
     if flush && queued_count > 0 {
-        match client.flush_memories_scoped(user_id, session_id, scope, flush_timeout) {
-            Ok(response) => flush_result_payload(&response),
-            Err(err @ EverOSError::Timeout { .. }) => timeout_payload("flush", &err),
-            Err(err) => error_payload("flush", &err),
-        }
+        workflow_flush_payload(client, user_id, session_id, scope, flush_timeout)
     } else {
         json!({"ok":Value::Null,"status":"not_requested"})
+    }
+}
+
+fn workflow_flush_payload(
+    client: &EverOSClient,
+    user_id: &str,
+    session_id: Option<&str>,
+    scope: &str,
+    timeout: Option<f64>,
+) -> Value {
+    match flush_memories_with_retry(client, user_id, session_id, scope, timeout, 1) {
+        Ok((response, _)) => flush_result_payload_with_attempt(&response, None),
+        Err(err @ EverOSError::Timeout { .. }) => timeout_payload("flush", &err),
+        Err(err) => error_payload("flush", &err),
     }
 }
 
