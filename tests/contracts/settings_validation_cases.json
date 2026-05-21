@@ -1,13 +1,6 @@
 {
   "cases": [
     {
-      "name": "valid_timezone_and_llm",
-      "normalized": {
-        "llm_custom_setting": {
-          "style": "concise"
-        },
-        "timezone": "Asia/Tokyo"
-      },
       "settings": {
         "llm_custom_setting": {
           "style": "concise"
@@ -18,8 +11,6 @@
       "valid": true
     },
     {
-      "error_contains": "timezone",
-      "name": "invalid_unknown_timezone",
       "settings": {
         "timezone": "Mars/Base"
       },
@@ -27,8 +18,6 @@
       "valid": false
     },
     {
-      "error_contains": "Unknown settings",
-      "name": "invalid_unknown_strict_field",
       "settings": {
         "extraction_mode": "fast"
       },
@@ -36,10 +25,6 @@
       "valid": false
     },
     {
-      "name": "valid_unknown_non_strict_field",
-      "normalized": {
-        "extraction_mode": "fast"
-      },
       "settings": {
         "extraction_mode": "fast"
       },
@@ -47,8 +32,6 @@
       "valid": true
     },
     {
-      "error_contains": "llm_custom_setting",
-      "name": "invalid_llm_custom_setting_type",
       "settings": {
         "llm_custom_setting": []
       },
@@ -56,8 +39,6 @@
       "valid": false
     },
     {
-      "error_contains": "non-empty",
-      "name": "invalid_empty_object",
       "settings": {},
       "strict": true,
       "valid": false

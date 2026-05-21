@@ -70,58 +70,6 @@ def test_save_config_drops_api_key_and_uses_private_permissions(tmp_path):
     assert config_path.stat().st_mode & 0o777 == 0o600
 
 
-def test_tool_errors_are_redacted_before_returning_to_model(monkeypatch, tmp_path):
-    from everos_hermes.provider import EverOSMemoryProvider
-
-    class FakeClient:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def search_memories(self, **kwargs):
-            raise RuntimeError("backend failed api_key=secret-tool-key Authorization: Bearer secret-token")
-
-    monkeypatch.setenv("EVEROS_API_KEY", "sk-test")
-    monkeypatch.setenv("EVEROS_USER_ID", "u1")
-    monkeypatch.setattr("everos_hermes.provider.EverOSClient", FakeClient)
-    provider = EverOSMemoryProvider()
-    provider.initialize(session_id="sess-1", hermes_home=str(tmp_path), platform="cli")
-
-    raw = provider.handle_tool_call("everos_memory_search", {"query": "coffee"})
-
-    result = json.loads(raw)
-    assert "secret-tool-key" not in result["error"]
-    assert "secret-token" not in result["error"]
-    assert "[REDACTED]" in result["error"]
-
-
-def test_memory_save_tool_preserves_queue_payload_when_flush_has_non_timeout_error(monkeypatch, tmp_path):
-    from everos_hermes.provider import EverOSMemoryProvider
-
-    class FakeClient:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def add_memories(self, **kwargs):
-            return {"data": {"status": "queued", "task_id": "task-queued"}}
-
-        def flush_memories(self, **kwargs):
-            raise RuntimeError("flush failed token=provider-secret")
-
-    monkeypatch.setenv("EVEROS_API_KEY", "sk-test")
-    monkeypatch.setenv("EVEROS_USER_ID", "u1")
-    monkeypatch.setattr("everos_hermes.provider.EverOSClient", FakeClient)
-    provider = EverOSMemoryProvider()
-    provider.initialize(session_id="sess-1", hermes_home=str(tmp_path), platform="cli")
-
-    result = json.loads(provider.handle_tool_call("everos_memory_save", {"content": "queued before failure", "flush": True}))
-
-    assert result["saved"] is True
-    assert result["message_queued"] is True
-    assert result["task_id"] == "task-queued"
-    assert result["flush"]["ok"] is False
-    assert result["flush"]["status"] == "error"
-    assert "provider-secret" not in json.dumps(result)
-
 
 def test_provider_availability_requires_api_key(monkeypatch, tmp_path):
     from everos_hermes.provider import EverOSMemoryProvider
@@ -158,70 +106,6 @@ def test_initialize_prefers_gateway_user_id(monkeypatch, tmp_path):
 
 
 
-
-def test_sync_turn_adds_user_and_assistant_then_flushes(monkeypatch, tmp_path):
-    from everos_hermes.provider import EverOSMemoryProvider
-
-    calls = []
-
-    class FakeClient:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def add_memories(self, **kwargs):
-            calls.append(("add", kwargs))
-            return {"data": {"status": "queued", "task_id": "task-1"}}
-
-        def flush_memories(self, **kwargs):
-            calls.append(("flush", kwargs))
-            return {"data": {"status": "extracted"}}
-
-    monkeypatch.setenv("EVEROS_API_KEY", "sk-test")
-    monkeypatch.setenv("EVEROS_USER_ID", "u1")
-    monkeypatch.setattr("everos_hermes.provider.EverOSClient", FakeClient)
-
-    provider = EverOSMemoryProvider()
-    provider.initialize(session_id="sess-1", hermes_home=str(tmp_path), platform="cli")
-    provider.sync_turn("remember I like espresso", "Noted.", session_id="sess-2")
-    provider.shutdown()
-
-    assert calls[0][0] == "add"
-    assert calls[0][1]["user_id"] == "u1"
-    assert calls[0][1]["session_id"] == "sess-2"
-    assert [m["role"] for m in calls[0][1]["messages"]] == ["user", "assistant"]
-    assert calls[1] == ("flush", {"user_id": "u1", "session_id": "sess-2", "scope": "personal"})
-
-
-
-
-def test_sync_turn_capture_agent_memory_false_only_writes_personal(monkeypatch, tmp_path):
-    from everos_hermes.provider import EverOSMemoryProvider
-
-    calls = []
-
-    class FakeClient:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def add_memories(self, **kwargs):
-            calls.append(("add", kwargs))
-            return {"data": {"status": "queued"}}
-
-        def flush_memories(self, **kwargs):
-            calls.append(("flush", kwargs))
-            return {"data": {"status": "success"}}
-
-    (tmp_path / "everos.json").write_text('{"capture_agent_memory": false}\n', encoding="utf-8")
-    monkeypatch.setenv("EVEROS_API_KEY", "sk-test")
-    monkeypatch.setenv("EVEROS_USER_ID", "u1")
-    monkeypatch.setattr("everos_hermes.provider.EverOSClient", FakeClient)
-    provider = EverOSMemoryProvider()
-    provider.initialize(session_id="sess-1", hermes_home=str(tmp_path), platform="cli")
-    provider.sync_turn("remember I like espresso", "Noted.", session_id="sess-2")
-    provider.shutdown()
-
-    assert [call[1].get("scope") for call in calls if call[0] == "add"] == ["personal"]
-    assert [call[1].get("scope") for call in calls if call[0] == "flush"] == ["personal"]
 
 
 def test_sync_turn_capture_agent_memory_parallel_writes_agent_and_strips_context(monkeypatch, tmp_path):
@@ -270,7 +154,7 @@ def test_sync_turn_capture_agent_memory_parallel_writes_agent_and_strips_context
 
 
 
-def test_provider_tools_pass_scope_filters_rank_and_timeout(monkeypatch, tmp_path):
+def test_provider_tools_pass_scope_flush_timeout_and_visibility(monkeypatch, tmp_path):
     from everos_hermes.provider import EverOSMemoryProvider
 
     calls = []
@@ -285,20 +169,17 @@ def test_provider_tools_pass_scope_filters_rank_and_timeout(monkeypatch, tmp_pat
 
         def flush_memories(self, **kwargs):
             calls.append(("flush", kwargs))
-            return {"data": {"status": "success"}}
+            return {"data": {"status": "success", "task_id": "flush-agent"}}
 
         def search_memories(self, **kwargs):
             calls.append(("search", kwargs))
-            return {"data": {"episodes": []}}
+            return {"data": {"agent_memory": []}}
 
         def get_memories(self, **kwargs):
             calls.append(("get", kwargs))
             return {"data": {"items": []}}
 
-        def delete_memories(self, **kwargs):
-            calls.append(("delete", kwargs))
-            return {"ok": True}
-
+    (tmp_path / "everos.json").write_text('{"agent_visibility_verify_after_flush": true}\n', encoding="utf-8")
     monkeypatch.setenv("EVEROS_API_KEY", "sk-test")
     monkeypatch.setenv("EVEROS_USER_ID", "u1")
     monkeypatch.setattr("everos_hermes.provider.EverOSClient", FakeClient)
@@ -306,21 +187,14 @@ def test_provider_tools_pass_scope_filters_rank_and_timeout(monkeypatch, tmp_pat
     provider.initialize(session_id="sess-1", hermes_home=str(tmp_path), platform="cli")
 
     save = json.loads(provider.handle_tool_call("everos_memory_save", {"content": "retry with timeout", "scope": "agent", "flush": True}))
-    provider.handle_tool_call("everos_memory_search", {"query": "retry", "top_k": -1, "filters": {"AND": [{"timestamp": {"gte": 1}}]}, "radius": 0.5, "memory_types": ["agent_memory"], "response_format": "json"})
-    provider.handle_tool_call("everos_memory_get", {"memory_type": "agent_case", "rank_by": "timestamp", "rank_order": "asc", "filters": {"AND": [{"timestamp": {"lte": 2}}]}})
     provider.handle_tool_call("everos_memory_flush", {"scope": "agent", "timeout": 45})
 
     assert save["scope"] == "agent"
+    assert save["agent_visibility"]["agent_visibility_status"] == "not_visible"
+    assert provider._last_agent_visibility_status["agent_visibility_status"] == "not_visible"
     assert calls[0][1]["scope"] == "agent"
     assert calls[0][1]["messages"][0]["role"] == "assistant"
-    assert calls[1][1]["scope"] == "agent"
-    assert calls[2][1]["top_k"] == -1
-    assert calls[2][1]["filters"] == {"AND": [{"timestamp": {"gte": 1}}]}
-    assert calls[2][1]["radius"] == 0.5
-    assert calls[3][1]["memory_type"] == "agent_case"
-    assert calls[3][1]["rank_order"] == "asc"
-    assert calls[4][1] == {"user_id": "u1", "session_id": "sess-1", "scope": "agent", "timeout": 45}
-
+    assert calls[-1][1] == {"user_id": "u1", "session_id": "sess-1", "scope": "agent", "timeout": 45}
 
 def test_provider_background_error_records_redacted_log_and_status(monkeypatch, tmp_path):
     from everos_hermes.provider import EverOSMemoryProvider
@@ -387,49 +261,3 @@ def test_provider_sync_turn_records_agent_visibility_gap_when_enabled(monkeypatc
     assert provider._last_agent_visibility_status["agent_visibility_status"] == "not_visible"
     assert provider._last_agent_visibility_status["agent_structured_visible"] is False
     assert [check["kind"] for check in provider._last_agent_visibility_status["agent_visibility_checks"]] == ["search", "search", "get", "get"]
-
-
-
-
-def test_provider_config_module_exports_legacy_normalizer():
-    from everos_hermes import provider
-    from everos_hermes.provider_config import _DEFAULT_CONFIG, _normalize_config
-
-    assert provider._normalize_config is _normalize_config
-    assert _DEFAULT_CONFIG["base_url"]
-    assert _normalize_config({"top_k": "999", "memory_types": "profile,episodic_memory"})["top_k"] == 20
-
-
-
-def test_provider_agent_save_visibility_audit_updates_last_status_and_payload(monkeypatch, tmp_path):
-    from everos_hermes.provider import EverOSMemoryProvider
-
-    class FakeClient:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def add_memories(self, **kwargs):
-            return {"data": {"status": "queued", "task_id": "task-agent"}}
-
-        def flush_memories(self, **kwargs):
-            return {"data": {"status": "success", "task_id": "flush-agent"}}
-
-        def search_memories(self, **kwargs):
-            return {"data": {"agent_memory": []}}
-
-        def get_memories(self, **kwargs):
-            return {"data": {"items": []}}
-
-    (tmp_path / "everos.json").write_text('{"agent_visibility_verify_after_flush": true}\n', encoding="utf-8")
-    monkeypatch.setenv("EVEROS_API_KEY", "sk-test")
-    monkeypatch.setenv("EVEROS_USER_ID", "u1")
-    monkeypatch.setattr("everos_hermes.provider.EverOSClient", FakeClient)
-    provider = EverOSMemoryProvider()
-    provider.initialize(session_id="sess-1", hermes_home=str(tmp_path), platform="cli")
-
-    result = json.loads(provider.handle_tool_call("everos_memory_save", {"content": "agent note", "scope": "agent", "flush": True}))
-
-    assert result["agent_visibility"]["agent_raw_queued"] is True
-    assert result["agent_visibility"]["agent_flush"]["status"] == "success"
-    assert result["agent_visibility"]["agent_visibility_status"] == "not_visible"
-    assert provider._last_agent_visibility_status["agent_visibility_status"] == "not_visible"

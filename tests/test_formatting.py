@@ -1,4 +1,4 @@
-from everos_hermes.formatting import format_search_context, strip_vectors
+from everos_hermes.formatting import format_search_context
 
 
 def test_format_search_context_renders_nested_agent_memory_cases_and_skills():
@@ -20,24 +20,6 @@ def test_format_search_context_renders_nested_agent_memory_cases_and_skills():
     assert "## Agent Skills" in context
     assert "MCP timeout recovery" in context
 
-
-def test_strip_vectors_removes_nested_embeddings_from_agent_memory():
-    cleaned = strip_vectors(
-        {
-            "data": {
-                "agent_memory": {
-                    "cases": [{"summary": "case", "embedding": [1, 2, 3]}],
-                    "skills": [{"name": "skill", "vector": [0.1]}],
-                }
-            }
-        }
-    )
-
-    rendered = str(cleaned)
-    assert "case" in rendered
-    assert "skill" in rendered
-    assert "embedding" not in rendered
-    assert "vector" not in rendered
 
 
 

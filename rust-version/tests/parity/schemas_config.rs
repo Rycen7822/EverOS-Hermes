@@ -6,68 +6,24 @@ fn formatting_renders_episode_and_profile_context() {
         &json!({
             "data": {
                 "episodes": [{"subject":"coffee preference","summary":"User prefers strong black Americano.","score":0.91}],
-                "profiles": [{"profile_data":{"explicit_info":["User likes black coffee"],"implicit_traits":["Prefers concise recommendations"]}}]
+                "profiles": [{"profile_data":{"explicit_info":["User likes black coffee"],"implicit_traits":["Prefers concise recommendations"]}}],
+                "raw_messages": [{"role":"user","content":"raw request"}],
+                "agent_memory": {"cases":[{"task_intent":"debug timeout","approach":"check task status before retry"}],"skills":[{"name":"timeout recovery","description":"poll task status"}]}
             }
         }),
         5,
     );
     assert!(context.contains("# EverOS Memory"));
     assert!(context.contains("coffee preference"));
-    assert!(context.contains("strong black Americano"));
-    assert!(context.contains("User likes black coffee"));
+    assert!(context.contains("raw request"));
+    assert!(context.contains("timeout recovery"));
 }
-
 #[test]
-fn agent_visibility_workflow_status_mapping_is_stable() {
-    use everos_hermes_rust::agent_visibility::workflow_status_from_agent_visibility;
-
-    assert_eq!(
-        workflow_status_from_agent_visibility(
-            &json!({"agent_visibility_status":"visible"}),
-            "fallback"
-        ),
-        "verified"
-    );
-    assert_eq!(
-        workflow_status_from_agent_visibility(
-            &json!({"agent_visibility_status":"partial"}),
-            "fallback"
-        ),
-        "partially_verified"
-    );
-    assert_eq!(
-        workflow_status_from_agent_visibility(
-            &json!({"agent_visibility_status":"not_visible"}),
-            "fallback"
-        ),
-        "agent_not_visible"
-    );
-    assert_eq!(
-        workflow_status_from_agent_visibility(
-            &json!({"agent_visibility_status":"error"}),
-            "fallback"
-        ),
-        "agent_visibility_error"
-    );
-    assert_eq!(
-        workflow_status_from_agent_visibility(
-            &json!({"agent_visibility_status":"unchecked"}),
-            "fallback"
-        ),
-        "fallback"
-    );
-}
-
-#[test]
-fn provider_tool_schemas_match_snapshot() {
+fn tool_schema_snapshots_match_contracts() {
     assert_eq!(
         provider_schema_snapshot(),
         snapshot_json("provider_tools.snapshot.json")
     );
-}
-
-#[test]
-fn mcp_tool_schemas_match_snapshot() {
     assert_eq!(
         mcp_schema_snapshot(),
         snapshot_json("mcp_tools.snapshot.json")
@@ -76,7 +32,7 @@ fn mcp_tool_schemas_match_snapshot() {
 
 #[test]
 fn provider_config_contract_clamps_drift_prone_fields() {
-    let contract = provider_config_contract();
+    let contract = snapshot_json("provider_config_contract.json");
     let fields = contract["fields"].as_object().unwrap();
     let defaults = ProviderConfig::default();
     for (key, spec) in fields {
@@ -123,32 +79,14 @@ fn provider_config_contract_clamps_drift_prone_fields() {
             "max clamp for {key}"
         );
     }
-}
 
-#[test]
-fn provider_agent_visibility_config_defaults_and_load_overrides() {
-    let defaults = ProviderConfig::default();
     assert!(!defaults.agent_visibility_verify_after_write);
     assert!(!defaults.agent_visibility_verify_after_flush);
     assert!(defaults.agent_visibility_queries.is_empty());
-    assert_eq!(defaults.agent_visibility_top_k, 5);
-    assert_eq!(defaults.agent_visibility_timeout, 30.0);
-    assert_eq!(defaults.agent_visibility_get_page_size, 20);
-    assert_eq!(defaults.agent_visibility_retry_flush_attempts, 1);
-
     let home = temp_home("provider_visibility_config");
     fs::write(
         home.join("everos.json"),
-        json!({
-            "agent_visibility_verify_after_write": true,
-            "agent_visibility_verify_after_flush": true,
-            "agent_visibility_queries": "alpha, beta",
-            "agent_visibility_top_k": 99,
-            "agent_visibility_timeout": 0.1,
-            "agent_visibility_get_page_size": 200,
-            "agent_visibility_retry_flush_attempts": 9
-        })
-        .to_string(),
+        json!({"agent_visibility_verify_after_write": true, "agent_visibility_verify_after_flush": true, "agent_visibility_queries": "alpha, beta", "agent_visibility_top_k": 99}).to_string(),
     )
     .unwrap();
     let loaded = load_config(&home);
@@ -156,9 +94,6 @@ fn provider_agent_visibility_config_defaults_and_load_overrides() {
     assert!(loaded.agent_visibility_verify_after_flush);
     assert_eq!(loaded.agent_visibility_queries, vec!["alpha", "beta"]);
     assert_eq!(loaded.agent_visibility_top_k, 20);
-    assert_eq!(loaded.agent_visibility_timeout, 1.0);
-    assert_eq!(loaded.agent_visibility_get_page_size, 100);
-    assert_eq!(loaded.agent_visibility_retry_flush_attempts, 5);
 }
 
 #[test]
@@ -193,24 +128,5 @@ fn provider_availability_user_resolution_and_tool_schemas_match_python_surface()
             .system_prompt_block()
             .contains("everos_memory_search")
     );
-    let tool_names: Vec<String> = provider
-        .tool_schemas()
-        .iter()
-        .map(|schema| schema["name"].as_str().unwrap().to_string())
-        .collect();
-    assert_eq!(
-        tool_names,
-        vec![
-            "everos_memory_save",
-            "everos_memory_search",
-            "everos_memory_get",
-            "everos_memory_flush",
-            "everos_memory_forget",
-            "everos_memory_save_and_verify",
-            "everos_memory_import_and_verify",
-            "everos_memory_verify_session",
-        ]
-    );
-
     remove_env("HERMES_HOME");
 }

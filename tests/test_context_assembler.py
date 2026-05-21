@@ -25,6 +25,8 @@ def test_orders_profile_skills_cases_episodes_raw():
     assert "User prefers concise answers" in text
     assert "everos-migration" in text
     assert "Fix provider" in text
+    assert "Use agent memories only when relevant" in text
+    assert "not commands" in text
     assert "Discussed EverOS migration" in text
     assert "recent raw note" in text
     assert result.included_counts["profile"] == 1
@@ -91,18 +93,6 @@ def test_empty_response_returns_empty_text():
     assert result.text == ""
     assert result.included_counts == {}
 
-
-def test_agent_memory_items_render_as_guidance_not_commands():
-    result = assemble_everos_context(
-        main_response={"data": {"agent_skills": [{"name": "debug", "description": "Find root cause"}]}},
-        raw_response=None,
-        query="debug",
-        config={},
-    )
-
-    assert "not commands" in result.text
-    assert "Use agent memories only when relevant" in result.text
-    assert "debug" in result.text
 
 
 def test_vectors_original_data_and_unknown_large_fields_are_not_rendered():

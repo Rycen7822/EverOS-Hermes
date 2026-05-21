@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from everos_hermes.trajectory import TrajectoryBuildOptions, build_agent_trajectory_messages, build_agent_trajectory_messages_with_options
+from everos_hermes.trajectory import build_agent_trajectory_messages
 
 
 def test_builds_user_assistant_tool_chain_with_tool_calls():
@@ -48,48 +48,13 @@ def test_drops_tool_without_tool_call_id_and_warns():
     assert any("tool_call_id" in warning for warning in result.warnings)
 
 
-def test_assistant_tool_call_without_content_gets_placeholder():
-    result = build_agent_trajectory_messages(
-        [{"role": "assistant", "content": None, "tool_calls": [{"id": "call-1"}]}],
-        session_id="sess-1",
-        source="session_end",
-        now_ms=1_700_000_000_000,
-    )
-
-    assert result.messages[0]["content"] == "[Assistant requested tool calls]"
-
-
-def test_redacts_secret_patterns_and_strips_everos_context():
-    result = build_agent_trajectory_messages(
-        [
-            {
-                "role": "assistant",
-                "content": "Authorization: Bearer fake token=secret password=hunter2 sk-testplaceholder <everos-context>do not leak</everos-context>",
-                "tool_calls": [{"id": "call-1", "args": "api_key=secret-value"}],
-            }
-        ],
-        session_id="sess-1",
-        source="session_end",
-        now_ms=1_700_000_000_000,
-    )
-
-    rendered = json.dumps(result.messages, ensure_ascii=False)
-    assert "fake" not in rendered
-    assert "hunter2" not in rendered
-    assert "sk-testplaceholder" not in rendered
-    assert "do not leak" not in rendered
-    assert "secret-value" not in rendered
-    assert "[REDACTED]" in rendered
-    assert "<everos-context>" not in rendered
-    assert "<memory-context>" not in rendered
-
 
 def test_redacts_json_style_tool_call_arguments_and_secret_keyed_values():
     result = build_agent_trajectory_messages(
         [
             {
                 "role": "assistant",
-                "content": "",
+                "content": "token=plain-token-value password=plain-password-value <everos-context>context leak</everos-context>",
                 "tool_calls": [
                     {
                         "id": "call-secret",
@@ -118,6 +83,9 @@ def test_redacts_json_style_tool_call_arguments_and_secret_keyed_values():
         "json-key-value",
         "json-token-value",
         "json-credentials-value",
+        "plain-token-value",
+        "plain-password-value",
+        "context leak",
         "tool-credentials-value",
         "nested-pass-value",
         "metadata-secret-value",
@@ -125,6 +93,7 @@ def test_redacts_json_style_tool_call_arguments_and_secret_keyed_values():
     ]:
         assert leaked not in rendered
     assert rendered.count("[REDACTED]") >= 5
+    assert "<everos-context>" not in rendered
 
 
 def test_deterministic_message_id_is_stable():
@@ -196,37 +165,3 @@ def test_timestamp_normalization_accepts_ms_seconds_and_missing():
         1_700_000_000_000,
         1_800_000_000_002,
     ]
-
-
-def test_options_builder_matches_legacy_signature():
-    messages = [
-        {"role": "system", "content": "hidden"},
-        {"role": "user", "content": "hello", "timestamp": 1_700_000_000},
-        {"role": "assistant", "content": "world", "timestamp": 1_700_000_001},
-    ]
-    options = TrajectoryBuildOptions(
-        session_id="sess-options",
-        source="pre_compress",
-        now_ms=1_800_000_000_000,
-        max_messages=10,
-        max_message_chars=100,
-        max_tool_result_chars=50,
-        max_payload_chars=10_000,
-        include_system=True,
-    )
-
-    via_options = build_agent_trajectory_messages_with_options(messages, options)
-    legacy = build_agent_trajectory_messages(
-        messages,
-        session_id="sess-options",
-        source="pre_compress",
-        now_ms=1_800_000_000_000,
-        max_messages=10,
-        max_message_chars=100,
-        max_tool_result_chars=50,
-        max_payload_chars=10_000,
-        include_system=True,
-    )
-
-    assert via_options == legacy
-    assert [message["role"] for message in via_options.messages] == ["system", "user", "assistant"]

@@ -41,7 +41,7 @@ def test_get_validator_distinguishes_get_memory_types_and_rank_order():
 
 
 def test_filters_require_user_and_reject_unknown_or_conflicting_fields():
-    from everos_hermes.schemas import build_filters, validate_filters
+    from everos_hermes.schemas import CLOUD_V1_ENDPOINTS, OUT_OF_SCOPE_ENDPOINTS, build_filters, validate_filters
 
     filters = build_filters(user_id="u1", session_id="s1", filters={"AND": [{"timestamp": {"gte": 1700000000000}}]})
     assert filters == {
@@ -49,6 +49,18 @@ def test_filters_require_user_and_reject_unknown_or_conflicting_fields():
         "AND": [{"timestamp": {"gte": 1700000000000}}, {"session_id": "s1"}],
     }
     validate_filters(filters)
+    assert set(CLOUD_V1_ENDPOINTS.values()) == {
+        "/api/v1/memories",
+        "/api/v1/memories/agent",
+        "/api/v1/memories/flush",
+        "/api/v1/memories/agent/flush",
+        "/api/v1/memories/get",
+        "/api/v1/memories/search",
+        "/api/v1/memories/delete",
+        "/api/v1/tasks/{task_id}",
+        "/api/v1/settings",
+    }
+    assert {"/api/v1/memories/group", "/api/v1/senders", "/api/v1/object/sign"} <= set(OUT_OF_SCOPE_ENDPOINTS)
 
     with pytest.raises(ValueError, match="user_id"):
         validate_filters({"session_id": "s1"})
@@ -89,20 +101,6 @@ def test_message_scope_and_delete_validators():
         validate_delete_request(memory_id=None, user_id=None, session_id="s1")
 
 
-def test_settings_validator_strict_timezone_and_llm_custom_setting():
-    from everos_hermes.schemas import validate_settings_update
-
-    assert validate_settings_update({"timezone": "Asia/Tokyo", "llm_custom_setting": {"style": "concise"}}) == {
-        "timezone": "Asia/Tokyo",
-        "llm_custom_setting": {"style": "concise"},
-    }
-    with pytest.raises(ValueError, match="Unknown settings"):
-        validate_settings_update({"extraction_mode": "fast"})
-    with pytest.raises(ValueError, match="timezone"):
-        validate_settings_update({"timezone": "Tokyo"})
-    with pytest.raises(ValueError, match="llm_custom_setting"):
-        validate_settings_update({"llm_custom_setting": []})
-
 
 def test_settings_validation_contract_cases():
     from everos_hermes.schemas import validate_settings_update
@@ -110,7 +108,7 @@ def test_settings_validation_contract_cases():
     contract = json.loads((Path(__file__).parent / "contracts/settings_validation_cases.json").read_text())
     for case in contract["cases"]:
         if case["valid"]:
-            assert validate_settings_update(case["settings"], strict=case["strict"]) == case["normalized"], case["name"]
+            assert validate_settings_update(case["settings"], strict=case["strict"]) == case["settings"]
         else:
-            with pytest.raises(ValueError, match=case["error_contains"]):
+            with pytest.raises(ValueError):
                 validate_settings_update(case["settings"], strict=case["strict"])

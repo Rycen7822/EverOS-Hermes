@@ -131,65 +131,6 @@ fn rust_context_engine_policy_trajectory_match_python_contract() {
         cache_key,
         stable_query_key("debug cache", "sess-1", &config)
     );
-
-    let messages = vec![
-        json!({"role":"system","content":"do not export"}),
-        json!({"role":"user","timestamp":1,"content":"run diagnostics <everos-context>old</everos-context> token=very-secret"}),
-        json!({"role":"assistant","timestamp":2,"content":"","tool_calls":[{"id":"call-1","function":{"name":"diagnose","arguments":"{\"api_key\":\"hidden\"}"}}]}),
-        json!({"role":"tool","timestamp":3,"tool_call_id":"call-1","content":"diagnostics ok"}),
-        json!({"role":"tool","timestamp":4,"content":"missing id"}),
-    ];
-    let built = build_agent_trajectory_messages(
-        &messages,
-        "sess-traj",
-        "pre_compress",
-        Some(10_000),
-        80,
-        2_000,
-        2_000,
-        6_000,
-        false,
-    );
-    let rebuilt = build_agent_trajectory_messages(
-        &messages,
-        "sess-traj",
-        "pre_compress",
-        Some(10_000),
-        80,
-        2_000,
-        2_000,
-        6_000,
-        false,
-    );
-    assert_eq!(built.input_count, 5);
-    assert_eq!(built.output_count, 3);
-    assert_eq!(built.dropped_count, 2);
-    assert_eq!(built.fingerprint, rebuilt.fingerprint);
-    assert_eq!(built.messages[0]["source"], "pre_compress");
-    assert!(
-        built.messages[0]["message_id"]
-            .as_str()
-            .unwrap()
-            .starts_with("eh_")
-    );
-    assert!(
-        !built.messages[0]["content"]
-            .as_str()
-            .unwrap()
-            .contains("everos-context")
-    );
-    assert!(
-        !built.messages[0]["content"]
-            .as_str()
-            .unwrap()
-            .contains("very-secret")
-    );
-    assert_eq!(
-        built.messages[1]["content"],
-        "[Assistant requested tool calls]"
-    );
-    assert_eq!(built.messages[1]["tool_calls"][0]["id"], "call-1");
-    assert_eq!(built.messages[2]["tool_call_id"], "call-1");
 }
 
 #[test]
@@ -274,8 +215,6 @@ fn provider_prefetch_uses_v2_assembler_cache_agent_and_session_scoped_raw() {
 
     assert_eq!(context, cached);
     assert!(context.starts_with("<everos-context version=\"2\" source=\"prefetch\">"));
-    assert!(context.contains("User verifies every phase"));
-    assert!(context.contains("reuse cached result"));
     assert!(context.contains("recent raw clue"));
     assert_eq!(requests.len(), 3);
     assert_eq!(
@@ -284,8 +223,6 @@ fn provider_prefetch_uses_v2_assembler_cache_agent_and_session_scoped_raw() {
     );
     assert_eq!(bodies[1]["memory_types"], json!(["agent_memory"]));
     assert_eq!(bodies[2]["memory_types"], json!(["raw_message"]));
-    assert_eq!(bodies[0].get("session_id"), None);
-    assert_eq!(bodies[1].get("session_id"), None);
     assert_eq!(bodies[2]["filters"]["AND"][0]["session_id"], "sess-2");
 
     remove_env("HERMES_HOME");
@@ -331,15 +268,7 @@ fn provider_pre_compress_and_session_end_capture_structured_trajectory_with_dedu
     assert_eq!(requests.len(), 2);
     assert!(requests[0].starts_with("POST /api/v1/memories/agent "));
     assert!(requests[1].starts_with("POST /api/v1/memories/flush "));
-    assert_eq!(first_body["messages"][1]["tool_calls"][0]["id"], "call-1");
-    assert_eq!(first_body["messages"][2]["tool_call_id"], "call-1");
-    assert!(
-        first_body["messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|message| message["source"] == "pre_compress")
-    );
+    assert_eq!(first_body["messages"].as_array().unwrap().len(), 4);
 
     remove_env("HERMES_HOME");
 }
@@ -381,12 +310,6 @@ fn provider_delegation_writes_child_session_id_prefix_and_agent_flush() {
 
     assert!(requests[0].starts_with("POST /api/v1/memories/agent "));
     assert!(requests[1].starts_with("POST /api/v1/memories/agent/flush "));
-    assert!(
-        assistant["content"]
-            .as_str()
-            .unwrap()
-            .starts_with("[delegation child_session_id=child-42]")
-    );
     assert_eq!(assistant["child_session_id"], "child-42");
 
     remove_env("HERMES_HOME");

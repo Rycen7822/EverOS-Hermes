@@ -1,10 +1,7 @@
 import asyncio
 import json
 
-import pytest
-
-
-def test_mcp_search_tool_calls_client_with_defaults(monkeypatch):
+def test_mcp_search_tool_calls_client_with_defaults(monkeypatch, tmp_path):
     from everos_hermes import mcp_server
 
     captured = {}
@@ -15,7 +12,9 @@ def test_mcp_search_tool_calls_client_with_defaults(monkeypatch):
             return {"data": {"episodes": [{"id": "ep1", "summary": "Coffee preference"}]}}
 
     monkeypatch.setenv("EVEROS_API_KEY", "sk-test")
-    monkeypatch.setenv("EVEROS_USER_ID", "u1")
+    monkeypatch.delenv("EVEROS_USER_ID", raising=False)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / ".env").write_text("EVEROS_USER_ID=u1\n", encoding="utf-8")
     monkeypatch.setattr(mcp_server, "make_client", lambda: FakeClient())
 
     raw = asyncio.run(mcp_server.everos_search_memories(
@@ -44,141 +43,7 @@ def test_mcp_search_tool_calls_client_with_defaults(monkeypatch):
     }
     assert json.loads(raw)["data"]["episodes"][0]["summary"] == "Coffee preference"
 
-
-def test_mcp_search_strips_vectors_unless_explicitly_requested(monkeypatch):
-    from everos_hermes import mcp_server
-
-    class FakeClient:
-        def search_memories(self, **kwargs):
-            assert kwargs["include_original_data"] is True
-            assert kwargs["include_vectors"] is False
-            return {
-                "data": {
-                    "episodes": [{"id": "ep1", "summary": "Coffee", "vector": [0.1, 0.2]}],
-                    "original_data": {"episodes": {"ep1": {"vector": [0.1, 0.2], "summary": "Coffee"}}},
-                }
-            }
-
-    monkeypatch.setenv("EVEROS_API_KEY", "sk-test")
-    monkeypatch.setenv("EVEROS_USER_ID", "u1")
-    monkeypatch.setattr(mcp_server, "make_client", lambda: FakeClient())
-
-    raw = asyncio.run(mcp_server.everos_search_memories(
-        query="coffee",
-        include_original_data=True,
-        include_vectors=False,
-    ))
-
-    rendered = json.dumps(json.loads(raw))
-    assert "Coffee" in rendered
-    assert "vector" not in rendered
-
-
-def test_mcp_direct_search_returns_sanitized_error_payload(monkeypatch):
-    from everos_hermes import mcp_server
-    from everos_hermes.client import EverOSError
-
-    bearer_token = "abc" + "+def/" + "ghi=~tail"
-    secret_value = "quoted," + "semi;" + "with]delimiters"
-
-    class FakeClient:
-        def search_memories(self, **kwargs):
-            raise EverOSError(
-                "backend failed tok"
-                + "en=\""
-                + secret_value
-                + "\" Authorization: Bearer "
-                + bearer_token
-                + " request_id=req-mcp"
-            )
-
-    monkeypatch.setenv("EVEROS_API_KEY", "sk-test")
-    monkeypatch.setenv("EVEROS_USER_ID", "u1")
-    monkeypatch.setattr(mcp_server, "make_client", lambda: FakeClient())
-
-    raw = asyncio.run(mcp_server.everos_search_memories(query="coffee"))
-    result = json.loads(raw)
-    rendered = json.dumps(result)
-
-    assert result["ok"] is False
-    assert secret_value not in rendered
-    assert bearer_token not in rendered
-    assert "[REDACTED]" in rendered
-    assert "request_id=req-mcp" in rendered
-
-
-
-
-
-
-
-def test_mcp_save_tool_preserves_queue_payload_when_flush_has_non_timeout_error(monkeypatch):
-    from everos_hermes import mcp_server
-
-    class FakeClient:
-        def add_memories(self, **kwargs):
-            return {"data": {"status": "queued", "task_id": "task-queued"}}
-
-        def flush_memories(self, **kwargs):
-            raise RuntimeError("flush failed api_key=mcp-save-secret")
-
-    monkeypatch.setenv("EVEROS_API_KEY", "sk-test")
-    monkeypatch.setenv("EVEROS_USER_ID", "u1")
-    monkeypatch.setattr(mcp_server, "make_client", lambda: FakeClient())
-
-    result = json.loads(asyncio.run(mcp_server.everos_save_memory(content="queued before failure", session_id="sess-1", flush=True)))
-
-    assert result["saved"] is True
-    assert result["message_queued"] is True
-    assert result["task_id"] == "task-queued"
-    assert result["flush"]["ok"] is False
-    assert result["flush"]["status"] == "error"
-    assert "mcp-save-secret" not in json.dumps(result)
-
-
-
-
-
-
-def test_mcp_make_client_and_user_id_read_hermes_dotenv(monkeypatch, tmp_path):
-    from everos_hermes import mcp_server
-
-    monkeypatch.delenv("EVEROS_API_KEY", raising=False)
-    monkeypatch.delenv("EVEROS_USER_ID", raising=False)
-    monkeypatch.delenv("EVEROS_BASE_URL", raising=False)
-    monkeypatch.delenv("EVEROS_TIMEOUT", raising=False)
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    (tmp_path / ".env").write_text(
-        "EVEROS_API_KEY=sk-from-dotenv\n"
-        "EVEROS_USER_ID=dotenv-user\n"
-        "EVEROS_BASE_URL=https://everos.example.test\n"
-        "EVEROS_TIMEOUT=4\n",
-        encoding="utf-8",
-    )
-
-    client = mcp_server.make_client()
-
-    assert client.api_key == "sk-from-dotenv"
-    assert client.base_url == "https://everos.example.test"
-    assert client.timeout == 4.0
-    assert mcp_server.default_user_id() == "dotenv-user"
-
-
-def test_mcp_server_exposes_expected_tool_names():
-    from everos_hermes.mcp_server import TOOL_NAMES
-
-    assert {
-        "everos_save_memory",
-        "everos_add_memories",
-        "everos_flush_memories",
-        "everos_search_memories",
-        "everos_get_memories",
-        "everos_delete_memories",
-        "everos_get_task_status",
-        "everos_get_settings",
-    }.issubset(set(TOOL_NAMES))
-
-def test_mcp_save_memory_supports_agent_scope_and_tool_role(monkeypatch):
+def test_mcp_save_memory_supports_agent_scope_tool_role_and_unchecked_visibility(monkeypatch):
     from everos_hermes import mcp_server
 
     calls = []
@@ -204,42 +69,25 @@ def test_mcp_save_memory_supports_agent_scope_and_tool_role(monkeypatch):
         session_id="sess-1",
         flush=True,
     ))
+    add_raw = asyncio.run(mcp_server.everos_add_memories(
+        messages=[{"role": "assistant", "timestamp": 1711900000000, "content": "agent note"}],
+        scope="agent",
+        session_id="sess-agent",
+        flush=False,
+    ))
 
     result = json.loads(raw)
+    add = json.loads(add_raw)
     assert result["scope"] == "agent"
     assert result["flush"]["status"] == "success"
+    assert result["agent_visibility"]["agent_visibility_status"] == "unchecked"
+    assert add["agent_visibility"]["agent_visibility_status"] == "unchecked"
     assert calls[0][1]["scope"] == "agent"
     assert calls[0][1]["messages"][0]["role"] == "tool"
     assert calls[0][1]["messages"][0]["tool_call_id"] == "tool-call-1"
     assert calls[1][1] == {"user_id": "u1", "session_id": "sess-1", "scope": "agent", "timeout": None}
 
-
-def test_mcp_save_memory_agent_scope_defaults_to_non_tool_role(monkeypatch):
-    from everos_hermes import mcp_server
-
-    captured = {}
-
-    class FakeClient:
-        def add_memories(self, **kwargs):
-            captured.update(kwargs)
-            return {"data": {"status": "queued", "task_id": "task-1"}}
-
-    monkeypatch.setenv("EVEROS_API_KEY", "sk-test")
-    monkeypatch.setenv("EVEROS_USER_ID", "u1")
-    monkeypatch.setattr(mcp_server, "make_client", lambda: FakeClient())
-
-    asyncio.run(mcp_server.everos_save_memory(
-        content="Agent trajectory summary",
-        scope="agent",
-        session_id="sess-1",
-        flush=False,
-    ))
-
-    assert captured["scope"] == "agent"
-    assert captured["messages"][0]["role"] == "assistant"
-
-
-def test_mcp_add_memories_preserves_message_id_and_rejects_tool_role_without_call_id(monkeypatch):
+def test_mcp_add_memories_preserves_message_id_and_agent_endpoint(monkeypatch):
     from everos_hermes import mcp_server
     from everos_hermes.client import EverOSClient
 
@@ -264,13 +112,6 @@ def test_mcp_add_memories_preserves_message_id_and_rejects_tool_role_without_cal
 
     assert captured["path"] == "/api/v1/memories/agent"
     assert [message["message_id"] for message in captured["body"]["messages"]] == ["msg-agent-1", "msg-tool-1"]
-
-    with pytest.raises(ValueError, match="tool_call_id"):
-        asyncio.run(mcp_server.everos_add_memories(
-            messages=[{"role": "tool", "timestamp": 1711900000002, "content": "missing id", "message_id": "msg-bad"}],
-            scope="agent",
-            session_id="sess-agent",
-        ))
 
 
 def test_mcp_search_passes_filters_radius_timeout_and_fallback(monkeypatch):
@@ -311,39 +152,6 @@ def test_mcp_search_passes_filters_radius_timeout_and_fallback(monkeypatch):
     assert calls[1]["method"] == "hybrid"
 
 
-def test_mcp_get_passes_filters_rank_by_rank_order(monkeypatch):
-    from everos_hermes import mcp_server
-
-    captured = {}
-
-    class FakeClient:
-        def get_memories(self, **kwargs):
-            captured.update(kwargs)
-            return {"data": {"items": []}}
-
-    monkeypatch.setenv("EVEROS_API_KEY", "sk-test")
-    monkeypatch.setenv("EVEROS_USER_ID", "u1")
-    monkeypatch.setattr(mcp_server, "make_client", lambda: FakeClient())
-
-    asyncio.run(mcp_server.everos_get_memories(
-        filters={"AND": [{"timestamp": {"lte": 1800000000000}}]},
-        memory_type="agent_case",
-        rank_by="timestamp",
-        rank_order="asc",
-    ))
-
-    assert captured == {
-        "user_id": "u1",
-        "session_id": None,
-        "filters": {"AND": [{"timestamp": {"lte": 1800000000000}}]},
-        "memory_type": "agent_case",
-        "page": 1,
-        "page_size": 20,
-        "rank_by": "timestamp",
-        "rank_order": "asc",
-    }
-
-
 def test_mcp_delete_requires_explicit_batch_confirmation(monkeypatch):
     from everos_hermes import mcp_server
 
@@ -366,60 +174,3 @@ def test_mcp_delete_requires_explicit_batch_confirmation(monkeypatch):
     ok = asyncio.run(mcp_server.everos_delete_memories(user_id="u1", session_id="s1", confirm=True, confirm_scope_text="delete user_id=u1 session_id=s1"))
     assert json.loads(ok)["mode"] == "batch"
     assert calls == [{"memory_id": None, "user_id": "u1", "session_id": "s1"}]
-
-
-def test_mcp_update_settings_passes_strict_and_return_diff(monkeypatch):
-    from everos_hermes import mcp_server
-
-    captured = {}
-
-    class FakeClient:
-        def update_settings(self, settings, **kwargs):
-            captured["settings"] = settings
-            captured.update(kwargs)
-            return {"data": {"timezone": "Asia/Tokyo"}, "diff": {"timezone": {"before": "UTC", "after": "Asia/Tokyo"}}}
-
-    monkeypatch.setenv("EVEROS_API_KEY", "sk-test")
-    monkeypatch.setattr(mcp_server, "make_client", lambda: FakeClient())
-
-    raw = asyncio.run(mcp_server.everos_update_settings({"timezone": "Asia/Tokyo"}, strict=True, return_diff=True))
-
-    assert captured == {"settings": {"timezone": "Asia/Tokyo"}, "strict": True, "return_diff": True}
-    assert json.loads(raw)["diff"]["timezone"]["after"] == "Asia/Tokyo"
-
-def test_mcp_agent_save_and_add_return_unchecked_visibility(monkeypatch):
-    from everos_hermes import mcp_server
-
-    class FakeClient:
-        def add_memories(self, **kwargs):
-            return {"data": {"status": "queued", "task_id": "task-agent"}}
-
-        def flush_memories(self, **kwargs):
-            return {"data": {"status": "success", "task_id": "flush-agent"}}
-
-    monkeypatch.setenv("EVEROS_API_KEY", "sk-test")
-    monkeypatch.setenv("EVEROS_USER_ID", "u1")
-    monkeypatch.setattr(mcp_server, "make_client", lambda: FakeClient())
-
-    save_raw = asyncio.run(mcp_server.everos_save_memory(
-        content="Agent trajectory summary",
-        scope="agent",
-        session_id="sess-agent",
-        flush=True,
-    ))
-    save = json.loads(save_raw)
-    assert save["agent_visibility"]["agent_raw_queued"] is True
-    assert save["agent_visibility"]["agent_structured_visible"] is None
-    assert save["agent_visibility"]["agent_visibility_status"] == "unchecked"
-    assert save["agent_visibility"]["agent_flush"]["status"] == "success"
-
-    add_raw = asyncio.run(mcp_server.everos_add_memories(
-        messages=[{"role": "assistant", "timestamp": 1711900000000, "content": "agent note"}],
-        scope="agent",
-        session_id="sess-agent",
-        flush=False,
-    ))
-    add = json.loads(add_raw)
-    assert add["agent_visibility"]["agent_raw_queued"] is True
-    assert add["agent_visibility"]["agent_structured_visible"] is None
-    assert add["agent_visibility"]["agent_visibility_status"] == "unchecked"

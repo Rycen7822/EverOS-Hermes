@@ -85,6 +85,7 @@ def test_sync_turn_adds_personal_message_ids_and_respects_agent_summary_flag(mon
     assert [message["role"] for message in messages] == ["user", "assistant"]
     assert [message["content"] for message in messages] == ["remember deterministic ids", "Noted."]
     assert all(message["message_id"].startswith("eh_") for message in messages)
+    assert [kwargs for kind, kwargs in calls if kind == "flush"] == [{"user_id": "u1", "session_id": "sess-2", "scope": "personal"}]
 
 
 def test_on_pre_compress_captures_agent_trajectory_without_flush_and_session_end_dedupes(monkeypatch, tmp_path):
@@ -118,8 +119,6 @@ def test_on_pre_compress_captures_agent_trajectory_without_flush_and_session_end
     assert "EverOS captured 4 agent trajectory messages for session sess-1" in summary
     assert len(agent_adds) == 1
     assert all(message["source"] == "pre_compress" for message in agent_adds[0]["messages"])
-    assert agent_adds[0]["messages"][1]["tool_calls"][0]["id"] == "call-1"
-    assert agent_adds[0]["messages"][2]["tool_call_id"] == "call-1"
     assert agent_flushes == []
 
 
@@ -153,7 +152,6 @@ def test_on_session_end_writes_agent_tool_trajectory_before_personal_flush(monke
     assert calls[0][1]["scope"] == "agent"
     assert provider._last_agent_write_status["ok"] is True
     assert calls[2][1]["scope"] == "personal"
-    assert calls[0][1]["messages"][1]["tool_calls"][0]["id"] == "call-1"
 
 
 def test_on_delegation_writes_child_session_id_prefix_and_flushes(monkeypatch, tmp_path):

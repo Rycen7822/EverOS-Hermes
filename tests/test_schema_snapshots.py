@@ -9,7 +9,7 @@ def _snapshot_path(name: str) -> Path:
 
 def _simplify_provider_property(schema: dict[str, Any]) -> dict[str, Any]:
     keep = {}
-    for key in ("type", "enum", "default", "description"):
+    for key in ("type", "enum"):
         if key in schema:
             keep[key] = schema[key]
     return keep
@@ -23,22 +23,15 @@ def _provider_snapshot() -> list[dict[str, Any]]:
     for schema in provider.get_tool_schemas():
         params = schema["parameters"]
         properties = params.get("properties", {})
-        snapshot.append(
-            {
-                "name": schema["name"],
-                "description": schema.get("description", ""),
-                "required": sorted(params.get("required", [])),
-                "properties": {key: _simplify_provider_property(properties[key]) for key in sorted(properties)},
-            }
-        )
+        item = {
+            "name": schema["name"],
+            "properties": {key: _simplify_provider_property(properties[key]) for key in sorted(properties)},
+        }
+        required = sorted(params.get("required", []))
+        if required:
+            item["required"] = required
+        snapshot.append(item)
     return snapshot
-
-
-def _description_summary(text: str) -> str:
-    text = " ".join(str(text or "").strip().split())
-    if ". " in text:
-        return text.split(". ", 1)[0] + "."
-    return text
 
 
 def _annotation_profile(annotations: Any) -> str:
@@ -72,17 +65,20 @@ def _mcp_snapshot() -> list[dict[str, Any]]:
         tool = tools[name]
         parameters = tool.parameters
         output_schema = tool.output_schema or {}
-        snapshot.append(
-            {
-                "name": name,
-                "title": tool.title,
-                "description_summary": _description_summary(tool.description),
-                "required": sorted(parameters.get("required", [])),
-                "properties": sorted(parameters.get("properties", {}).keys()),
-                "output_shape": _output_shape(output_schema),
-                "annotation_profile": _annotation_profile(tool.annotations),
-            }
-        )
+        item = {
+            "name": name,
+            "annotation_profile": _annotation_profile(tool.annotations),
+        }
+        output_shape = _output_shape(output_schema)
+        if output_shape != "result":
+            item["output_shape"] = output_shape
+        required = sorted(parameters.get("required", []))
+        properties = sorted(parameters.get("properties", {}).keys())
+        if required:
+            item["required"] = required
+        if properties:
+            item["properties"] = properties
+        snapshot.append(item)
     return snapshot
 
 

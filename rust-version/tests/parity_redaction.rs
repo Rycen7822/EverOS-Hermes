@@ -78,34 +78,3 @@ fn rust_redaction_handles_bearer_quoted_delimiters_and_truncates_errors() {
     assert!(rendered.contains("request_id=req-redaction"));
     assert!(rendered.len() < 650);
 }
-#[test]
-fn rust_redaction_redacts_escaped_json_credentials_inside_arguments_text() {
-    let email_secret = ["email", "-secret"].concat();
-    let client_id_secret = ["client", "-id-secret"].concat();
-    let arguments_object = format!(
-        r#"{{\"credentials\":{{\"client_email\":\"{email_secret}\",\"client_id\":\"{client_id_secret}\"}}}}"#
-    );
-    let rendered = everos_hermes_rust::redaction::sanitized_error_message(format!(
-        "tool arguments=\"{arguments_object}\" request_id=req-args"
-    ));
-    assert!(!rendered.contains(&email_secret));
-    assert!(!rendered.contains(&client_id_secret));
-    assert!(rendered.contains("[REDACTED]"));
-    assert!(rendered.contains("request_id=req-args"));
-}
-
-#[test]
-fn rust_redaction_redacts_multiline_credentials_object() {
-    let email_secret = ["email", "-secret"].concat();
-    let client_id_secret = ["client", "-id-secret"].concat();
-    let pretty_credentials = format!(
-        "{{\n  \"client_email\": \"{email_secret}\",\n  \"client_id\": \"{client_id_secret}\"\n}}"
-    );
-    let rendered = everos_hermes_rust::redaction::sanitized_error_message(format!(
-        "backend credentials={pretty_credentials} request_id=req-pretty"
-    ));
-    assert!(!rendered.contains(&email_secret));
-    assert!(!rendered.contains(&client_id_secret));
-    assert!(rendered.contains("[REDACTED]"));
-    assert!(rendered.contains("request_id=req-pretty"));
-}

@@ -65,8 +65,8 @@ fn client_search_uses_hybrid_defaults_and_session_filter() {
             None,
             "hybrid",
             None,
-            5,
-            None,
+            -1,
+            Some(0.0),
             false,
             false,
             None,
@@ -81,8 +81,8 @@ fn client_search_uses_hybrid_defaults_and_session_filter() {
     assert_eq!(body["filters"]["AND"][0]["session_id"], "session_001");
     assert_eq!(body["method"], "hybrid");
     assert_eq!(body["memory_types"], json!(DEFAULT_MEMORY_TYPES));
-    assert_eq!(body["top_k"], 5);
-    assert_eq!(body.get("radius"), None);
+    assert_eq!(body["top_k"], -1);
+    assert_eq!(body["radius"], 0.0);
 }
 
 #[test]
@@ -93,11 +93,6 @@ fn client_search_strips_vectors_by_default_but_can_keep_them() {
             "original_data": {"episodes": {"ep1": {"vector":[0.1,0.2],"embedding":[0.3]}}}
         }
     });
-
-    let stripped = strip_vectors(&payload);
-    assert!(stripped.to_string().contains("Coffee"));
-    assert!(!stripped.to_string().contains("vector"));
-    assert!(!stripped.to_string().contains("embedding"));
 
     let (base_url, handle) = one_request_server(payload.clone());
     let client = EverOSClient::new("test-key", &base_url, 10.0).unwrap();

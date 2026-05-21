@@ -1,8 +1,6 @@
 {
-  "version": 1,
   "cases": [
     {
-      "name": "request_json_200_object_adds_status_code",
       "operation": "request_json",
       "request": {
         "method": "GET",
@@ -24,7 +22,6 @@
       }
     },
     {
-      "name": "request_json_200_array_wraps_data_and_status_code",
       "operation": "request_json",
       "request": {
         "method": "GET",
@@ -48,7 +45,6 @@
       }
     },
     {
-      "name": "request_json_204_empty_body",
       "operation": "request_json",
       "request": {
         "method": "GET",
@@ -64,7 +60,6 @@
       }
     },
     {
-      "name": "delete_204_single_returns_deleted_mode",
       "operation": "delete_memories",
       "args": {
         "memory_id": "mem-1"

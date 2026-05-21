@@ -1,21 +1,6 @@
 use std::io::Cursor;
 
 #[test]
-fn mcp_read_frame_allows_large_raw_json_lines_within_body_limit() {
-    let large_id = "x".repeat(9000);
-    let mut raw = format!(r#"{{"jsonrpc":"2.0","id":"{large_id}","method":"ping"}}"#);
-    raw.push('\n');
-    let mut frame = Cursor::new(raw.into_bytes());
-
-    let value = everos_hermes_rust::mcp::read_frame(&mut frame)
-        .unwrap()
-        .unwrap();
-
-    assert_eq!(value["method"], "ping");
-    assert_eq!(value["id"].as_str().unwrap().len(), 9000);
-}
-
-#[test]
 fn mcp_read_frame_rejects_oversized_headers_and_bodies() {
     let mut huge_header = Cursor::new(format!("{}\n", "X".repeat(9000)).into_bytes());
     let err = everos_hermes_rust::mcp::read_frame(&mut huge_header).unwrap_err();

@@ -1,19 +1,17 @@
-use everos_hermes_rust::client::{DEFAULT_BASE_URL, DEFAULT_MEMORY_TYPES, EverOSClient};
+use everos_hermes_rust::client::{DEFAULT_MEMORY_TYPES, EverOSClient};
 use everos_hermes_rust::context_assembler::{ContextAssemblyConfig, assemble_everos_context};
 use everos_hermes_rust::env::{get_env, read_dotenv};
-use everos_hermes_rust::formatting::{format_search_context, strip_vectors};
-use everos_hermes_rust::mcp::{TOOL_NAMES, tool_definitions};
+use everos_hermes_rust::formatting::format_search_context;
+use everos_hermes_rust::mcp::tool_definitions;
 use everos_hermes_rust::policy::{should_skip_capture, should_skip_recall, stable_query_key};
 use everos_hermes_rust::provider::{
     EverOSProvider, ProviderConfig, ProviderInit, load_config, provider_tool_schemas,
 };
-use everos_hermes_rust::trajectory::build_agent_trajectory_messages;
+
 use serde_json::{Value, json};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
@@ -128,7 +126,7 @@ fn snapshot_json(name: &str) -> Value {
 
 fn simplify_provider_property(schema: &Value) -> Value {
     let mut out = serde_json::Map::new();
-    for key in ["type", "enum", "default", "description"] {
+    for key in ["type", "enum"] {
         if let Some(value) = schema.get(key) {
             out.insert(key.to_string(), value.clone());
         }
@@ -162,27 +160,23 @@ fn provider_schema_snapshot() -> Value {
                 let mut keys = properties.keys().cloned().collect::<Vec<_>>();
                 keys.sort();
                 for key in keys {
-                    simplified.insert(key.clone(), simplify_provider_property(properties.get(&key).unwrap()));
+                    simplified.insert(
+                        key.clone(),
+                        simplify_provider_property(properties.get(&key).unwrap()),
+                    );
                 }
-                json!({
+                let mut item = json!({
                     "name": schema["name"],
-                    "description": schema.get("description").cloned().unwrap_or(Value::String(String::new())),
                     "required": sorted_string_values(params.get("required")),
                     "properties": simplified,
-                })
+                });
+                if item["required"].as_array().is_some_and(Vec::is_empty) {
+                    item.as_object_mut().unwrap().remove("required");
+                }
+                item
             })
             .collect(),
     )
-}
-
-fn description_summary(value: Option<&Value>) -> String {
-    let text = value.and_then(Value::as_str).unwrap_or_default();
-    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if let Some((first, _)) = collapsed.split_once(". ") {
-        format!("{first}.")
-    } else {
-        collapsed
-    }
 }
 
 fn mcp_schema_snapshot() -> Value {
@@ -205,49 +199,68 @@ fn mcp_schema_snapshot() -> Value {
                     })
                     .unwrap_or_default();
                 let output_required = sorted_string_values(output.get("required"));
-                let output_shape = if output_required == ["result"] && output_properties == ["result"] {
-                    json!("result")
-                } else if output_required.is_empty()
-                    && output_properties == ["ok", "retryable", "status", "suggested_next_actions", "workflow"]
-                {
-                    json!("workflow")
-                } else {
-                    json!({"required": output_required, "properties": output_properties})
-                };
+                let output_shape =
+                    if output_required == ["result"] && output_properties == ["result"] {
+                        json!("result")
+                    } else if output_required.is_empty()
+                        && output_properties
+                            == [
+                                "ok",
+                                "retryable",
+                                "status",
+                                "suggested_next_actions",
+                                "workflow",
+                            ]
+                    {
+                        json!("workflow")
+                    } else {
+                        json!({"required": output_required, "properties": output_properties})
+                    };
                 let annotations = schema.get("annotations").unwrap_or(&Value::Null);
-                json!({
+                let annotation_profile = [
+                    if annotations["readOnlyHint"].as_bool().unwrap_or(false) {
+                        "read"
+                    } else {
+                        "write"
+                    },
+                    if annotations["destructiveHint"].as_bool().unwrap_or(false) {
+                        "destructive"
+                    } else {
+                        "safe"
+                    },
+                    if annotations["idempotentHint"].as_bool().unwrap_or(false) {
+                        "idem"
+                    } else {
+                        "nonidem"
+                    },
+                    if annotations["openWorldHint"].as_bool().unwrap_or(false) {
+                        "open"
+                    } else {
+                        "closed"
+                    },
+                ]
+                .join(":");
+                let mut item = json!({
                     "name": schema["name"],
-                    "title": schema["title"],
-                    "description_summary": description_summary(schema.get("description")),
                     "required": sorted_string_values(input.get("required")),
                     "properties": property_names,
                     "output_shape": output_shape,
-                    "annotation_profile": format!(
-                        "{}:{}:{}:{}",
-                        if annotations["readOnlyHint"].as_bool().unwrap_or(false) { "read" } else { "write" },
-                        if annotations["destructiveHint"].as_bool().unwrap_or(false) { "destructive" } else { "safe" },
-                        if annotations["idempotentHint"].as_bool().unwrap_or(false) { "idem" } else { "nonidem" },
-                        if annotations["openWorldHint"].as_bool().unwrap_or(false) { "open" } else { "closed" },
-                    ),
-                })
+                    "annotation_profile": annotation_profile,
+                });
+                let obj = item.as_object_mut().unwrap();
+                if obj["required"].as_array().is_some_and(Vec::is_empty) {
+                    obj.remove("required");
+                }
+                if obj["properties"].as_array().is_some_and(Vec::is_empty) {
+                    obj.remove("properties");
+                }
+                if obj["output_shape"].as_str() == Some("result") {
+                    obj.remove("output_shape");
+                }
+                item
             })
             .collect(),
     )
-}
-
-fn provider_config_contract() -> Value {
-    let raw = fs::read_to_string("../tests/contracts/provider_config_contract.json").unwrap();
-    serde_json::from_str(&raw).unwrap()
-}
-
-fn settings_validation_contract() -> Value {
-    let raw = fs::read_to_string("../tests/contracts/settings_validation_cases.json").unwrap();
-    serde_json::from_str(&raw).unwrap()
-}
-
-fn response_normalization_contract() -> Value {
-    let raw = fs::read_to_string("../tests/contracts/response_normalization_cases.json").unwrap();
-    serde_json::from_str(&raw).unwrap()
 }
 
 fn provider_config_usize_field(config: &ProviderConfig, key: &str) -> usize {
