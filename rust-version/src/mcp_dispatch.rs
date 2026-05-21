@@ -70,14 +70,7 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
                 flush,
                 flush_payload,
             );
-            if scope == "agent" {
-                workflows::add_agent_visibility(
-                    &mut payload,
-                    Some(true),
-                    Some(&uid),
-                    session_id.as_deref(),
-                );
-            }
+            add_agent_visibility_if_agent(&mut payload, &scope, &uid, session_id.as_deref());
             Ok(pretty_json(&payload))
         }
         "everos_add_memories" => {
@@ -100,68 +93,40 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
                 async_mode,
                 &scope,
             )?;
-            if flush {
-                match flush_memories_with_retry(
-                    &client,
-                    &uid,
-                    session_id.as_deref(),
-                    &scope,
-                    flush_timeout,
-                    2,
-                ) {
-                    Ok((response, attempt_count)) => {
-                        let mut payload = json!({
-                            "ok": true,
-                            "add": result,
-                            "flush": workflows::tool_flush_result_payload_with_attempt(&response, Some(attempt_count)),
-                        });
-                        if scope == "agent" {
-                            workflows::add_agent_visibility(
-                                &mut payload,
-                                Some(true),
-                                Some(&uid),
-                                session_id.as_deref(),
-                            );
+            let flush_payload = if flush {
+                Some(
+                    match flush_memories_with_retry(
+                        &client,
+                        &uid,
+                        session_id.as_deref(),
+                        &scope,
+                        flush_timeout,
+                        2,
+                    ) {
+                        Ok((response, attempt_count)) => {
+                            workflows::tool_flush_result_payload_with_attempt(
+                                &response,
+                                Some(attempt_count),
+                            )
                         }
-                        Ok(pretty_json(&payload))
-                    }
-                    Err(err @ EverOSError::Timeout { .. }) => {
-                        let mut payload = json!({"ok": true, "add": result, "flush": workflows::tool_timeout_payload("flush", &err)});
-                        if scope == "agent" {
-                            workflows::add_agent_visibility(
-                                &mut payload,
-                                Some(true),
-                                Some(&uid),
-                                session_id.as_deref(),
-                            );
+                        Err(err @ EverOSError::Timeout { .. }) => {
+                            workflows::tool_timeout_payload("flush", &err)
                         }
-                        Ok(pretty_json(&payload))
-                    }
-                    Err(err) => {
-                        let mut payload = json!({"ok": true, "add": result, "flush": error_payload("flush", &err)});
-                        if scope == "agent" {
-                            workflows::add_agent_visibility(
-                                &mut payload,
-                                Some(true),
-                                Some(&uid),
-                                session_id.as_deref(),
-                            );
-                        }
-                        Ok(pretty_json(&payload))
-                    }
-                }
-            } else if scope == "agent" {
-                let mut payload = json!({"ok": true, "add": result});
-                workflows::add_agent_visibility(
-                    &mut payload,
-                    Some(true),
-                    Some(&uid),
-                    session_id.as_deref(),
-                );
-                Ok(pretty_json(&payload))
+                        Err(err) => error_payload("flush", &err),
+                    },
+                )
             } else {
-                Ok(pretty_json(&result))
+                None
+            };
+            if !flush && scope != "agent" {
+                return Ok(pretty_json(&result));
             }
+            let mut payload = json!({"ok": true, "add": result});
+            if let (Some(flush), Some(map)) = (flush_payload, payload.as_object_mut()) {
+                map.insert("flush".to_string(), flush);
+            }
+            add_agent_visibility_if_agent(&mut payload, &scope, &uid, session_id.as_deref());
+            Ok(pretty_json(&payload))
         }
         "everos_flush_memories" => {
             let uid = optional_string(&value, "user_id").unwrap_or_else(default_user_id);
@@ -219,17 +184,8 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
                 None
             });
             let fallback_to_hybrid = bool_arg(&value, "fallback_to_hybrid", true);
-            let memory_types = value
-                .get("memory_types")
-                .and_then(Value::as_array)
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                })
-                .filter(|items| !items.is_empty());
+            let memory_types = string_array_arg(&value, "memory_types");
+            let memory_types = (!memory_types.is_empty()).then_some(memory_types);
             let include_original_data = bool_arg(&value, "include_original_data", false);
             let include_vectors = bool_arg(&value, "include_vectors", false);
             let client = make_client()?;
@@ -512,6 +468,17 @@ fn object_array_arg(value: &Value, key: &str) -> Vec<Value> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn add_agent_visibility_if_agent(
+    payload: &mut Value,
+    scope: &str,
+    uid: &str,
+    session_id: Option<&str>,
+) {
+    if scope == "agent" {
+        workflows::add_agent_visibility(payload, Some(true), Some(uid), session_id);
+    }
 }
 
 fn bool_arg(value: &Value, key: &str, default: bool) -> bool {

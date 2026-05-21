@@ -27,7 +27,6 @@ _DEFAULT_CONFIG: dict[str, Any] = {
     "agent_visibility_top_k": 5,
     "agent_visibility_timeout": 30.0,
     "agent_visibility_get_page_size": 20,
-    "agent_visibility_retry_flush_attempts": 1,
     "agentic_timeout": 60.0,
     "max_context_items": 8,
     "timeout": 10.0,
@@ -133,7 +132,6 @@ def _normalize_config(config: dict[str, Any]) -> dict[str, Any]:
         ("agent_dedupe_entries", 16, 4096),
         ("agent_visibility_top_k", 1, 20),
         ("agent_visibility_get_page_size", 1, 100),
-        ("agent_visibility_retry_flush_attempts", 1, 5),
     ):
         out[key] = _clamped(out.get(key, _DEFAULT_CONFIG[key]), _DEFAULT_CONFIG[key], low, high, int)
     out["min_score"] = _clamped(out.get("min_score", 0.0), 0.0, 0.0, 1.0, float)

@@ -9,7 +9,7 @@ from .agent_visibility import build_agent_visibility_report
 from .client import DEFAULT_BASE_URL, DEFAULT_MEMORY_TYPES, EverOSClient, EverOSTimeoutError
 from .env import get_env
 from .flush_retry import flush_memories_with_retry
-from .formatting import format_search_context, pretty_json, strip_vectors
+from .formatting import format_search_context, pretty_json
 from .redaction import error_payload, sanitized_error_message
 from .schemas import GetMemoryType, MemoryScope, SearchMemoryType, delete_confirm_text, normalize_scope
 from .tool_payloads import (
@@ -20,21 +20,6 @@ from .tool_payloads import (
 from .workflows import import_and_verify, save_and_verify, verify_session_ingest
 
 mcp = FastMCP("everos_mcp")
-
-TOOL_NAMES = [
-    "everos_save_memory",
-    "everos_add_memories",
-    "everos_flush_memories",
-    "everos_search_memories",
-    "everos_get_memories",
-    "everos_delete_memories",
-    "everos_get_task_status",
-    "everos_get_settings",
-    "everos_update_settings",
-    "everos_verify_session_ingest",
-    "everos_save_and_verify",
-    "everos_import_and_verify",
-]
 
 RetrievalMethod = Literal["keyword", "vector", "hybrid", "agentic"]
 ResponseFormat = Literal["json", "markdown"]
@@ -262,7 +247,6 @@ async def everos_search_memories(
     uid = user_id or default_user_id()
     resolved_types = list(memory_types or DEFAULT_MEMORY_TYPES)
     client = make_client()
-    fallback_used = False
     try:
         response = client.search_memories(
             query=query,
@@ -297,15 +281,10 @@ async def everos_search_memories(
                 return pretty_json(error_payload("search", fallback_exc))
             response["fallback_used"] = True
             response["fallback_reason"] = sanitized_error_message(exc)
-            fallback_used = True
         else:
             return pretty_json(_timeout_payload("search", exc))
     except Exception as exc:
         return pretty_json(error_payload("search", exc))
-    if not include_vectors:
-        response = strip_vectors(response)
-    if fallback_used and isinstance(response, dict):
-        response["fallback_used"] = True
     return _render(response, response_format)
 
 

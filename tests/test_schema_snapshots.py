@@ -64,8 +64,7 @@ def _mcp_snapshot() -> list[dict[str, Any]]:
 
     tools = mcp_server.mcp._tool_manager._tools
     snapshot = []
-    for name in mcp_server.TOOL_NAMES:
-        tool = tools[name]
+    for name, tool in tools.items():
         parameters = tool.parameters
         output_schema = tool.output_schema or {}
         item = {

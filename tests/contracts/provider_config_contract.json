@@ -1,69 +1,15 @@
-{
-  "fields": {
-    "agent_cases_max_items": {
-      "default": 4,
-      "max": 20,
-      "min": 0
-    },
-    "agent_dedupe_entries": {
-      "default": 256,
-      "max": 4096,
-      "min": 16
-    },
-    "agent_max_message_chars": {
-      "default": 8000,
-      "max": 20000,
-      "min": 100
-    },
-    "agent_max_messages": {
-      "default": 80,
-      "max": 200,
-      "min": 1
-    },
-    "agent_max_payload_chars": {
-      "default": 60000,
-      "max": 200000,
-      "min": 1000
-    },
-    "agent_max_tool_result_chars": {
-      "default": 6000,
-      "max": 20000,
-      "min": 100
-    },
-    "agent_skills_max_items": {
-      "default": 4,
-      "max": 20,
-      "min": 0
-    },
-    "episodic_max_items": {
-      "default": 6,
-      "max": 20,
-      "min": 0
-    },
-    "max_context_chars": {
-      "default": 12000,
-      "max": 50000,
-      "min": 1000
-    },
-    "min_recall_query_chars": {
-      "default": 8,
-      "max": 200,
-      "min": 0
-    },
-    "prefetch_cache_ttl_seconds": {
-      "default": 90,
-      "max": 600,
-      "min": 1
-    },
-    "profile_max_items": {
-      "default": 3,
-      "max": 20,
-      "min": 0
-    },
-    "recent_raw_top_k": {
-      "default": 4,
-      "max": 20,
-      "min": 0
-    }
-  }
-}
+{"fields": {
+  "agent_cases_max_items": {"default":4,"max":20,"min":0},
+  "agent_dedupe_entries": {"default":256,"max":4096,"min":16},
+  "agent_max_message_chars": {"default":8000,"max":20000,"min":100},
+  "agent_max_messages": {"default":80,"max":200,"min":1},
+  "agent_max_payload_chars": {"default":60000,"max":200000,"min":1000},
+  "agent_max_tool_result_chars": {"default":6000,"max":20000,"min":100},
+  "agent_skills_max_items": {"default":4,"max":20,"min":0},
+  "episodic_max_items": {"default":6,"max":20,"min":0},
+  "max_context_chars": {"default":12000,"max":50000,"min":1000},
+  "min_recall_query_chars": {"default":8,"max":200,"min":0},
+  "prefetch_cache_ttl_seconds": {"default":90,"max":600,"min":1},
+  "profile_max_items": {"default":3,"max":20,"min":0},
+  "recent_raw_top_k": {"default":4,"max":20,"min":0}
+}}

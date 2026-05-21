@@ -65,29 +65,7 @@ fn one_request_server(response: Value) -> (String, thread::JoinHandle<String>) {
     let addr = listener.local_addr().unwrap();
     let handle = thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
-        let mut buf = Vec::new();
-        let mut tmp = [0u8; 4096];
-        loop {
-            let n = stream.read(&mut tmp).unwrap();
-            if n == 0 {
-                break;
-            }
-            buf.extend_from_slice(&tmp[..n]);
-            if let Some(header_end) = find_bytes(&buf, b"\r\n\r\n") {
-                let headers = String::from_utf8_lossy(&buf[..header_end]).to_string();
-                let content_length = headers
-                    .lines()
-                    .find_map(|line| {
-                        line.strip_prefix("content-length: ")
-                            .or_else(|| line.strip_prefix("Content-Length: "))
-                    })
-                    .and_then(|value| value.trim().parse::<usize>().ok())
-                    .unwrap_or(0);
-                if buf.len() >= header_end + 4 + content_length {
-                    break;
-                }
-            }
-        }
+        let raw = read_http_request(&mut stream);
         let body = response.to_string();
         let reply = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -95,7 +73,7 @@ fn one_request_server(response: Value) -> (String, thread::JoinHandle<String>) {
             body
         );
         stream.write_all(reply.as_bytes()).unwrap();
-        String::from_utf8_lossy(&buf).to_string()
+        raw
     });
     (format!("http://{addr}"), handle)
 }
@@ -312,36 +290,13 @@ fn sequenced_request_server(
     responses: Vec<Value>,
     idle_timeout_ms: u64,
 ) -> (String, thread::JoinHandle<Vec<String>>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.set_nonblocking(true).unwrap();
-    let addr = listener.local_addr().unwrap();
-    let handle = thread::spawn(move || {
-        let mut requests = Vec::new();
-        let idle_timeout = Duration::from_millis(idle_timeout_ms);
-        let mut deadline = Instant::now() + idle_timeout;
-        while requests.len() < responses.len() && Instant::now() < deadline {
-            match listener.accept() {
-                Ok((mut stream, _)) => {
-                    let raw = read_http_request(&mut stream);
-                    let body = responses[requests.len()].to_string();
-                    let reply = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        body.len(),
-                        body
-                    );
-                    stream.write_all(reply.as_bytes()).unwrap();
-                    requests.push(raw);
-                    deadline = Instant::now() + idle_timeout;
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(10));
-                }
-                Err(err) => panic!("test server accept failed: {err}"),
-            }
-        }
-        requests
-    });
-    (format!("http://{addr}"), handle)
+    sequenced_status_request_server(
+        responses
+            .into_iter()
+            .map(|response| (200, response))
+            .collect(),
+        idle_timeout_ms,
+    )
 }
 
 fn sequenced_status_request_server(

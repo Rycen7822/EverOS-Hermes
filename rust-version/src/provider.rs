@@ -58,7 +58,6 @@ pub struct EverOSProvider {
     session_id: String,
     prefetch_cache: Mutex<HashMap<String, PrefetchCacheEntry>>,
     agent_saved_fingerprints: Mutex<VecDeque<String>>,
-    last_agent_visibility_status: Mutex<Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -107,7 +106,6 @@ impl EverOSProvider {
             session_id: init.session_id,
             prefetch_cache: Mutex::new(HashMap::new()),
             agent_saved_fingerprints: Mutex::new(VecDeque::new()),
-            last_agent_visibility_status: Mutex::new(Value::Object(Map::new())),
         })
     }
 
@@ -567,9 +565,8 @@ impl EverOSProvider {
             "agent",
         )?;
         self.remember_agent_fingerprint(result.fingerprint.clone());
-        let mut flush_payload = None;
         if flush_allowed && self.config.agent_flush_after_turn {
-            let (flush, attempt_count) = flush_memories_with_retry(
+            flush_memories_with_retry(
                 client,
                 &self.user_id,
                 Some(session_id),
@@ -577,50 +574,6 @@ impl EverOSProvider {
                 None,
                 self.config.agent_visibility_retry_flush_attempts,
             )?;
-            flush_payload = Some(workflows::tool_flush_result_payload_with_attempt(
-                &flush,
-                Some(attempt_count),
-            ));
-        }
-        let should_audit = self.config.agent_visibility_verify_after_write
-            || (flush_payload.is_some() && self.config.agent_visibility_verify_after_flush);
-        if should_audit {
-            let texts = result
-                .messages
-                .iter()
-                .filter_map(|message| message.get("content").and_then(Value::as_str))
-                .map(ToString::to_string)
-                .collect::<Vec<_>>();
-            let queries = self.agent_visibility_queries(texts, session_id, &[_operation]);
-            let mut visibility = audit_agent_visibility(
-                client,
-                &self.user_id,
-                Some(session_id),
-                &queries,
-                self.config.agent_visibility_top_k as i64,
-                Some(self.config.agent_visibility_timeout),
-                self.config.agent_visibility_get_page_size as u64,
-            );
-            if let Some(map) = visibility.as_object_mut() {
-                map.insert("agent_raw_queued".to_string(), Value::Bool(true));
-                map.insert(
-                    "agent_flush".to_string(),
-                    flush_payload.clone().unwrap_or(Value::Null),
-                );
-            }
-            if let Ok(mut slot) = self.last_agent_visibility_status.lock() {
-                *slot = visibility;
-            }
-        } else if let Some(flush_payload) = flush_payload
-            && let Ok(mut slot) = self.last_agent_visibility_status.lock()
-        {
-            *slot = build_agent_visibility_report(
-                Some(true),
-                Some(flush_payload),
-                vec![],
-                Some(&self.user_id),
-                Some(session_id),
-            );
         }
         Ok(true)
     }
