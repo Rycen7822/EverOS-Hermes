@@ -45,13 +45,11 @@ pub struct ContextAssemblyResult {
     pub included_counts: HashMap<String, usize>,
     pub dropped_counts: HashMap<String, usize>,
     pub estimated_chars: usize,
-    pub warnings: Vec<String>,
 }
 
 pub fn assemble_everos_context(
     main_response: Option<&Value>,
     raw_response: Option<&Value>,
-    _query: &str,
     config: &ContextAssemblyConfig,
     source: &str,
 ) -> ContextAssemblyResult {
@@ -135,7 +133,6 @@ pub fn assemble_everos_context(
         included_counts,
         dropped_counts,
         estimated_chars,
-        warnings: Vec::new(),
     }
 }
 

@@ -35,7 +35,7 @@ from .tool_payloads import (
     timeout_payload as _timeout_payload,
 )
 from .trajectory import TrajectoryBuildOptions, TrajectoryBuildResult, TrajectorySource, build_agent_trajectory_messages_with_options
-from .workflows import import_and_verify, save_and_verify, verify_session_ingest
+from .workflows import import_and_verify, now_ms, save_and_verify, verify_session_ingest
 
 try:
     from agent.memory_provider import MemoryProvider
@@ -96,9 +96,6 @@ _CONTEXT_STRIP_RE = re.compile(r"<memory-context>[\s\S]*?</memory-context>|<ever
 def _tool_error(message: str) -> str:
     return json.dumps({"error": redact_text(message)}, ensure_ascii=False)
 
-
-def _now_ms() -> int:
-    return int(time.time() * 1000)
 
 
 def _clean_content(text: str) -> str:
@@ -279,8 +276,7 @@ class EverOSMemoryProvider(MemoryProvider):
 
     def _search_prefetch_context(self, query_text: str, session_id: str) -> tuple[str, dict[str, Any]]:
         main_response, raw_response, warnings, errors, ok_count = self._search_for_context(query_text, session_id)
-        result = self._assemble_context(query_text, session_id, main_response, raw_response)
-        warnings.extend(result.warnings)
+        result = self._assemble_context(main_response, raw_response)
         status = {
             "ok": ok_count > 0 or not errors,
             "cached": False,
@@ -360,15 +356,12 @@ class EverOSMemoryProvider(MemoryProvider):
 
     def _assemble_context(
         self,
-        query_text: str,
-        session_id: str,
         main_response: dict[str, Any] | None,
         raw_response: dict[str, Any] | None,
     ) -> Any:
         return assemble_everos_context(
             main_response=main_response,
             raw_response=raw_response,
-            query=query_text,
             config=self._config,
             source="prefetch",
         )
@@ -409,7 +402,7 @@ class EverOSMemoryProvider(MemoryProvider):
         session_id = str(args.get("session_id") or self._session_id or "") or None
         scope = normalize_scope(str(args.get("scope") or "personal"))
         role = str(args.get("role") or ("assistant" if scope == "agent" else "user")).strip() or "user"
-        message = {"role": role, "timestamp": _now_ms(), "content": content}
+        message = {"role": role, "timestamp": now_ms(), "content": content}
         if args.get("tool_call_id"):
             message["tool_call_id"] = str(args.get("tool_call_id"))
         result = self._client.add_memories(
@@ -582,10 +575,10 @@ class EverOSMemoryProvider(MemoryProvider):
         clean_user = _clean_content(user_content)
         clean_assistant = _clean_content(assistant_content)
         sid = session_id or self._session_id
-        skip, _reason = should_skip_capture(clean_user, clean_assistant, session_id=sid, config=self._config)
+        skip, _reason = should_skip_capture(clean_user, clean_assistant, session_id=sid)
         if skip:
             return
-        now = _now_ms()
+        now = now_ms()
         personal_messages = _build_personal_turn_messages(clean_user, clean_assistant, session_id=sid, now_ms=now)
         agent_result = self._build_agent_summary_result(clean_user, clean_assistant, session_id=sid, now_ms=now + 2)
 
@@ -683,8 +676,7 @@ class EverOSMemoryProvider(MemoryProvider):
             add = self._client.add_memories(user_id=self._user_id, session_id=session_id, messages=result.messages, async_mode=True, scope="agent")
             queued = True
             self._last_agent_write_status = {
-                "ok": True, "scope": "agent", "task_id": _task_id(add), "operation": operation,
-                "output_count": result.output_count, "warnings": result.warnings,
+                "ok": True, "scope": "agent", "task_id": _task_id(add), "operation": operation, "output_count": len(result.messages)
             }
             flush_payload: dict[str, Any] | None = None
             if flush_allowed and self._config.get("agent_flush_after_turn"):
@@ -733,7 +725,7 @@ class EverOSMemoryProvider(MemoryProvider):
                 result = self._client.add_memories(
                     user_id=self._user_id,
                     session_id=self._session_id,
-                    messages=[{"role": "user", "timestamp": _now_ms(), "content": text}],
+                    messages=[{"role": "user", "timestamp": now_ms(), "content": text}],
                     async_mode=True,
                     scope="personal",
                 )
@@ -767,7 +759,7 @@ class EverOSMemoryProvider(MemoryProvider):
         wrote = self._write_agent_trajectory(result, session_id=self._session_id, flush_allowed=False, operation="pre_compress.agent")
         if not wrote:
             return ""
-        return f"EverOS captured {result.output_count} agent trajectory messages for session {self._session_id}; preserve task outcome and reusable tool lessons."
+        return f"EverOS captured {len(result.messages)} agent trajectory messages for session {self._session_id}; preserve task outcome and reusable tool lessons."
 
     def on_delegation(self, task: str, result: str, *, child_session_id: str = "", **kwargs: Any) -> None:
         if not self._active or not self._write_enabled or not self._client or not self._session_id:
@@ -776,7 +768,7 @@ class EverOSMemoryProvider(MemoryProvider):
             return
         child = str(child_session_id or kwargs.get("session_id") or "").strip()
         prefix = f"[delegation child_session_id={child}] " if child else "[delegation] "
-        now = _now_ms()
+        now = now_ms()
         messages = [
             {"role": "user", "timestamp": now, "content": str(task or "").strip()},
             {"role": "assistant", "timestamp": now + 1, "content": prefix + str(result or "").strip()},
@@ -794,7 +786,7 @@ class EverOSMemoryProvider(MemoryProvider):
     def _build_agent_trajectory_result(self, messages: list[dict[str, Any]], *, source: TrajectorySource) -> TrajectoryBuildResult:
         return build_agent_trajectory_messages_with_options(
             messages,
-            self._trajectory_options(source=source, session_id=self._session_id, now_ms=_now_ms()),
+            self._trajectory_options(source=source, session_id=self._session_id, now_ms=now_ms()),
         )
 
     def _trajectory_options(

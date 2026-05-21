@@ -26,10 +26,6 @@ def test_builds_user_assistant_tool_chain_with_tool_calls():
     assert result.messages[1]["content"] == "[Assistant requested tool calls]"
     assert result.messages[1]["tool_calls"][0]["id"] == "call-1"
     assert result.messages[2]["tool_call_id"] == "call-1"
-    assert result.input_count == 4
-    assert result.output_count == 4
-    assert result.dropped_count == 0
-    assert result.source == "session_end"
 
 
 def test_drops_tool_without_tool_call_id_and_warns():
@@ -44,8 +40,6 @@ def test_drops_tool_without_tool_call_id_and_warns():
     )
 
     assert [m["role"] for m in result.messages] == ["user"]
-    assert result.dropped_count == 1
-    assert any("tool_call_id" in warning for warning in result.warnings)
 
 
 
@@ -145,7 +139,6 @@ def test_payload_budget_keeps_recent_task_chain():
     assert "old user" not in rendered
     assert "old assistant" not in rendered
     assert [m["content"] for m in result.messages] == ["recent task", "recent answer", "recent tool"]
-    assert result.dropped_count == 2
 
 
 def test_timestamp_normalization_accepts_ms_seconds_and_missing():

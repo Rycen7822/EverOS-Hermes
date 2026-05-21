@@ -17,12 +17,6 @@ TrajectorySource = Literal["session_end", "pre_compress", "delegation", "sync_tu
 class TrajectoryBuildResult:
     messages: list[dict[str, Any]]
     fingerprint: str
-    warnings: list[str]
-    source: str
-    input_count: int
-    output_count: int
-    dropped_count: int
-    estimated_chars: int
 
 
 @dataclass(slots=True)
@@ -71,22 +65,15 @@ def build_agent_trajectory_messages_with_options(
 ) -> TrajectoryBuildResult:
     """Convert Hermes message history into bounded EverOS agent messages."""
     base_now = int(options.now_ms if options.now_ms is not None else time.time() * 1000)
-    warnings: list[str] = []
     output: list[dict[str, Any]] = []
-    dropped_count = 0
 
     for input_index, raw in enumerate(messages):
         role = str(raw.get("role") or "").strip().lower()
         if role not in {"user", "assistant", "tool", "system"}:
-            dropped_count += 1
-            warnings.append(f"dropped unsupported role at index {input_index}: {role or '<empty>'}")
             continue
         if role == "system" and not options.include_system:
-            dropped_count += 1
             continue
         if role == "tool" and not str(raw.get("tool_call_id") or "").strip():
-            dropped_count += 1
-            warnings.append(f"dropped tool message at index {input_index}: missing tool_call_id")
             continue
 
         tool_calls = scrub_value(raw.get("tool_calls")) if role == "assistant" and raw.get("tool_calls") else None
@@ -97,8 +84,6 @@ def build_agent_trajectory_messages_with_options(
         limit = options.max_tool_result_chars if role == "tool" else options.max_message_chars
         content = _truncate(content, limit)
         if not content:
-            dropped_count += 1
-            warnings.append(f"dropped {role} message at index {input_index}: empty content")
             continue
 
         timestamp = _normalize_timestamp(raw.get("timestamp"), base_now + len(output))
@@ -124,27 +109,10 @@ def build_agent_trajectory_messages_with_options(
         output.append(message)
 
     if options.max_messages > 0 and len(output) > options.max_messages:
-        extra = len(output) - options.max_messages
         output = output[-options.max_messages:]
-        dropped_count += extra
-        warnings.append(f"dropped {extra} oldest messages due to max_messages")
 
-    output, budget_dropped = _enforce_payload_budget(output, options.max_payload_chars)
-    if budget_dropped:
-        dropped_count += budget_dropped
-        warnings.append(f"dropped {budget_dropped} oldest messages due to max_payload_chars")
-
-    estimated_chars = _estimate_chars(output)
-    return TrajectoryBuildResult(
-        messages=output,
-        fingerprint=_fingerprint(options.session_id, output),
-        warnings=warnings,
-        source=options.source,
-        input_count=len(messages),
-        output_count=len(output),
-        dropped_count=dropped_count,
-        estimated_chars=estimated_chars,
-    )
+    output = _enforce_payload_budget(output, options.max_payload_chars)
+    return TrajectoryBuildResult(messages=output, fingerprint=_fingerprint(options.session_id, output))
 
 
 def _content_to_text(value: Any) -> str:
@@ -223,9 +191,9 @@ def _estimate_chars(messages: list[dict[str, Any]]) -> int:
     return sum(len(_canonical_json(message)) for message in messages)
 
 
-def _enforce_payload_budget(messages: list[dict[str, Any]], max_payload_chars: int) -> tuple[list[dict[str, Any]], int]:
+def _enforce_payload_budget(messages: list[dict[str, Any]], max_payload_chars: int) -> list[dict[str, Any]]:
     if max_payload_chars <= 0 or _estimate_chars(messages) <= max_payload_chars:
-        return messages, 0
+        return messages
     last_user_index = None
     for index, message in enumerate(messages):
         if message.get("role") == "user":
@@ -233,13 +201,11 @@ def _enforce_payload_budget(messages: list[dict[str, Any]], max_payload_chars: i
     protected_start = last_user_index if last_user_index is not None else max(0, len(messages) - 1)
     protected = messages[protected_start:]
     prefix = messages[:protected_start]
-    dropped = 0
     while prefix and _estimate_chars(prefix + protected) > max_payload_chars:
         prefix.pop(0)
-        dropped += 1
     if _estimate_chars(prefix + protected) <= max_payload_chars:
-        return prefix + protected, dropped
-    return protected, dropped + len(prefix)
+        return prefix + protected
+    return protected
 
 
 def _fingerprint(session_id: str, messages: list[dict[str, Any]]) -> str:

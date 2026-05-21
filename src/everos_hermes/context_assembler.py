@@ -27,21 +27,18 @@ class ContextAssemblyResult:
     included_counts: dict[str, int]
     dropped_counts: dict[str, int]
     estimated_chars: int
-    warnings: list[str]
 
 
 def assemble_everos_context(
     *,
     main_response: dict[str, Any] | None,
     raw_response: dict[str, Any] | None,
-    query: str,
     config: Mapping[str, Any],
     source: str = "prefetch",
 ) -> ContextAssemblyResult:
     cfg = {**DEFAULT_LIMITS, **dict(config or {})}
     max_context_chars = _int_config(cfg, "max_context_chars", int(DEFAULT_LIMITS["max_context_chars"]))
     min_score = _float_config(cfg, "min_score", float(DEFAULT_LIMITS["min_score"]))
-    warnings: list[str] = []
     hit_counts: dict[str, int] = {}
     dropped_counts: dict[str, int] = {}
     seen_ids: set[str] = set()
@@ -93,8 +90,8 @@ def assemble_everos_context(
     included_counts = {section: len(lines) for section, lines in sections.items() if lines}
     if not text:
         hit_counts = {key: value for key, value in hit_counts.items() if value}
-        return ContextAssemblyResult("", hit_counts, {}, dropped_counts, 0, warnings)
-    return ContextAssemblyResult(text, hit_counts, included_counts, dropped_counts, len(text), warnings)
+        return ContextAssemblyResult("", hit_counts, {}, dropped_counts, 0)
+    return ContextAssemblyResult(text, hit_counts, included_counts, dropped_counts, len(text))
 
 
 def _data(response: dict[str, Any] | None) -> dict[str, Any]:

@@ -41,7 +41,7 @@ def test_get_validator_distinguishes_get_memory_types_and_rank_order():
 
 
 def test_filters_require_user_and_reject_unknown_or_conflicting_fields():
-    from everos_hermes.schemas import CLOUD_V1_ENDPOINTS, OUT_OF_SCOPE_ENDPOINTS, build_filters, validate_filters
+    from everos_hermes.schemas import build_filters, validate_filters
 
     filters = build_filters(user_id="u1", session_id="s1", filters={"AND": [{"timestamp": {"gte": 1700000000000}}]})
     assert filters == {
@@ -49,18 +49,6 @@ def test_filters_require_user_and_reject_unknown_or_conflicting_fields():
         "AND": [{"timestamp": {"gte": 1700000000000}}, {"session_id": "s1"}],
     }
     validate_filters(filters)
-    assert set(CLOUD_V1_ENDPOINTS.values()) == {
-        "/api/v1/memories",
-        "/api/v1/memories/agent",
-        "/api/v1/memories/flush",
-        "/api/v1/memories/agent/flush",
-        "/api/v1/memories/get",
-        "/api/v1/memories/search",
-        "/api/v1/memories/delete",
-        "/api/v1/tasks/{task_id}",
-        "/api/v1/settings",
-    }
-    assert {"/api/v1/memories/group", "/api/v1/senders", "/api/v1/object/sign"} <= set(OUT_OF_SCOPE_ENDPOINTS)
 
     with pytest.raises(ValueError, match="user_id"):
         validate_filters({"session_id": "s1"})

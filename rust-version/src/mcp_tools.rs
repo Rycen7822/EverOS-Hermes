@@ -1,20 +1,5 @@
 use serde_json::{Value, json};
 
-pub const TOOL_NAMES: [&str; 12] = [
-    "everos_save_memory",
-    "everos_add_memories",
-    "everos_flush_memories",
-    "everos_search_memories",
-    "everos_get_memories",
-    "everos_delete_memories",
-    "everos_get_task_status",
-    "everos_get_settings",
-    "everos_update_settings",
-    "everos_verify_session_ingest",
-    "everos_save_and_verify",
-    "everos_import_and_verify",
-];
-
 pub fn tool_definitions() -> Vec<Value> {
     let mut tools = vec![
         json!({

@@ -467,7 +467,6 @@ pub fn verify_session_ingest(
             } else {
                 None
             },
-            false,
         );
         status = workflow_status_from_agent_visibility(&visibility, &status).to_string();
         verified = if status == "verified" {

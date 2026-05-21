@@ -38,7 +38,7 @@ def should_skip_recall(query: str, *, session_id: str, config: Mapping[str, Any]
     return False, ""
 
 
-def should_skip_capture(user_content: str, assistant_content: str, *, session_id: str, config: Mapping[str, Any]) -> tuple[bool, str]:
+def should_skip_capture(user_content: str, assistant_content: str, *, session_id: str) -> tuple[bool, str]:
     user = _normalize_query(user_content)
     assistant = _normalize_query(assistant_content)
     if not user or not assistant:

@@ -86,7 +86,6 @@ pub fn audit_agent_visibility(
         timeout,
         get_page_size,
         None,
-        false,
     )
 }
 
@@ -100,7 +99,6 @@ pub fn audit_agent_visibility_with_options(
     timeout: Option<f64>,
     get_page_size: u64,
     precomputed_searches: Option<&HashMap<String, Value>>,
-    include_responses: bool,
 ) -> Value {
     let mut checks = Vec::new();
     for query in queries
@@ -143,11 +141,10 @@ pub fn audit_agent_visibility_with_options(
                     hit_count,
                     Some(response),
                     None,
-                    include_responses,
                 );
             }
             Err(err) => {
-                set_check_fields(&mut check, "error", 0, None, Some(err), include_responses);
+                set_check_fields(&mut check, "error", 0, None, Some(err));
             }
         }
         set_latency(&mut check, started);
@@ -175,11 +172,10 @@ pub fn audit_agent_visibility_with_options(
                     hit_count,
                     Some(response),
                     None,
-                    include_responses,
                 );
             }
             Err(err) => {
-                set_check_fields(&mut check, "error", 0, None, Some(err), include_responses);
+                set_check_fields(&mut check, "error", 0, None, Some(err));
             }
         }
         set_latency(&mut check, started);
@@ -215,16 +211,12 @@ fn set_check_fields(
     hit_count: usize,
     response: Option<Value>,
     error: Option<EverOSError>,
-    include_response: bool,
 ) {
     if let Some(map) = check.as_object_mut() {
         map.insert("status".to_string(), Value::String(status.to_string()));
         map.insert("hit_count".to_string(), json!(hit_count));
         if let Some(response) = response {
             map.insert("response_summary".to_string(), response_summary(&response));
-            if include_response {
-                map.insert("response".to_string(), response);
-            }
         }
         if let Some(error) = error {
             map.insert("error".to_string(), Value::String(error.to_string()));

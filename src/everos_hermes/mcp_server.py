@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import time
 from typing import Any, Literal, TypedDict
 
 from mcp.server.fastmcp import FastMCP
@@ -17,7 +16,7 @@ from .tool_payloads import (
     save_result_payload as _save_result_payload,
     timeout_payload as _timeout_payload,
 )
-from .workflows import import_and_verify, save_and_verify, verify_session_ingest
+from .workflows import import_and_verify, now_ms, save_and_verify, verify_session_ingest
 
 mcp = FastMCP("everos_mcp")
 
@@ -43,9 +42,6 @@ def make_client() -> EverOSClient:
 def default_user_id() -> str:
     return get_env("EVEROS_USER_ID", "") or "hermes_default"
 
-
-def now_ms() -> int:
-    return int(time.time() * 1000)
 
 
 def _render(response: dict[str, Any], response_format: str = "json") -> str:

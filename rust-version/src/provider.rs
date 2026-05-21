@@ -204,7 +204,6 @@ impl EverOSProvider {
         let assembled = assemble_everos_context(
             Some(&merged),
             raw_response.as_ref(),
-            &query,
             &self.context_assembly_config(),
             "prefetch",
         );
@@ -254,7 +253,7 @@ impl EverOSProvider {
         let sid = session_id
             .filter(|value| !value.trim().is_empty())
             .unwrap_or(&self.session_id);
-        if should_skip_capture(&clean_user, &clean_assistant, sid, &self.config_value()).0 {
+        if should_skip_capture(&clean_user, &clean_assistant, sid).0 {
             return Ok(());
         }
         let now = now_ms();
@@ -280,7 +279,7 @@ impl EverOSProvider {
         if write_agent {
             let agent_result =
                 self.build_agent_summary_result(&clean_user, &clean_assistant, sid, now + 2);
-            self.write_agent_trajectory(&agent_result, sid, true, "sync_turn.agent")?;
+            self.write_agent_trajectory(&agent_result, sid, true)?;
         }
         Ok(())
     }
@@ -325,8 +324,7 @@ impl EverOSProvider {
         }
         if self.config.capture_agent_memory && self.config.agent_trajectory_on_session_end {
             let result = self.build_agent_trajectory_result(messages, "session_end");
-            let _ =
-                self.write_agent_trajectory(&result, &self.session_id, true, "session_end.agent");
+            let _ = self.write_agent_trajectory(&result, &self.session_id, true);
         }
         self.client
             .as_ref()
@@ -346,14 +344,14 @@ impl EverOSProvider {
             return Ok(String::new());
         }
         let result = self.build_agent_trajectory_result(messages, "pre_compress");
-        let wrote =
-            self.write_agent_trajectory(&result, &self.session_id, false, "pre_compress.agent")?;
+        let wrote = self.write_agent_trajectory(&result, &self.session_id, false)?;
         if !wrote {
             return Ok(String::new());
         }
         Ok(format!(
             "EverOS captured {} agent trajectory messages for session {}; preserve task outcome and reusable tool lessons.",
-            result.output_count, self.session_id
+            result.messages.len(),
+            self.session_id
         ))
     }
 
@@ -399,7 +397,7 @@ impl EverOSProvider {
                 }
             }
         }
-        self.write_agent_trajectory(&built, &self.session_id, true, "delegation.agent")?;
+        self.write_agent_trajectory(&built, &self.session_id, true)?;
         Ok(())
     }
 
@@ -549,7 +547,6 @@ impl EverOSProvider {
         result: &TrajectoryBuildResult,
         session_id: &str,
         flush_allowed: bool,
-        _operation: &str,
     ) -> Result<bool, EverOSError> {
         if result.messages.is_empty() || self.agent_fingerprint_seen(&result.fingerprint) {
             return Ok(false);

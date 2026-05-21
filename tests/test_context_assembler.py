@@ -16,7 +16,7 @@ def test_orders_profile_skills_cases_episodes_raw():
     }
     raw_response = {"data": {"raw_messages": [{"id": "r1", "role": "user", "content": "recent raw note"}]}}
 
-    result = assemble_everos_context(main_response=main_response, raw_response=raw_response, query="everos", config={}, source="prefetch")
+    result = assemble_everos_context(main_response=main_response, raw_response=raw_response, config={}, source="prefetch")
 
     text = result.text
     assert text.startswith('<everos-context version="2" source="prefetch">')
@@ -41,8 +41,7 @@ def test_budget_caps_context_chars():
     result = assemble_everos_context(
         main_response={"data": {"episodes": episodes}},
         raw_response=None,
-        query="budget",
-        config={"max_context_chars": 520, "episodic_max_items": 10},
+                config={"max_context_chars": 520, "episodic_max_items": 10},
     )
 
     assert result.text
@@ -64,8 +63,7 @@ def test_dedupes_by_id_then_content_hash():
             }
         },
         raw_response=None,
-        query="dedupe",
-        config={"episodic_max_items": 10},
+                config={"episodic_max_items": 10},
     )
 
     assert "first" in result.text
@@ -78,8 +76,7 @@ def test_raw_does_not_displace_structured_memory():
     result = assemble_everos_context(
         main_response={"data": {"episodes": [{"id": "e1", "summary": "same durable memory"}]}},
         raw_response={"data": {"raw_messages": [{"id": "r1", "content": "same durable memory", "role": "user"}]}},
-        query="raw",
-        config={},
+                config={},
     )
 
     assert "same durable memory" in result.text
@@ -88,7 +85,7 @@ def test_raw_does_not_displace_structured_memory():
 
 
 def test_empty_response_returns_empty_text():
-    result = assemble_everos_context(main_response={"data": {}}, raw_response=None, query="none", config={})
+    result = assemble_everos_context(main_response={"data": {}}, raw_response=None, config={})
 
     assert result.text == ""
     assert result.included_counts == {}
@@ -112,8 +109,7 @@ def test_vectors_original_data_and_unknown_large_fields_are_not_rendered():
             }
         },
         raw_response=None,
-        query="visible",
-        config={},
+                config={},
     )
 
     assert "visible summary" in result.text

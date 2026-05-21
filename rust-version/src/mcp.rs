@@ -9,7 +9,7 @@ const MAX_FRAME_HEADER_BYTES: usize = 64 * 1024;
 const MAX_FRAME_BODY_BYTES: usize = 16 * 1024 * 1024;
 
 pub use crate::mcp_dispatch::call_tool;
-pub use crate::mcp_tools::{TOOL_NAMES, tool_definitions};
+pub use crate::mcp_tools::tool_definitions;
 
 pub fn make_client() -> crate::client::Result<EverOSClient> {
     EverOSClient::from_env(None)

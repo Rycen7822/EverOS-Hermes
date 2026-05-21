@@ -50,7 +50,6 @@ pub fn should_skip_capture(
     user_content: &str,
     assistant_content: &str,
     session_id: &str,
-    _config: &Value,
 ) -> (bool, String) {
     let user = normalize_query(user_content);
     let assistant = normalize_query(assistant_content);

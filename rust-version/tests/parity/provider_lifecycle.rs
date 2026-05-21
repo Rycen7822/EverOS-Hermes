@@ -106,7 +106,7 @@ fn rust_context_engine_policy_trajectory_match_python_contract() {
         (false, String::new())
     );
     assert_eq!(
-        should_skip_capture("thanks", "done", "sess-1", &config),
+        should_skip_capture("thanks", "done", "sess-1"),
         (true, "trivial_turn".to_string())
     );
     let cache_key = stable_query_key(" Debug   Cache ", "sess-1", &config);
@@ -138,7 +138,6 @@ fn rust_context_assembler_renders_python_v2_sections_and_generic_agent_memory() 
         Some(
             &json!({"data": {"raw_messages": [{"id":"raw-1","role":"user","content":"recent raw clue","score":0.6}]}}),
         ),
-        "debug cache",
         &cfg,
         "prefetch",
     );

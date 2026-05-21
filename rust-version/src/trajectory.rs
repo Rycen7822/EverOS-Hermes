@@ -8,12 +8,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub struct TrajectoryBuildResult {
     pub messages: Vec<Value>,
     pub fingerprint: String,
-    pub warnings: Vec<String>,
-    pub source: String,
-    pub input_count: usize,
-    pub output_count: usize,
-    pub dropped_count: usize,
-    pub estimated_chars: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,9 +54,7 @@ pub fn build_agent_trajectory_messages_with_options(
     options: &TrajectoryBuildOptions,
 ) -> TrajectoryBuildResult {
     let base_now = options.now_ms.unwrap_or_else(current_ms);
-    let mut warnings = Vec::new();
     let mut output = Vec::new();
-    let mut dropped_count = 0usize;
 
     for (input_index, raw) in messages.iter().enumerate() {
         let role = raw
@@ -72,19 +64,9 @@ pub fn build_agent_trajectory_messages_with_options(
             .trim()
             .to_ascii_lowercase();
         if !matches!(role.as_str(), "user" | "assistant" | "tool" | "system") {
-            dropped_count += 1;
-            warnings.push(format!(
-                "dropped unsupported role at index {input_index}: {}",
-                if role.is_empty() {
-                    "<empty>"
-                } else {
-                    role.as_str()
-                }
-            ));
             continue;
         }
         if role == "system" && !options.include_system {
-            dropped_count += 1;
             continue;
         }
         let tool_call_id = raw
@@ -94,10 +76,6 @@ pub fn build_agent_trajectory_messages_with_options(
             .trim()
             .to_string();
         if role == "tool" && tool_call_id.is_empty() {
-            dropped_count += 1;
-            warnings.push(format!(
-                "dropped tool message at index {input_index}: missing tool_call_id"
-            ));
             continue;
         }
 
@@ -122,10 +100,6 @@ pub fn build_agent_trajectory_messages_with_options(
         };
         content = truncate(&content, limit);
         if content.trim().is_empty() {
-            dropped_count += 1;
-            warnings.push(format!(
-                "dropped {role} message at index {input_index}: empty content"
-            ));
             continue;
         }
 
@@ -157,33 +131,14 @@ pub fn build_agent_trajectory_messages_with_options(
     }
 
     if options.max_messages > 0 && output.len() > options.max_messages {
-        let extra = output.len() - options.max_messages;
-        output = output.split_off(extra);
-        dropped_count += extra;
-        warnings.push(format!(
-            "dropped {extra} oldest messages due to max_messages"
-        ));
+        output = output.split_off(output.len() - options.max_messages);
     }
 
-    let (output, budget_dropped) = enforce_payload_budget(output, options.max_payload_chars);
-    if budget_dropped > 0 {
-        dropped_count += budget_dropped;
-        warnings.push(format!(
-            "dropped {budget_dropped} oldest messages due to max_payload_chars"
-        ));
-    }
-    let estimated_chars = estimate_chars(&output);
+    let output = enforce_payload_budget(output, options.max_payload_chars);
     let fingerprint = fingerprint(&options.session_id, &output);
-    let output_count = output.len();
     TrajectoryBuildResult {
         messages: output,
         fingerprint,
-        warnings,
-        source: options.source.clone(),
-        input_count: messages.len(),
-        output_count,
-        dropped_count,
-        estimated_chars,
     }
 }
 
@@ -280,21 +235,14 @@ fn value_to_string(value: &Value) -> String {
     }
 }
 
-fn estimate_chars(messages: &[Value]) -> usize {
-    messages
-        .iter()
-        .map(|message| canonical_json(message).len())
-        .sum()
-}
-
-fn enforce_payload_budget(messages: Vec<Value>, max_payload_chars: usize) -> (Vec<Value>, usize) {
+fn enforce_payload_budget(messages: Vec<Value>, max_payload_chars: usize) -> Vec<Value> {
     let message_lengths: Vec<usize> = messages
         .iter()
         .map(|message| canonical_json(message).len())
         .collect();
     let mut estimated_chars: usize = message_lengths.iter().sum();
     if max_payload_chars == 0 || estimated_chars <= max_payload_chars {
-        return (messages, 0);
+        return messages;
     }
     let protected_start = messages
         .iter()
@@ -310,9 +258,9 @@ fn enforce_payload_budget(messages: Vec<Value>, max_payload_chars: usize) -> (Ve
         prefix_start += 1;
     }
     if estimated_chars <= max_payload_chars {
-        return (messages[prefix_start..].to_vec(), prefix_start);
+        return messages[prefix_start..].to_vec();
     }
-    (messages[protected_start..].to_vec(), protected_start)
+    messages[protected_start..].to_vec()
 }
 
 fn fingerprint(session_id: &str, messages: &[Value]) -> String {

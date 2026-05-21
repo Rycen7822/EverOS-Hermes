@@ -10,25 +10,6 @@ GetMemoryType = Literal["episodic_memory", "profile", "agent_case", "agent_skill
 RankOrder = Literal["asc", "desc"]
 MemoryScope = Literal["personal", "agent"]
 
-CLOUD_V1_ENDPOINTS: dict[str, str] = {
-    "personal_add": "/api/v1/memories",
-    "agent_add": "/api/v1/memories/agent",
-    "personal_flush": "/api/v1/memories/flush",
-    "agent_flush": "/api/v1/memories/agent/flush",
-    "get": "/api/v1/memories/get",
-    "search": "/api/v1/memories/search",
-    "delete": "/api/v1/memories/delete",
-    "task_status": "/api/v1/tasks/{task_id}",
-    "settings": "/api/v1/settings",
-}
-OUT_OF_SCOPE_ENDPOINTS = [
-    "/api/v1/memories/group",
-    "/api/v1/memories/group/flush",
-    "/api/v1/groups",
-    "/api/v1/senders",
-    "/api/v1/object/sign",
-]
-
 RETRIEVAL_METHODS = {"keyword", "vector", "hybrid", "agentic"}
 SEARCH_MEMORY_TYPES = {"episodic_memory", "profile", "raw_message", "agent_memory"}
 GET_MEMORY_TYPES = {"episodic_memory", "profile", "agent_case", "agent_skill"}
@@ -111,11 +92,11 @@ def normalize_rank_order(rank_order: str) -> RankOrder:
     return value  # type: ignore[return-value]
 
 
-def validate_filters(filters: dict[str, Any], *, require_user: bool = True) -> None:
+def validate_filters(filters: dict[str, Any]) -> None:
     if not isinstance(filters, dict):
         raise ValueError("filters must be an object")
     _validate_filter_node(filters, path="filters")
-    if require_user and not filters.get("user_id"):
+    if not filters.get("user_id"):
         raise ValueError("filters must include user_id for personal/agent memory queries")
 
 
@@ -124,7 +105,6 @@ def build_filters(
     user_id: str | None = None,
     session_id: str | None = None,
     filters: dict[str, Any] | None = None,
-    require_user_id: bool = True,
 ) -> dict[str, Any]:
     resolved: dict[str, Any] = deepcopy(filters or {})
     if user_id:
@@ -140,7 +120,7 @@ def build_filters(
             clauses = list(resolved.get("AND") or [])
             clauses.append({"session_id": session_id})
             resolved["AND"] = clauses
-    validate_filters(resolved, require_user=require_user_id)
+    validate_filters(resolved)
     return resolved
 
 
@@ -212,11 +192,11 @@ def _validate_filter_node(node: Any, *, path: str) -> None:
             for i, child in enumerate(value):
                 _validate_filter_node(child, path=f"{path}.{key}[{i}]")
         elif key == "timestamp":
-            _validate_filter_value(value, path=f"{path}.timestamp", allow_operators=True)
+            _validate_filter_value(value, path=f"{path}.timestamp")
         elif key == "session_id":
             _validate_session_id_filter_value(value, path=f"{path}.session_id")
         else:
-            _validate_filter_value(value, path=f"{path}.{key}", allow_operators=True)
+            _validate_filter_value(value, path=f"{path}.{key}")
 
 
 def _validate_session_id_filter_value(value: Any, *, path: str) -> None:
@@ -232,10 +212,8 @@ def _validate_session_id_filter_value(value: Any, *, path: str) -> None:
     raise ValueError(f"{path} must be a non-empty string or eq operator object")
 
 
-def _validate_filter_value(value: Any, *, path: str, allow_operators: bool) -> None:
+def _validate_filter_value(value: Any, *, path: str) -> None:
     if isinstance(value, dict):
-        if not allow_operators:
-            raise ValueError(f"{path} does not allow operator object")
         unknown = sorted(set(value) - _FILTER_OPERATORS)
         if unknown:
             raise ValueError(f"Unknown filter operator(s) {unknown} at {path}")
