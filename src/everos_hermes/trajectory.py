@@ -19,18 +19,6 @@ class TrajectoryBuildResult:
     fingerprint: str
 
 
-@dataclass(slots=True)
-class TrajectoryBuildOptions:
-    session_id: str
-    source: TrajectorySource
-    now_ms: int | None = None
-    max_messages: int = 80
-    max_message_chars: int = 8000
-    max_tool_result_chars: int = 6000
-    max_payload_chars: int = 60000
-    include_system: bool = False
-
-
 def build_agent_trajectory_messages(
     messages: list[dict[str, Any]],
     *,
@@ -44,34 +32,14 @@ def build_agent_trajectory_messages(
     include_system: bool = False,
 ) -> TrajectoryBuildResult:
     """Convert Hermes message history into bounded EverOS agent messages."""
-    return build_agent_trajectory_messages_with_options(
-        messages,
-        TrajectoryBuildOptions(
-            session_id=session_id,
-            source=source,
-            now_ms=now_ms,
-            max_messages=max_messages,
-            max_message_chars=max_message_chars,
-            max_tool_result_chars=max_tool_result_chars,
-            max_payload_chars=max_payload_chars,
-            include_system=include_system,
-        ),
-    )
-
-
-def build_agent_trajectory_messages_with_options(
-    messages: list[dict[str, Any]],
-    options: TrajectoryBuildOptions,
-) -> TrajectoryBuildResult:
-    """Convert Hermes message history into bounded EverOS agent messages."""
-    base_now = int(options.now_ms if options.now_ms is not None else time.time() * 1000)
+    base_now = int(now_ms if now_ms is not None else time.time() * 1000)
     output: list[dict[str, Any]] = []
 
     for input_index, raw in enumerate(messages):
         role = str(raw.get("role") or "").strip().lower()
         if role not in {"user", "assistant", "tool", "system"}:
             continue
-        if role == "system" and not options.include_system:
+        if role == "system" and not include_system:
             continue
         if role == "tool" and not str(raw.get("tool_call_id") or "").strip():
             continue
@@ -81,7 +49,7 @@ def build_agent_trajectory_messages_with_options(
         if not content and role == "assistant" and tool_calls:
             content = "[Assistant requested tool calls]"
         content = strip_context_blocks(redact_text(content)).strip()
-        limit = options.max_tool_result_chars if role == "tool" else options.max_message_chars
+        limit = max_tool_result_chars if role == "tool" else max_message_chars
         content = _truncate(content, limit)
         if not content:
             continue
@@ -92,7 +60,7 @@ def build_agent_trajectory_messages_with_options(
             "content": content,
             "timestamp": timestamp,
             "message_id": _message_id(
-                session_id=options.session_id,
+                session_id=session_id,
                 input_index=input_index,
                 role=role,
                 tool_call_id=str(raw.get("tool_call_id") or ""),
@@ -100,7 +68,7 @@ def build_agent_trajectory_messages_with_options(
                 content=content,
                 tool_calls=tool_calls,
             ),
-            "source": options.source,
+            "source": source,
         }
         if role == "tool":
             message["tool_call_id"] = str(raw.get("tool_call_id")).strip()
@@ -108,11 +76,11 @@ def build_agent_trajectory_messages_with_options(
             message["tool_calls"] = tool_calls
         output.append(message)
 
-    if options.max_messages > 0 and len(output) > options.max_messages:
-        output = output[-options.max_messages:]
+    if max_messages > 0 and len(output) > max_messages:
+        output = output[-max_messages:]
 
-    output = _enforce_payload_budget(output, options.max_payload_chars)
-    return TrajectoryBuildResult(messages=output, fingerprint=_fingerprint(options.session_id, output))
+    output = _enforce_payload_budget(output, max_payload_chars)
+    return TrajectoryBuildResult(messages=output, fingerprint=_fingerprint(session_id, output))
 
 
 def _content_to_text(value: Any) -> str:

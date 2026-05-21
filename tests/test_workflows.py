@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from everos_hermes.client import EverOSError
+from everos_hermes.client import EverOSError, EverOSTimeoutError
 from everos_hermes.workflows import import_and_verify, save_and_verify, verify_session_ingest
 
 
@@ -106,6 +106,8 @@ def test_save_and_verify_agent_reports_not_visible_separately_from_queue():
     )
 
     assert result["save"]["saved"] is True
+    assert result["save"]["ok"] is True
+    assert result["save"]["status"] == "queued"
     assert result["save"]["scope"] == "agent"
     assert result["agent_visibility"]["agent_raw_queued"] is True
     assert result["agent_visibility"]["agent_flush"]["status"] == "success"
@@ -205,6 +207,42 @@ def test_import_fatal_validation_stays_before_write():
     assert result["error_code"] == "validation_failed"
     assert result["queued_count"] == 0
     assert any("timestamp" in item for item in result["warnings"])
+
+def test_import_timeout_flush_payload_keeps_status_contract():
+    class TimeoutFlushClient(AgentVisibilityClient):
+        def flush_memories(self, **kwargs):
+            self.calls.append(("flush", kwargs))
+            raise EverOSTimeoutError("flush timed out")
+
+    result = import_and_verify(
+        client=TimeoutFlushClient(),
+        user_id="u1",
+        session_id="s1",
+        messages=[_message(1)],
+        flush=True,
+    )
+
+    assert result["flush"]["status"] == "timeout"
+    assert result["flush"]["error_code"] == "timeout"
+    assert result["flush"]["message"] == "flush timed out"
+
+
+def test_import_rejects_invalid_batch_size_and_top_k_before_write():
+    for kwargs, expected in [({"batch_size": 0}, "batch_size"), ({"top_k": 101}, "top_k")]:
+        result = import_and_verify(
+            client=NoWriteClient(),
+            user_id="u1",
+            session_id="s1",
+            messages=[_message(1)],
+            flush=False,
+            verification_queries=[],
+            **kwargs,
+        )
+
+        assert result["ok"] is False
+        assert result["error_code"] == "validation_failed"
+        assert any(expected in warning for warning in result["warnings"])
+
 
 class RetryFlushClient(AgentVisibilityClient):
     def __init__(self):

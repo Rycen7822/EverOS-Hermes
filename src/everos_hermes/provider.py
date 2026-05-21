@@ -18,15 +18,7 @@ from .flush_retry import flush_memories_with_retry
 from .formatting import format_search_context, pretty_json
 from .policy import should_skip_capture, should_skip_recall, stable_query_key
 from .provider_schemas import provider_tool_schemas
-from .provider_config import (
-    _DEFAULT_CONFIG,
-    _SECRET_CONFIG_KEYS as _SECRET_CONFIG_KEYS,
-    _as_bool as _as_bool,
-    _load_config,
-    _normalize_config as _normalize_config,
-    _sanitize_config_values as _sanitize_config_values,
-    _save_config,
-)
+from .provider_config import _DEFAULT_CONFIG, _as_bool, _load_config, _save_config
 from .redaction import redact_text, sanitized_error_message
 from .schemas import normalize_scope
 from .tool_payloads import (
@@ -34,7 +26,7 @@ from .tool_payloads import (
     save_result_payload as _save_result_payload,
     timeout_payload as _timeout_payload,
 )
-from .trajectory import TrajectoryBuildOptions, TrajectoryBuildResult, TrajectorySource, build_agent_trajectory_messages_with_options
+from .trajectory import TrajectoryBuildResult, TrajectorySource, build_agent_trajectory_messages
 from .workflows import import_and_verify, now_ms, save_and_verify, verify_session_ingest
 
 try:
@@ -372,24 +364,21 @@ class EverOSMemoryProvider(MemoryProvider):
     def handle_tool_call(self, tool_name: str, args: dict[str, Any], **kwargs: Any) -> str:
         if not self._active or not self._client:
             return _tool_error("EverOS provider is not active. Set EVEROS_API_KEY and memory.provider: everos.")
-        try:
-            if tool_name == "everos_memory_save":
-                return self._tool_save(args)
-            if tool_name == "everos_memory_search":
-                return self._tool_search(args)
-            if tool_name == "everos_memory_get":
-                return self._tool_get(args)
-            if tool_name == "everos_memory_flush":
-                return self._tool_flush(args)
-            if tool_name == "everos_memory_forget":
-                return self._tool_forget(args)
-            if tool_name == "everos_memory_save_and_verify":
-                return self._tool_save_and_verify(args)
-            if tool_name == "everos_memory_import_and_verify":
-                return self._tool_import_and_verify(args)
-            if tool_name == "everos_memory_verify_session":
-                return self._tool_verify_session(args)
+        handlers = {
+            "everos_memory_save": self._tool_save,
+            "everos_memory_search": self._tool_search,
+            "everos_memory_get": self._tool_get,
+            "everos_memory_flush": self._tool_flush,
+            "everos_memory_forget": self._tool_forget,
+            "everos_memory_save_and_verify": self._tool_save_and_verify,
+            "everos_memory_import_and_verify": self._tool_import_and_verify,
+            "everos_memory_verify_session": self._tool_verify_session,
+        }
+        handler = handlers.get(tool_name)
+        if not handler:
             return _tool_error(f"Unknown EverOS memory tool: {tool_name}")
+        try:
+            return handler(args)
         except EverOSError as exc:
             return _tool_error(str(exc))
         except Exception as exc:
@@ -450,11 +439,7 @@ class EverOSMemoryProvider(MemoryProvider):
         query = str(args.get("query") or "").strip()
         if not query:
             return _tool_error("query is required")
-        requested_top_k = args.get("top_k", args.get("limit", self._config["top_k"]))
-        limit = _top_k(requested_top_k, self._config["top_k"])
         method = str(args.get("method") or self._config["search_method"]).strip().lower()
-        if method not in {"keyword", "vector", "hybrid", "agentic"}:
-            method = self._config["search_method"]
         memory_types = args.get("memory_types") if isinstance(args.get("memory_types"), list) else self._config["memory_types"]
         response_format = str(args.get("response_format") or "json")
         response = self._client.search_memories(
@@ -464,8 +449,8 @@ class EverOSMemoryProvider(MemoryProvider):
             filters=args.get("filters") if isinstance(args.get("filters"), dict) else None,
             method=method,
             memory_types=[str(item) for item in memory_types],
-            top_k=limit,
-            radius=_float_or_none(args.get("radius")),
+            top_k=args.get("top_k", args.get("limit", self._config["top_k"])),
+            radius=args.get("radius"),
             include_original_data=_as_bool(args.get("include_original_data", False), False),
             include_vectors=_as_bool(args.get("include_vectors", False), False),
             timeout=self._config["agentic_timeout"] if method == "agentic" else self._config["timeout"],
@@ -480,8 +465,8 @@ class EverOSMemoryProvider(MemoryProvider):
             session_id=str(args.get("session_id") or "") or None,
             filters=args.get("filters") if isinstance(args.get("filters"), dict) else None,
             memory_type=str(args.get("memory_type") or "episodic_memory"),
-            page=_int_between(args.get("page", 1), 1, 10000, 1),
-            page_size=_int_between(args.get("page_size", 20), 1, 100, 20),
+            page=args.get("page", 1),
+            page_size=args.get("page_size", 20),
             rank_by=str(args.get("rank_by") or "timestamp"),
             rank_order=str(args.get("rank_order") or "desc"),
         )
@@ -496,7 +481,7 @@ class EverOSMemoryProvider(MemoryProvider):
                 user_id=self._user_id,
                 session_id=session_id,
                 scope=scope,
-                timeout=_float_or_none(args.get("timeout")),
+                timeout=args.get("timeout"),
             )
         except EverOSTimeoutError as exc:
             return pretty_json(_timeout_payload("flush", exc))
@@ -534,7 +519,7 @@ class EverOSMemoryProvider(MemoryProvider):
             flush=_as_bool(args.get("flush", True), True),
             verification_query=str(args.get("verification_query") or "").strip() or None,
             verification_queries=args.get("verification_queries") if isinstance(args.get("verification_queries"), list) else None,
-            top_k=_top_k(args.get("top_k", self._config["top_k"]), self._config["top_k"]),
+            top_k=args.get("top_k", self._config["top_k"]),
         )
         return pretty_json(result)
 
@@ -547,10 +532,10 @@ class EverOSMemoryProvider(MemoryProvider):
             file_path=str(args.get("file_path") or "").strip() or None,
             scope=normalize_scope(str(args.get("scope") or "personal")),
             dry_run=_as_bool(args.get("dry_run", False), False),
-            batch_size=_int_between(args.get("batch_size", 50), 1, 100, 50),
+            batch_size=args.get("batch_size", 50),
             flush=_as_bool(args.get("flush", True), True),
             verification_queries=args.get("verification_queries") if isinstance(args.get("verification_queries"), list) else None,
-            top_k=_top_k(args.get("top_k", self._config["top_k"]), self._config["top_k"]),
+            top_k=args.get("top_k", self._config["top_k"]),
         )
         return pretty_json(result)
 
@@ -565,7 +550,7 @@ class EverOSMemoryProvider(MemoryProvider):
             scope=normalize_scope(str(args.get("scope") or "personal")),
             verification_queries=[str(query) for query in queries],
             memory_types=args.get("memory_types") if isinstance(args.get("memory_types"), list) else None,
-            top_k=_top_k(args.get("top_k", self._config["top_k"]), self._config["top_k"]),
+            top_k=args.get("top_k", self._config["top_k"]),
         )
         return pretty_json(result)
 
@@ -609,10 +594,7 @@ class EverOSMemoryProvider(MemoryProvider):
                 f"{_truncate_for_memory(assistant_content, 4000)}\nOutcome: completed_or_partial\nReusable lesson hint: capture approach, correction, and verification if useful.",
             },
         ]
-        return build_agent_trajectory_messages_with_options(
-            messages,
-            self._trajectory_options(source="sync_turn", session_id=session_id, now_ms=now_ms, max_messages=2),
-        )
+        return self._build_agent_trajectory_result(messages, source="sync_turn", session_id=session_id, now=now_ms, max_messages=2)
 
     def _agent_visibility_queries(self, texts: list[str], *, session_id: str | None, markers: list[str] | None = None) -> list[str]:
         configured = self._config.get("agent_visibility_queries")
@@ -773,34 +755,27 @@ class EverOSMemoryProvider(MemoryProvider):
             {"role": "user", "timestamp": now, "content": str(task or "").strip()},
             {"role": "assistant", "timestamp": now + 1, "content": prefix + str(result or "").strip()},
         ]
-        built = build_agent_trajectory_messages_with_options(
-            messages,
-            self._trajectory_options(source="delegation", session_id=self._session_id, now_ms=now),
-        )
+        built = self._build_agent_trajectory_result(messages, source="delegation", now=now)
         if child:
             for message in built.messages:
                 if message.get("role") == "assistant":
                     message["child_session_id"] = child
         self._write_agent_trajectory(built, session_id=self._session_id, flush_allowed=True, operation="delegation.agent")
 
-    def _build_agent_trajectory_result(self, messages: list[dict[str, Any]], *, source: TrajectorySource) -> TrajectoryBuildResult:
-        return build_agent_trajectory_messages_with_options(
-            messages,
-            self._trajectory_options(source=source, session_id=self._session_id, now_ms=now_ms()),
-        )
-
-    def _trajectory_options(
+    def _build_agent_trajectory_result(
         self,
+        messages: list[dict[str, Any]],
         *,
         source: TrajectorySource,
-        session_id: str,
-        now_ms: int,
+        session_id: str = "",
+        now: int | None = None,
         max_messages: int | None = None,
-    ) -> TrajectoryBuildOptions:
-        return TrajectoryBuildOptions(
-            session_id=session_id,
+    ) -> TrajectoryBuildResult:
+        return build_agent_trajectory_messages(
+            messages,
+            session_id=session_id or self._session_id,
             source=source,
-            now_ms=now_ms,
+            now_ms=now if now is not None else now_ms(),
             max_messages=max_messages if max_messages is not None else self._config["agent_max_messages"],
             max_message_chars=self._config["agent_max_message_chars"],
             max_tool_result_chars=self._config["agent_max_tool_result_chars"],
@@ -852,33 +827,6 @@ class EverOSMemoryProvider(MemoryProvider):
                     os.close(fd)
         except Exception:
             return
-
-
-def _int_between(value: Any, low: int, high: int, default: int) -> int:
-    try:
-        return max(low, min(high, int(value)))
-    except Exception:
-        return default
-
-
-def _top_k(value: Any, default: int) -> int:
-    try:
-        parsed = int(value)
-    except Exception:
-        return default
-    if parsed == -1:
-        return -1
-    return max(0, min(100, parsed))
-
-
-def _float_or_none(value: Any) -> float | None:
-    if value is None or value == "":
-        return None
-    try:
-        parsed = float(value)
-    except Exception:
-        return None
-    return parsed if parsed > 0 else None
 
 
 def _task_id(response: dict[str, Any]) -> str:

@@ -3,6 +3,7 @@ use crate::client::EverOSError;
 use crate::flush_retry::flush_memories_with_retry;
 use crate::formatting::{format_search_context, pretty_json};
 use crate::mcp::{default_user_id, make_client};
+use crate::provider_config::as_bool;
 use crate::redaction::{error_payload, sanitized_error_message};
 use crate::workflows;
 use serde_json::{Value, json};
@@ -16,8 +17,8 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
             let content = required_string(&value, "content")?;
             let uid = optional_string(&value, "user_id").unwrap_or_else(default_user_id);
             let session_id = optional_string(&value, "session_id");
-            let flush = bool_arg(&value, "flush", true);
-            let async_mode = bool_arg(&value, "async_mode", true);
+            let flush = as_bool(value.get("flush"), true);
+            let async_mode = as_bool(value.get("async_mode"), true);
             let flush_timeout = timeout_arg(&value, "flush_timeout")?;
             let scope = scope_from_args(&value)?;
             let role = optional_string(&value, "role").unwrap_or_else(|| {
@@ -81,9 +82,9 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
                 .ok_or_else(|| anyhow::anyhow!("messages is required"))?;
             let uid = optional_string(&value, "user_id").unwrap_or_else(default_user_id);
             let session_id = optional_string(&value, "session_id");
-            let async_mode = bool_arg(&value, "async_mode", true);
+            let async_mode = as_bool(value.get("async_mode"), true);
             let scope = scope_from_args(&value)?;
-            let flush = bool_arg(&value, "flush", false);
+            let flush = as_bool(value.get("flush"), false);
             let flush_timeout = timeout_arg(&value, "flush_timeout")?;
             let client = make_client()?;
             let result = client.add_memories_scoped(
@@ -183,11 +184,11 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
             } else {
                 None
             });
-            let fallback_to_hybrid = bool_arg(&value, "fallback_to_hybrid", true);
+            let fallback_to_hybrid = as_bool(value.get("fallback_to_hybrid"), true);
             let memory_types = string_array_arg(&value, "memory_types");
             let memory_types = (!memory_types.is_empty()).then_some(memory_types);
-            let include_original_data = bool_arg(&value, "include_original_data", false);
-            let include_vectors = bool_arg(&value, "include_vectors", false);
+            let include_original_data = as_bool(value.get("include_original_data"), false);
+            let include_vectors = as_bool(value.get("include_vectors"), false);
             let client = make_client()?;
             let response = match client.search_memories(
                 &query,
@@ -273,7 +274,7 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
             ))
         }
         "everos_delete_memories" => {
-            if !bool_arg(&value, "confirm", false) {
+            if !as_bool(value.get("confirm"), false) {
                 return Ok(pretty_json(
                     &json!({"error":"confirm=true is required before deleting EverOS memories"}),
                 ));
@@ -312,8 +313,8 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
         )),
         "everos_get_settings" => Ok(pretty_json(&make_client()?.get_settings()?)),
         "everos_update_settings" => {
-            let strict = bool_arg(&value, "strict", true);
-            let return_diff = bool_arg(&value, "return_diff", true);
+            let strict = as_bool(value.get("strict"), true);
+            let return_diff = as_bool(value.get("return_diff"), true);
             Ok(pretty_json(&make_client()?.update_settings(
                 value.get("settings").cloned().unwrap_or_else(|| json!({})),
                 strict,
@@ -350,7 +351,7 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
             let scope = scope_from_args(&value)?;
             let role = optional_string(&value, "role");
             let tool_call_id = optional_string(&value, "tool_call_id");
-            let flush = bool_arg(&value, "flush", true);
+            let flush = as_bool(value.get("flush"), true);
             let flush_timeout = timeout_arg(&value, "flush_timeout")?;
             let mut queries = string_array_arg(&value, "verification_queries");
             if let Some(query) = optional_string(&value, "verification_query") {
@@ -382,9 +383,9 @@ pub fn call_tool(name: &str, args: Value) -> anyhow::Result<String> {
             let scope = scope_from_args(&value)?;
             let messages = object_array_arg(&value, "messages");
             let file_path = optional_string(&value, "file_path");
-            let dry_run = bool_arg(&value, "dry_run", false);
+            let dry_run = as_bool(value.get("dry_run"), false);
             let batch_size = uint_arg(&value, "batch_size", 50)? as usize;
-            let flush = bool_arg(&value, "flush", true);
+            let flush = as_bool(value.get("flush"), true);
             let flush_timeout = timeout_arg(&value, "flush_timeout")?;
             let queries = string_array_arg(&value, "verification_queries");
             let memory_types = string_array_arg(&value, "memory_types");
@@ -481,18 +482,6 @@ fn add_agent_visibility_if_agent(
     }
 }
 
-fn bool_arg(value: &Value, key: &str, default: bool) -> bool {
-    match value.get(key) {
-        Some(Value::Bool(flag)) => *flag,
-        Some(Value::String(text)) => match text.trim().to_ascii_lowercase().as_str() {
-            "1" | "true" | "yes" | "y" | "on" => true,
-            "0" | "false" | "no" | "n" | "off" => false,
-            _ => default,
-        },
-        _ => default,
-    }
-}
-
 fn int_arg(value: &Value, key: &str, default: i64) -> anyhow::Result<i64> {
     match value.get(key) {
         None | Some(Value::Null) => Ok(default),
@@ -549,7 +538,7 @@ fn timeout_arg(value: &Value, key: &str) -> anyhow::Result<Option<f64>> {
 }
 
 fn scope_from_args(value: &Value) -> anyhow::Result<String> {
-    let agent = value.get("agent").map(|_| bool_arg(value, "agent", false));
+    let agent = value.get("agent").map(|raw| as_bool(Some(raw), false));
     let scope = optional_string(value, "scope")
         .map(|scope| scope.to_ascii_lowercase())
         .unwrap_or_else(|| {

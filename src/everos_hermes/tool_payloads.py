@@ -7,10 +7,14 @@ from .redaction import error_payload, sanitized_error_message
 
 
 def timeout_payload(operation: str, exc: EverOSTimeoutError) -> dict[str, Any]:
+    message = sanitized_error_message(exc)
     return {
         "ok": False,
         "operation": operation,
-        "error": sanitized_error_message(exc),
+        "status": "timeout",
+        "error_code": "timeout",
+        "message": message,
+        "error": message,
         "retryable": bool(getattr(exc, "retryable", True)),
         "suggested_next_actions": list(getattr(exc, "suggested_next_actions", [])),
     }
@@ -18,7 +22,7 @@ def timeout_payload(operation: str, exc: EverOSTimeoutError) -> dict[str, Any]:
 
 def flush_result_payload(response: dict[str, Any], *, attempt_count: int | None = None) -> dict[str, Any]:
     data = response.get("data", {}) if isinstance(response, dict) else {}
-    payload: dict[str, Any] = {"ok": True}
+    payload: dict[str, Any] = {"ok": True, "status": "success"}
     if attempt_count is not None:
         payload["attempt_count"] = attempt_count
     if isinstance(data, dict):
@@ -39,10 +43,11 @@ def save_result_payload(
     flush_error: Exception | None = None,
 ) -> dict[str, Any]:
     data = result.get("data", {}) if isinstance(result, dict) else {}
-    status = data.get("status", "") if isinstance(data, dict) else ""
+    status = data.get("status") or "queued" if isinstance(data, dict) else "queued"
     task_id = data.get("task_id", "") if isinstance(data, dict) else ""
     payload: dict[str, Any] = {
         "saved": True,
+        "ok": True,
         "message_queued": True,
         "extraction_requested": bool(task_id or status in {"queued", "processing", "success"} or flush_requested),
         "searchable": None,
@@ -59,7 +64,7 @@ def save_result_payload(
     elif flush_error is not None:
         payload["flush"] = error_payload("flush", flush_error)
     elif flush_requested:
-        payload["flush"] = {"ok": False, "error": "flush requested but no flush result was recorded"}
+        payload["flush"] = {"ok": False, "status": "missing", "error": "flush requested but no flush result was recorded"}
     else:
         payload["flush"] = {"ok": None, "status": "not_requested"}
     return payload

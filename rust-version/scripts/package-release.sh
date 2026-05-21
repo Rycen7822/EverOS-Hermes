@@ -23,9 +23,6 @@ STAGE="$DIST_DIR/$PKG_NAME"
 ARCHIVE="$DIST_DIR/$PKG_NAME.tar.gz"
 SHA_FILE="$ARCHIVE.sha256"
 RUST_PLUGIN_PREFIX="rust-version/integrations/hermes"
-CANONICAL_PLUGIN_DIR="$ROOT/../integrations/hermes"
-CANONICAL_SKILL_PREFIX="integrations/hermes/resources/skills/everos-memory-curation"
-STAGED_SKILL_DIR="$STAGE/integrations/hermes/resources/skills/everos-memory-curation"
 
 copy_tracked_prefix() {
   # Stage release inputs via git ls-files so ignored/untracked files never enter the archive.
@@ -58,7 +55,7 @@ check_no_untracked_sensitive_files() {
         exit 1
         ;;
     esac
-  done < <(git -C "$REPO_ROOT" status --porcelain --ignored --untracked-files=all -- "$RUST_PLUGIN_PREFIX" "$CANONICAL_SKILL_PREFIX")
+  done < <(git -C "$REPO_ROOT" status --porcelain --ignored --untracked-files=all -- "$RUST_PLUGIN_PREFIX")
 }
 
 check_no_untracked_sensitive_files
@@ -68,10 +65,6 @@ rm -rf "$STAGE"
 mkdir -p "$STAGE/bin" "$STAGE/integrations"
 install -m 0755 "$ROOT/target/$TARGET/release/everos-hermes-rust" "$STAGE/bin/everos-hermes-rust"
 copy_tracked_prefix "$RUST_PLUGIN_PREFIX" "$STAGE/integrations/hermes"
-test -d "$CANONICAL_PLUGIN_DIR"
-rm -rf "$STAGED_SKILL_DIR"
-mkdir -p "$(dirname "$STAGED_SKILL_DIR")"
-copy_tracked_prefix "$CANONICAL_SKILL_PREFIX" "$STAGED_SKILL_DIR"
 find "$STAGE" \( -type d -name '__pycache__' -o -type f \( -name '*.pyc' -o -name '*.pyo' \) \) -prune -exec rm -rf {} +
 install -m 0644 "$ROOT/README.md" "$STAGE/README.md"
 

@@ -849,7 +849,31 @@ pub fn import_and_verify(
     } else {
         "user"
     };
-    let (messages, warnings) = normalize_import_messages(messages, file_path, default_role)?;
+    let (messages, mut warnings) = normalize_import_messages(messages, file_path, default_role)?;
+    if !(1..=100).contains(&batch_size) {
+        warnings.push("batch_size must be an integer in 1..100".to_string());
+    }
+    if !(-1..=100).contains(&top_k) {
+        warnings.push("top_k must be between -1 and 100".to_string());
+    }
+    if let Some(types) = &memory_types {
+        let invalid: Vec<&str> = types
+            .iter()
+            .map(String::as_str)
+            .filter(|ty| {
+                !matches!(
+                    *ty,
+                    "episodic_memory" | "profile" | "raw_message" | "agent_memory"
+                )
+            })
+            .collect();
+        if !invalid.is_empty() {
+            warnings.push(format!(
+                "memory_types contains invalid: {}",
+                invalid.join(", ")
+            ));
+        }
+    }
     let metrics = message_metrics(&messages, batch_size);
     if dry_run {
         return Ok(import_dry_run_payload(messages.len(), warnings, metrics));
@@ -860,6 +884,9 @@ pub fn import_and_verify(
             warning.contains("tool_call_id")
                 || warning.contains("empty")
                 || warning.contains("timestamp")
+                || warning.contains("batch_size")
+                || warning.contains("top_k")
+                || warning.contains("memory_types")
         })
         .cloned()
         .collect();

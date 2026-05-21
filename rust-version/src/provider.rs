@@ -614,7 +614,7 @@ impl EverOSProvider {
         } else {
             Some(session_id)
         };
-        let scope = normalize_scope_arg(&value_string(args, "scope"));
+        let scope = scope_arg(&value_string(args, "scope"));
         let role = non_empty_or(
             &value_string(args, "role"),
             if scope == "agent" {
@@ -720,18 +720,13 @@ impl EverOSProvider {
         if query.is_empty() {
             return Ok(tool_error("query is required"));
         }
-        let limit = if args.get("top_k").is_some() {
-            int_between(args.get("top_k"), -1, 100, self.config.top_k)
-        } else {
-            int_between(args.get("limit"), -1, 100, self.config.top_k)
-        };
-        let mut method = value_string(args, "method").to_ascii_lowercase();
-        if method.is_empty() {
-            method = self.config.search_method.clone();
-        }
-        if !matches!(method.as_str(), "keyword" | "vector" | "hybrid" | "agentic") {
-            method = self.config.search_method.clone();
-        }
+        let limit = i64_arg(
+            args.get("top_k").or_else(|| args.get("limit")),
+            self.config.top_k as i64,
+            "top_k",
+        )?;
+        let raw_method = value_string(args, "method").to_ascii_lowercase();
+        let method = non_empty_or(&raw_method, &self.config.search_method);
         let session_id = value_string(args, "session_id");
         let memory_types = args
             .get("memory_types")
@@ -757,7 +752,7 @@ impl EverOSProvider {
             &method,
             Some(memory_types),
             limit,
-            float_or_none(args.get("radius")),
+            f64_arg(args.get("radius"), "radius")?,
             as_bool(args.get("include_original_data"), false),
             as_bool(args.get("include_vectors"), false),
             Some(if method == "agentic" {
@@ -788,8 +783,8 @@ impl EverOSProvider {
             },
             args.get("filters").cloned(),
             &memory_type,
-            int_between(args.get("page"), 1, 10000, 1) as u64,
-            int_between(args.get("page_size"), 1, 100, 20) as u64,
+            u64_arg(args.get("page"), 1, "page")?,
+            u64_arg(args.get("page_size"), 20, "page_size")?,
             &non_empty_or(&value_string(args, "rank_by"), "timestamp"),
             &non_empty_or(&value_string(args, "rank_order"), "desc"),
         )?;
@@ -803,13 +798,13 @@ impl EverOSProvider {
         } else {
             session_id.as_str()
         };
-        let scope = normalize_scope_arg(&value_string(args, "scope"));
+        let scope = scope_arg(&value_string(args, "scope"));
         let (response, attempt_count) = match flush_memories_with_retry(
             self.client.as_ref().expect("active"),
             &self.user_id,
             if sid.is_empty() { None } else { Some(sid) },
             &scope,
-            float_or_none(args.get("timeout")),
+            f64_arg(args.get("timeout"), "timeout")?,
             self.config.agent_visibility_retry_flush_attempts,
         ) {
             Ok(result) => result,
@@ -870,7 +865,7 @@ impl EverOSProvider {
         if !verification_query.trim().is_empty() {
             queries.insert(0, verification_query.trim().to_string());
         }
-        let scope = normalize_scope_arg(&value_string(args, "scope"));
+        let scope = scope_arg(&value_string(args, "scope"));
         let role = optional_value_string(args, "role");
         let tool_call_id = optional_value_string(args, "tool_call_id");
         let result = workflows::save_and_verify(
@@ -885,7 +880,7 @@ impl EverOSProvider {
             None,
             queries,
             None,
-            int_between(args.get("top_k"), -1, 100, self.config.top_k),
+            i64_arg(args.get("top_k"), self.config.top_k as i64, "top_k")?,
             None,
         )?;
         Ok(pretty_json(&result))
@@ -904,7 +899,7 @@ impl EverOSProvider {
             .cloned()
             .unwrap_or_default();
         let file_path = optional_value_string(args, "file_path");
-        let scope = normalize_scope_arg(&value_string(args, "scope"));
+        let scope = scope_arg(&value_string(args, "scope"));
         let result = workflows::import_and_verify(
             self.client.as_ref().expect("active"),
             &self.user_id,
@@ -913,12 +908,12 @@ impl EverOSProvider {
             file_path.as_deref(),
             &scope,
             as_bool(args.get("dry_run"), false),
-            int_between(args.get("batch_size"), 1, 100, 50) as usize,
+            u64_arg(args.get("batch_size"), 50, "batch_size")? as usize,
             as_bool(args.get("flush"), true),
             None,
             parse_string_list(args.get("verification_queries").unwrap_or(&Value::Null)),
             None,
-            int_between(args.get("top_k"), -1, 100, self.config.top_k),
+            i64_arg(args.get("top_k"), self.config.top_k as i64, "top_k")?,
             None,
         )?;
         Ok(pretty_json(&result))
@@ -945,9 +940,9 @@ impl EverOSProvider {
             if sid.is_empty() { None } else { Some(sid) },
             queries,
             memory_types,
-            &normalize_scope_arg(&value_string(args, "scope")),
-            int_between(args.get("top_k"), -1, 100, self.config.top_k),
-            float_or_none(args.get("timeout")),
+            &scope_arg(&value_string(args, "scope")),
+            i64_arg(args.get("top_k"), self.config.top_k as i64, "top_k")?,
+            f64_arg(args.get("timeout"), "timeout")?,
         )?;
         Ok(pretty_json(&result))
     }
@@ -1041,32 +1036,38 @@ fn non_empty_or(value: &str, default: &str) -> String {
     }
 }
 
-fn int_between(value: Option<&Value>, low: i64, high: i64, default: u64) -> i64 {
-    let parsed = value
-        .and_then(|value| {
-            value
-                .as_i64()
-                .or_else(|| value.as_str().and_then(|text| text.parse::<i64>().ok()))
-        })
-        .unwrap_or(default as i64);
-    parsed.clamp(low, high)
-}
-
-fn float_or_none(value: Option<&Value>) -> Option<f64> {
-    value
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str().and_then(|text| text.parse::<f64>().ok()))
-        })
-        .filter(|value| value.is_finite() && *value > 0.0)
-}
-
-fn normalize_scope_arg(scope: &str) -> String {
-    match scope.trim().to_ascii_lowercase().as_str() {
-        "agent" => "agent".to_string(),
-        _ => "personal".to_string(),
+fn i64_arg(value: Option<&Value>, default: i64, name: &str) -> Result<i64, EverOSError> {
+    if let Some(value) = value {
+        return value
+            .as_i64()
+            .ok_or_else(|| EverOSError::Api(format!("{name} must be an integer")));
     }
+    Ok(default)
+}
+
+fn u64_arg(value: Option<&Value>, default: u64, name: &str) -> Result<u64, EverOSError> {
+    if let Some(value) = value {
+        return value
+            .as_u64()
+            .ok_or_else(|| EverOSError::Api(format!("{name} must be an unsigned integer")));
+    }
+    Ok(default)
+}
+
+fn f64_arg(value: Option<&Value>, name: &str) -> Result<Option<f64>, EverOSError> {
+    if let Some(value) = value {
+        return value
+            .as_f64()
+            .filter(|value| value.is_finite())
+            .map(Some)
+            .ok_or_else(|| EverOSError::Api(format!("{name} must be a finite number")));
+    }
+    Ok(None)
+}
+
+fn scope_arg(scope: &str) -> String {
+    let scope = scope.trim().to_ascii_lowercase();
+    non_empty_or(&scope, "personal")
 }
 
 fn build_personal_turn_messages(

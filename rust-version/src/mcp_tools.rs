@@ -18,14 +18,7 @@ pub fn tool_definitions() -> Vec<Value> {
                     "session_id": {
                         "type": "string"
                     },
-                    "scope": {
-                        "type": "string",
-                        "enum": [
-                            "personal",
-                            "agent"
-                        ],
-                        "default": "personal"
-                    },
+                    "scope": scope_schema(),
                     "role": {
                         "type": "string",
                         "enum": [
@@ -81,14 +74,7 @@ pub fn tool_definitions() -> Vec<Value> {
                     "session_id": {
                         "type": "string"
                     },
-                    "scope": {
-                        "type": "string",
-                        "enum": [
-                            "personal",
-                            "agent"
-                        ],
-                        "default": "personal"
-                    },
+                    "scope": scope_schema(),
                     "async_mode": {
                         "type": "boolean",
                         "default": true
@@ -128,14 +114,7 @@ pub fn tool_definitions() -> Vec<Value> {
                     "session_id": {
                         "type": "string"
                     },
-                    "scope": {
-                        "type": "string",
-                        "enum": [
-                            "personal",
-                            "agent"
-                        ],
-                        "default": "personal"
-                    },
+                    "scope": scope_schema(),
                     "agent": {
                         "type": "boolean"
                     },
@@ -419,14 +398,7 @@ pub fn tool_definitions() -> Vec<Value> {
                     "session_id": {
                         "type": "string"
                     },
-                    "scope": {
-                        "type": "string",
-                        "enum": [
-                            "personal",
-                            "agent"
-                        ],
-                        "default": "personal"
-                    },
+                    "scope": scope_schema(),
                     "memory_types": {
                         "type": "array",
                         "items": {
@@ -508,14 +480,7 @@ pub fn tool_definitions() -> Vec<Value> {
                     "session_id": {
                         "type": "string"
                     },
-                    "scope": {
-                        "type": "string",
-                        "enum": [
-                            "personal",
-                            "agent"
-                        ],
-                        "default": "personal"
-                    },
+                    "scope": scope_schema(),
                     "role": {
                         "type": "string",
                         "enum": [
@@ -620,14 +585,7 @@ pub fn tool_definitions() -> Vec<Value> {
                     "session_id": {
                         "type": "string"
                     },
-                    "scope": {
-                        "type": "string",
-                        "enum": [
-                            "personal",
-                            "agent"
-                        ],
-                        "default": "personal"
-                    },
+                    "scope": scope_schema(),
                     "dry_run": {
                         "type": "boolean",
                         "default": false
@@ -709,6 +667,10 @@ pub fn tool_definitions() -> Vec<Value> {
         }
     }
     tools
+}
+
+fn scope_schema() -> Value {
+    json!({"type": "string", "enum": ["personal", "agent"], "default": "personal"})
 }
 
 fn text_result_output_schema() -> Value {

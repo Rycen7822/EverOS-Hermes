@@ -97,6 +97,34 @@ fn mcp_import_and_verify_batches_flushes_and_verifies() {
     clear_client_env();
 }
 #[test]
+fn mcp_import_and_verify_rejects_invalid_batch_size_and_top_k_before_http() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    set_client_env("http://127.0.0.1:9");
+
+    for (extra, expected) in [
+        (json!({"batch_size":0}), "batch_size"),
+        (json!({"top_k":101}), "top_k"),
+    ] {
+        let mut args = json!({
+            "messages":[{"role":"user","content":"Alpha","timestamp":1}],
+            "flush":false,
+            "verification_queries":[]
+        });
+        args.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let raw = everos_hermes_rust::mcp::call_tool("everos_import_and_verify", args).unwrap();
+        let response: Value = serde_json::from_str(&raw).unwrap();
+
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["error_code"], "validation_failed");
+        assert!(response["warnings"].to_string().contains(expected));
+    }
+
+    clear_client_env();
+}
+
+#[test]
 fn mcp_verify_session_ingest_is_read_only_and_reports_misses() {
     let _guard = ENV_LOCK.lock().unwrap();
     let (base_url, handle) = sequenced_request_server(

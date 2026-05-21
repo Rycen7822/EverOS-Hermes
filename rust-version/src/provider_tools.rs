@@ -16,14 +16,7 @@ pub fn provider_tool_schemas() -> Vec<Value> {
                         "type": "string",
                         "description": "Optional EverOS/Hermes session id."
                     },
-                    "scope": {
-                        "type": "string",
-                        "enum": [
-                            "personal",
-                            "agent"
-                        ],
-                        "description": "Memory scope. Default personal."
-                    },
+                    "scope": scope_schema("Memory scope. Default personal."),
                     "role": {
                         "type": "string",
                         "enum": [
@@ -180,14 +173,7 @@ pub fn provider_tool_schemas() -> Vec<Value> {
                         "type": "string",
                         "description": "Optional session id."
                     },
-                    "scope": {
-                        "type": "string",
-                        "enum": [
-                            "personal",
-                            "agent"
-                        ],
-                        "description": "Memory scope to flush."
-                    },
+                    "scope": scope_schema("Memory scope to flush."),
                     "timeout": {
                         "type": "number",
                         "description": "Optional per-call timeout in seconds."
@@ -241,14 +227,7 @@ pub fn provider_tool_schemas() -> Vec<Value> {
                         "type": "string",
                         "description": "Optional session id."
                     },
-                    "scope": {
-                        "type": "string",
-                        "enum": [
-                            "personal",
-                            "agent"
-                        ],
-                        "description": "Memory scope."
-                    },
+                    "scope": scope_schema("Memory scope."),
                     "role": {
                         "type": "string",
                         "enum": [
@@ -305,14 +284,7 @@ pub fn provider_tool_schemas() -> Vec<Value> {
                         "type": "string",
                         "description": "Optional session id."
                     },
-                    "scope": {
-                        "type": "string",
-                        "enum": [
-                            "personal",
-                            "agent"
-                        ],
-                        "description": "Memory scope."
-                    },
+                    "scope": scope_schema("Memory scope."),
                     "dry_run": {
                         "type": "boolean",
                         "description": "Validate and summarize without writing."
@@ -349,14 +321,7 @@ pub fn provider_tool_schemas() -> Vec<Value> {
                         "type": "string",
                         "description": "Optional session id."
                     },
-                    "scope": {
-                        "type": "string",
-                        "enum": [
-                            "personal",
-                            "agent"
-                        ],
-                        "description": "Memory scope."
-                    },
+                    "scope": scope_schema("Memory scope."),
                     "memory_types": {
                         "type": "array",
                         "items": {
@@ -380,4 +345,8 @@ pub fn provider_tool_schemas() -> Vec<Value> {
             }
         }),
     ]
+}
+
+fn scope_schema(description: &str) -> Value {
+    json!({"type": "string", "enum": ["personal", "agent"], "description": description})
 }

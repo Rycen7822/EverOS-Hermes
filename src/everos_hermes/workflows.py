@@ -10,12 +10,8 @@ from .client import DEFAULT_MEMORY_TYPES, EverOSClient, EverOSTimeoutError
 from .flush_retry import flush_memories_with_retry
 from .redaction import error_payload as generic_error_payload, sanitized_error_message
 from .response_normalization import count_hits
-from .schemas import normalize_scope, validate_messages
-from .tool_payloads import (
-    flush_result_payload as _base_flush_result_payload,
-    save_result_payload as _base_save_result_payload,
-    timeout_payload as _base_timeout_payload,
-)
+from .schemas import normalize_scope, validate_messages, validate_search_params
+from .tool_payloads import flush_result_payload, save_result_payload, timeout_payload
 
 
 def now_ms() -> int:
@@ -48,47 +44,6 @@ def error_envelope(*, workflow: str, error_code: str, message: str, retryable: b
         "suggested_next_actions": actions,
     }
     payload.update(fields)
-    return payload
-
-
-def save_result_payload(
-    *,
-    result: dict[str, Any],
-    user_id: str,
-    session_id: str | None,
-    scope: str,
-    flush_requested: bool,
-    flush_result: dict[str, Any] | None = None,
-    flush_error: Exception | None = None,
-) -> dict[str, Any]:
-    payload = _base_save_result_payload(
-        result=result,
-        user_id=user_id,
-        session_id=session_id,
-        scope=scope,
-        flush_requested=flush_requested,
-        flush_result=flush_result,
-        flush_error=flush_error,
-    )
-    payload["ok"] = True
-    payload["status"] = payload.get("status") or "queued"
-    if flush_requested and isinstance(payload.get("flush"), dict):
-        payload["flush"].setdefault("status", "missing")
-    return payload
-
-
-def flush_result_payload(response: dict[str, Any]) -> dict[str, Any]:
-    payload = _base_flush_result_payload(response)
-    payload.setdefault("status", "success")
-    if isinstance(response, dict) and response.get("status_code"):
-        payload["status_code"] = response.get("status_code")
-    return payload
-
-
-def timeout_payload(operation: str, exc: EverOSTimeoutError) -> dict[str, Any]:
-    payload = _base_timeout_payload(operation, exc)
-    payload["status"] = "timeout"
-    payload["error_code"] = "timeout"
     return payload
 
 
@@ -215,6 +170,7 @@ def verify_session_ingest(
 ) -> dict[str, Any]:
     resolved_scope = normalize_scope(scope)
     resolved_types = list(memory_types or DEFAULT_MEMORY_TYPES)
+    validate_search_params("hybrid", resolved_types, top_k, None)
     queries: list[dict[str, Any]] = []
     reuse_agent_memory_search = resolved_scope == "agent" and resolved_types == ["agent_memory"]
     agent_search_responses: dict[str, dict[str, Any]] = {}
@@ -497,13 +453,22 @@ def import_and_verify(
 ) -> dict[str, Any]:
     resolved_scope = normalize_scope(scope)
     normalized, warnings = normalize_import_messages(messages, file_path, default_role=("assistant" if resolved_scope == "agent" else "user"))
-    metrics = message_metrics(normalized, batch_size)
     validation_errors: list[str] = []
+    if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size < 1 or batch_size > 100:
+        validation_errors.append("batch_size must be an integer in 1..100")
+    try:
+        validate_search_params("hybrid", memory_types, top_k, None)
+    except ValueError as exc:
+        validation_errors.append(str(exc))
+    metrics = message_metrics(normalized, batch_size if not any("batch_size" in item for item in validation_errors) else 50)
     try:
         validate_messages(normalized, resolved_scope)
     except ValueError as exc:
         message = str(exc)
         validation_errors.append(message)
+        if message not in warnings:
+            warnings.append(message)
+    for message in validation_errors:
         if message not in warnings:
             warnings.append(message)
     if dry_run:

@@ -29,6 +29,47 @@ fn provider_save_tool_scope_agent_posts_agent_endpoint() {
 }
 
 #[test]
+fn provider_tools_reject_invalid_scope_and_top_k_without_fallback() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let home = temp_home("provider_arg_validation");
+    use_home_dotenv(&home, "http://127.0.0.1:9");
+    let provider = EverOSProvider::initialize(ProviderInit::for_test("sess-1", &home)).unwrap();
+
+    let save = provider
+        .handle_tool_call(
+            "everos_memory_save",
+            json!({"content":"x","scope":"bogus","flush":false}),
+        )
+        .unwrap_err()
+        .to_string();
+    let search = provider
+        .handle_tool_call("everos_memory_search", json!({"query":"q","top_k":101}))
+        .unwrap_err()
+        .to_string();
+
+    let import_batch = provider
+        .handle_tool_call(
+            "everos_memory_import_and_verify",
+            json!({"messages":[{"role":"user","timestamp":1,"content":"x"}],"batch_size":0,"flush":false}),
+        )
+        .unwrap();
+    let import_top_k = provider
+        .handle_tool_call(
+            "everos_memory_import_and_verify",
+            json!({"messages":[{"role":"user","timestamp":1,"content":"x"}],"top_k":101,"verification_queries":[],"flush":false}),
+        )
+        .unwrap();
+    let import_batch: Value = serde_json::from_str(&import_batch).unwrap();
+    let import_top_k: Value = serde_json::from_str(&import_top_k).unwrap();
+
+    assert!(save.contains("scope"));
+    assert!(search.contains("top_k"));
+    assert_eq!(import_batch["error_code"], "validation_failed");
+    assert_eq!(import_top_k["error_code"], "validation_failed");
+    remove_env("HERMES_HOME");
+}
+
+#[test]
 fn provider_sync_turn_capture_agent_memory_posts_personal_and_agent_endpoints() {
     let _guard = ENV_LOCK.lock().unwrap();
     let home = temp_home("provider_agent_sync");

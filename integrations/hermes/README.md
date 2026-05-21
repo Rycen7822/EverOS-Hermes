@@ -38,49 +38,11 @@ Restart Hermes CLI/WebUI/gateway after changing plugin, provider, or secret conf
 
 ## Registered toolset
 
-The standalone plugin registers these tool names under the `everos` toolset:
-
-- `everos_memory_save`
-- `everos_memory_search`
-- `everos_memory_get`
-- `everos_memory_flush`
-- `everos_memory_forget`
-- `everos_memory_save_and_verify`
-- `everos_memory_import_and_verify`
-- `everos_memory_verify_session`
-
-If the memory provider is also active, Hermes skips duplicate tool schemas and routes the same tool names through the active provider instance. If the standalone plugin is enabled without `memory.provider: everos`, the plugin lazily initializes its own provider for tool calls.
+Standalone loading registers the 8 `everos_memory_*` provider tools listed in `plugin.yaml`. With `memory.provider: everos`, Hermes deduplicates schemas and routes the same names through the active provider; without it, the plugin lazily initializes its own provider for tool calls.
 
 ## Bundled skill
 
-The operator/curation skill is bundled at:
-
-```text
-resources/skills/everos-memory-curation/SKILL.md
-```
-
-Hermes derives the plugin namespace automatically. Load it by qualified name:
-
-```text
-/skill everos:everos-memory-curation
-```
-
-`SKILL.md` is a thin router. It points to heavier guides under:
-
-```text
-resources/skills/everos-memory-curation/references/
-```
-
-Current primary references:
-
-- `user-intent-runbooks.md`
-- `memory-routing-policy.md`
-- `agent-case-visibility.md`
-- `agent-visibility-contract-audits.md`
-- `plugin-triage-and-migration.md`
-- `cleanup-and-verification.md`
-
-Do not install the skill separately into `~/.hermes/skills/` unless you intentionally want a user-local fork outside this plugin. If an old local copy exists, use the qualified plugin name above or sync/remove the local copy to avoid stale bare-name loads.
+The operator skill is bundled at `resources/skills/everos-memory-curation/SKILL.md` and loads as `/skill everos:everos-memory-curation`. `SKILL.md` is a thin router to `references/*.md`; do not install it separately into `~/.hermes/skills/` unless you intentionally want a user-local fork outside this plugin.
 
 ## Advanced config
 

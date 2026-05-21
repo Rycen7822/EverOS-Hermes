@@ -4,7 +4,7 @@ import json
 def test_provider_config_contract_clamps_drift_prone_fields():
     from pathlib import Path
 
-    from everos_hermes.provider import _normalize_config
+    from everos_hermes.provider_config import _normalize_config
 
     contract = json.loads((Path(__file__).parent / "contracts" / "provider_config_contract.json").read_text(encoding="utf-8"))
     fields = contract["fields"]
@@ -29,7 +29,8 @@ def test_provider_config_contract_clamps_drift_prone_fields():
     assert visibility["agent_visibility_top_k"] == 20
 
 def test_save_config_drops_api_key_and_uses_private_permissions(tmp_path):
-    from everos_hermes.provider import EverOSMemoryProvider, _load_config
+    from everos_hermes.provider import EverOSMemoryProvider
+    from everos_hermes.provider_config import _load_config
 
     provider = EverOSMemoryProvider()
     provider.save_config({"api_key": "secret-config-key", "user_id": "u1", "base_url": "https://example.test"}, str(tmp_path))
@@ -128,6 +129,7 @@ def test_sync_turn_capture_agent_memory_parallel_writes_agent_and_strips_context
 
 def test_provider_tools_pass_scope_flush_timeout_and_visibility(monkeypatch, tmp_path):
     from everos_hermes.provider import EverOSMemoryProvider
+    from everos_hermes.schemas import validate_search_params
 
     calls = []
 
@@ -145,6 +147,7 @@ def test_provider_tools_pass_scope_flush_timeout_and_visibility(monkeypatch, tmp
 
         def search_memories(self, **kwargs):
             calls.append(("search", kwargs))
+            validate_search_params(kwargs["method"], kwargs["memory_types"], kwargs["top_k"], kwargs.get("radius"))
             return {"data": {"agent_memory": []}}
 
         def get_memories(self, **kwargs):
@@ -160,13 +163,17 @@ def test_provider_tools_pass_scope_flush_timeout_and_visibility(monkeypatch, tmp
 
     save = json.loads(provider.handle_tool_call("everos_memory_save", {"content": "retry with timeout", "scope": "agent", "flush": True}))
     provider.handle_tool_call("everos_memory_flush", {"scope": "agent", "timeout": 45})
+    provider.handle_tool_call("everos_memory_search", {"query": "q", "radius": 0.0})
+    error = json.loads(provider.handle_tool_call("everos_memory_search", {"query": "q", "top_k": 101}))
 
     assert save["scope"] == "agent"
     assert save["agent_visibility"]["agent_visibility_status"] == "not_visible"
     assert provider._last_agent_visibility_status["agent_visibility_status"] == "not_visible"
     assert calls[0][1]["scope"] == "agent"
     assert calls[0][1]["messages"][0]["role"] == "assistant"
-    assert calls[-1][1] == {"user_id": "u1", "session_id": "sess-1", "scope": "agent", "timeout": 45}
+    assert calls[-2][1]["radius"] == 0.0
+    assert "top_k" in error["error"]
+    assert [call for call in calls if call[0] == "flush"][-1][1] == {"user_id": "u1", "session_id": "sess-1", "scope": "agent", "timeout": 45}
 
 def test_provider_background_error_records_redacted_log_and_status(monkeypatch, tmp_path):
     from everos_hermes.provider import EverOSMemoryProvider
