@@ -1,155 +1,63 @@
 [
   {
     "name": "everos_memory_save",
-    "properties": {
-      "content": {
-        "type": "string"
-      },
-      "flush": {
-        "type": "boolean"
-      },
-      "role": {
-        "enum": [
-          "user",
-          "assistant",
-          "tool",
-          "system"
-        ],
-        "type": "string"
-      },
-      "scope": {
-        "enum": [
-          "personal",
-          "agent"
-        ],
-        "type": "string"
-      },
-      "session_id": {
-        "type": "string"
-      },
-      "tool_call_id": {
-        "type": "string"
-      }
-    },
+    "properties": [
+      "content:string",
+      "flush:boolean",
+      "role:string:assistant|system|tool|user",
+      "scope:string:agent|personal",
+      "session_id:string",
+      "tool_call_id:string"
+    ],
     "required": [
       "content"
     ]
   },
   {
     "name": "everos_memory_search",
-    "properties": {
-      "filters": {
-        "type": "object"
-      },
-      "include_original_data": {
-        "type": "boolean"
-      },
-      "include_vectors": {
-        "type": "boolean"
-      },
-      "limit": {
-        "type": "integer"
-      },
-      "memory_types": {
-        "type": "array"
-      },
-      "method": {
-        "enum": [
-          "keyword",
-          "vector",
-          "hybrid",
-          "agentic"
-        ],
-        "type": "string"
-      },
-      "query": {
-        "type": "string"
-      },
-      "radius": {
-        "type": "number"
-      },
-      "response_format": {
-        "enum": [
-          "json",
-          "markdown"
-        ],
-        "type": "string"
-      },
-      "session_id": {
-        "type": "string"
-      },
-      "top_k": {
-        "type": "integer"
-      }
-    },
+    "properties": [
+      "filters:object",
+      "include_original_data:boolean",
+      "include_vectors:boolean",
+      "limit:integer",
+      "memory_types:array<string:agent_memory|episodic_memory|profile|raw_message>",
+      "method:string:agentic|hybrid|keyword|vector",
+      "query:string",
+      "radius:number",
+      "response_format:string:json|markdown",
+      "session_id:string",
+      "top_k:integer"
+    ],
     "required": [
       "query"
     ]
   },
   {
     "name": "everos_memory_get",
-    "properties": {
-      "filters": {
-        "type": "object"
-      },
-      "memory_type": {
-        "enum": [
-          "episodic_memory",
-          "profile",
-          "agent_case",
-          "agent_skill"
-        ],
-        "type": "string"
-      },
-      "page": {
-        "type": "integer"
-      },
-      "page_size": {
-        "type": "integer"
-      },
-      "rank_by": {
-        "type": "string"
-      },
-      "rank_order": {
-        "enum": [
-          "asc",
-          "desc"
-        ],
-        "type": "string"
-      },
-      "session_id": {
-        "type": "string"
-      }
-    }
+    "properties": [
+      "filters:object",
+      "memory_type:string:agent_case|agent_skill|episodic_memory|profile",
+      "page:integer",
+      "page_size:integer",
+      "rank_by:string",
+      "rank_order:string:asc|desc",
+      "session_id:string"
+    ]
   },
   {
     "name": "everos_memory_flush",
-    "properties": {
-      "scope": {
-        "enum": [
-          "personal",
-          "agent"
-        ],
-        "type": "string"
-      },
-      "session_id": {
-        "type": "string"
-      },
-      "timeout": {
-        "type": "number"
-      }
-    }
+    "properties": [
+      "scope:string:agent|personal",
+      "session_id:string",
+      "timeout:number"
+    ]
   },
   {
     "name": "everos_memory_forget",
-    "properties": {
-      "confirm": {
-        "type": "boolean"
-      },
-      "memory_id": {
-        "type": "string"
-      }
-    },
+    "properties": [
+      "confirm:boolean",
+      "memory_id:string"
+    ],
     "required": [
       "confirm",
       "memory_id"
@@ -157,108 +65,44 @@
   },
   {
     "name": "everos_memory_save_and_verify",
-    "properties": {
-      "content": {
-        "type": "string"
-      },
-      "flush": {
-        "type": "boolean"
-      },
-      "role": {
-        "enum": [
-          "user",
-          "assistant",
-          "tool",
-          "system"
-        ],
-        "type": "string"
-      },
-      "scope": {
-        "enum": [
-          "personal",
-          "agent"
-        ],
-        "type": "string"
-      },
-      "session_id": {
-        "type": "string"
-      },
-      "tool_call_id": {
-        "type": "string"
-      },
-      "top_k": {
-        "type": "integer"
-      },
-      "verification_queries": {
-        "type": "array"
-      },
-      "verification_query": {
-        "type": "string"
-      }
-    },
+    "properties": [
+      "content:string",
+      "flush:boolean",
+      "role:string:assistant|system|tool|user",
+      "scope:string:agent|personal",
+      "session_id:string",
+      "tool_call_id:string",
+      "top_k:integer",
+      "verification_queries:array<string>",
+      "verification_query:string"
+    ],
     "required": [
       "content"
     ]
   },
   {
     "name": "everos_memory_import_and_verify",
-    "properties": {
-      "batch_size": {
-        "type": "integer"
-      },
-      "dry_run": {
-        "type": "boolean"
-      },
-      "file_path": {
-        "type": "string"
-      },
-      "flush": {
-        "type": "boolean"
-      },
-      "messages": {
-        "type": "array"
-      },
-      "scope": {
-        "enum": [
-          "personal",
-          "agent"
-        ],
-        "type": "string"
-      },
-      "session_id": {
-        "type": "string"
-      },
-      "top_k": {
-        "type": "integer"
-      },
-      "verification_queries": {
-        "type": "array"
-      }
-    }
+    "properties": [
+      "batch_size:integer",
+      "dry_run:boolean",
+      "file_path:string",
+      "flush:boolean",
+      "messages:array<object>",
+      "scope:string:agent|personal",
+      "session_id:string",
+      "top_k:integer",
+      "verification_queries:array<string>"
+    ]
   },
   {
     "name": "everos_memory_verify_session",
-    "properties": {
-      "memory_types": {
-        "type": "array"
-      },
-      "scope": {
-        "enum": [
-          "personal",
-          "agent"
-        ],
-        "type": "string"
-      },
-      "session_id": {
-        "type": "string"
-      },
-      "top_k": {
-        "type": "integer"
-      },
-      "verification_queries": {
-        "type": "array"
-      }
-    },
+    "properties": [
+      "memory_types:array<string:agent_memory|episodic_memory|profile|raw_message>",
+      "scope:string:agent|personal",
+      "session_id:string",
+      "top_k:integer",
+      "verification_queries:array<string>"
+    ],
     "required": [
       "verification_queries"
     ]

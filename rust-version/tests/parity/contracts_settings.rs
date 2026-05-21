@@ -18,7 +18,7 @@ fn settings_validation_contract_cases_match_python() {
     let contract = snapshot_json("settings_validation_cases.json");
     for case in contract["cases"].as_array().unwrap() {
         let settings = case["settings"].clone();
-        let strict = case["strict"].as_bool().unwrap();
+        let strict = case["strict"].as_bool().unwrap_or(true);
         let valid = case["valid"].as_bool().unwrap();
         let (base_url, handle) = if valid {
             sequenced_request_server(vec![json!({"data":{"status":"updated"}})], 150)

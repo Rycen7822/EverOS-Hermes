@@ -7,12 +7,15 @@ def _snapshot_path(name: str) -> Path:
     return Path(__file__).parent / "contracts" / name
 
 
-def _simplify_provider_property(schema: dict[str, Any]) -> dict[str, Any]:
-    keep = {}
-    for key in ("type", "enum"):
-        if key in schema:
-            keep[key] = schema[key]
-    return keep
+def _provider_property_signature(name: str, schema: dict[str, Any]) -> str:
+    kind = schema.get("type", "?")
+    enum = sorted(schema.get("enum", []))
+    if kind == "array" and isinstance(schema.get("items"), dict):
+        item = schema["items"]
+        item_kind = item.get("type", "?")
+        enum = sorted(item.get("enum", []))
+        return f"{name}:array<{item_kind}{':' + '|'.join(enum) if enum else ''}>"
+    return f"{name}:{kind}{':' + '|'.join(enum) if enum else ''}"
 
 
 def _provider_snapshot() -> list[dict[str, Any]]:
@@ -25,7 +28,7 @@ def _provider_snapshot() -> list[dict[str, Any]]:
         properties = params.get("properties", {})
         item = {
             "name": schema["name"],
-            "properties": {key: _simplify_provider_property(properties[key]) for key in sorted(properties)},
+            "properties": [_provider_property_signature(key, properties[key]) for key in sorted(properties)],
         }
         required = sorted(params.get("required", []))
         if required:

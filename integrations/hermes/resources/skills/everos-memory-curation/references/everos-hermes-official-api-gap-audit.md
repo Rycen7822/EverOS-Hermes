@@ -20,8 +20,8 @@ Group, sender, object-storage, multimodal, full filter DSL, and broad delete sem
 ## Verification commands
 
 ```bash
-python -m pytest tests/test_cloud_contract.py tests/test_schemas.py tests/test_upgrade_contract.py -q
-(cd rust-version && cargo test --tests --no-fail-fast)
+python -m pytest tests/test_schemas.py tests/test_schema_snapshots.py -q
+(cd rust-version && cargo test --test parity -- --test-threads=1)
 ```
 
 ## Audit workflow

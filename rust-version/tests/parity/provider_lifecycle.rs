@@ -6,15 +6,7 @@ fn provider_save_tool_scope_agent_posts_agent_endpoint() {
     let home = temp_home("provider_agent_save");
     let (base_url, handle) =
         one_request_server(json!({"data":{"status":"queued","task_id":"task-agent"}}));
-    fs::write(
-        home.join(".env"),
-        format!("EVEROS_API_KEY=test-key\nEVEROS_USER_ID=u1\nEVEROS_BASE_URL={base_url}\n"),
-    )
-    .unwrap();
-    remove_env("EVEROS_API_KEY");
-    remove_env("EVEROS_USER_ID");
-    remove_env("EVEROS_BASE_URL");
-    set_env("HERMES_HOME", home.to_str().unwrap());
+    use_home_dotenv(&home, &base_url);
 
     let provider = EverOSProvider::initialize(ProviderInit::for_test("sess-1", &home)).unwrap();
     let raw = provider
@@ -42,11 +34,7 @@ fn provider_sync_turn_capture_agent_memory_posts_personal_and_agent_endpoints() 
     let home = temp_home("provider_agent_sync");
     let (base_url, handle) =
         n_request_server(json!({"data":{"status":"queued","task_id":"task-sync"}}), 2);
-    fs::write(
-        home.join(".env"),
-        format!("EVEROS_API_KEY=test-key\nEVEROS_USER_ID=u1\nEVEROS_BASE_URL={base_url}\n"),
-    )
-    .unwrap();
+    use_home_dotenv(&home, &base_url);
     fs::write(
         home.join("everos.json"),
         json!({
@@ -59,10 +47,6 @@ fn provider_sync_turn_capture_agent_memory_posts_personal_and_agent_endpoints() 
         .to_string(),
     )
     .unwrap();
-    remove_env("EVEROS_API_KEY");
-    remove_env("EVEROS_USER_ID");
-    remove_env("EVEROS_BASE_URL");
-    set_env("HERMES_HOME", home.to_str().unwrap());
 
     let provider = EverOSProvider::initialize(ProviderInit::for_test("sess-1", &home)).unwrap();
     provider
@@ -191,21 +175,13 @@ fn provider_prefetch_uses_v2_assembler_cache_agent_and_session_scoped_raw() {
         ],
         500,
     );
-    fs::write(
-        home.join(".env"),
-        format!("EVEROS_API_KEY=test-key\nEVEROS_USER_ID=u1\nEVEROS_BASE_URL={base_url}\n"),
-    )
-    .unwrap();
+    use_home_dotenv(&home, &base_url);
     fs::write(
         home.join("everos.json"),
         json!({"agent_recall":true,"include_recent_raw":true,"prefetch_cache_ttl_seconds":90})
             .to_string(),
     )
     .unwrap();
-    remove_env("EVEROS_API_KEY");
-    remove_env("EVEROS_USER_ID");
-    remove_env("EVEROS_BASE_URL");
-    set_env("HERMES_HOME", home.to_str().unwrap());
 
     let provider = EverOSProvider::initialize(ProviderInit::for_test("sess-1", &home)).unwrap();
     let context = provider.prefetch("debug cache", Some("sess-2"));
@@ -236,20 +212,12 @@ fn provider_pre_compress_and_session_end_capture_structured_trajectory_with_dedu
         json!({"data":{"status":"queued","task_id":"task-agent"}}),
         2,
     );
-    fs::write(
-        home.join(".env"),
-        format!("EVEROS_API_KEY=test-key\nEVEROS_USER_ID=u1\nEVEROS_BASE_URL={base_url}\n"),
-    )
-    .unwrap();
+    use_home_dotenv(&home, &base_url);
     fs::write(
         home.join("everos.json"),
         json!({"capture_agent_memory":true}).to_string(),
     )
     .unwrap();
-    remove_env("EVEROS_API_KEY");
-    remove_env("EVEROS_USER_ID");
-    remove_env("EVEROS_BASE_URL");
-    set_env("HERMES_HOME", home.to_str().unwrap());
 
     let provider = EverOSProvider::initialize(ProviderInit::for_test("sess-1", &home)).unwrap();
     let messages = vec![
@@ -281,20 +249,12 @@ fn provider_delegation_writes_child_session_id_prefix_and_agent_flush() {
         json!({"data":{"status":"queued","task_id":"task-delegation"}}),
         2,
     );
-    fs::write(
-        home.join(".env"),
-        format!("EVEROS_API_KEY=test-key\nEVEROS_USER_ID=u1\nEVEROS_BASE_URL={base_url}\n"),
-    )
-    .unwrap();
+    use_home_dotenv(&home, &base_url);
     fs::write(
         home.join("everos.json"),
         json!({"capture_agent_memory":true}).to_string(),
     )
     .unwrap();
-    remove_env("EVEROS_API_KEY");
-    remove_env("EVEROS_USER_ID");
-    remove_env("EVEROS_BASE_URL");
-    set_env("HERMES_HOME", home.to_str().unwrap());
 
     let provider = EverOSProvider::initialize(ProviderInit::for_test("sess-1", &home)).unwrap();
     provider
@@ -326,20 +286,12 @@ fn provider_session_end_still_flushes_personal_after_agent_write_error() {
         ],
         800,
     );
-    fs::write(
-        home.join(".env"),
-        format!("EVEROS_API_KEY=test-key\nEVEROS_USER_ID=u1\nEVEROS_BASE_URL={base_url}\n"),
-    )
-    .unwrap();
+    use_home_dotenv(&home, &base_url);
     fs::write(
         home.join("everos.json"),
         json!({"capture_agent_memory":true}).to_string(),
     )
     .unwrap();
-    remove_env("EVEROS_API_KEY");
-    remove_env("EVEROS_USER_ID");
-    remove_env("EVEROS_BASE_URL");
-    set_env("HERMES_HOME", home.to_str().unwrap());
 
     let provider = EverOSProvider::initialize(ProviderInit::for_test("sess-err", &home)).unwrap();
     provider

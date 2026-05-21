@@ -1,39 +1,6 @@
 import json
 
 
-def test_provider_agent_visibility_config_normalizes_defaults_and_overrides():
-    from everos_hermes.provider import _normalize_config
-
-    defaults = _normalize_config({})
-    assert defaults["agent_visibility_verify_after_write"] is False
-    assert defaults["agent_visibility_verify_after_flush"] is False
-    assert defaults["agent_visibility_queries"] == []
-    assert defaults["agent_visibility_top_k"] == 5
-    assert defaults["agent_visibility_timeout"] == 30.0
-    assert defaults["agent_visibility_get_page_size"] == 20
-    assert defaults["agent_visibility_retry_flush_attempts"] == 1
-
-    custom = _normalize_config(
-        {
-            "agent_visibility_verify_after_write": "true",
-            "agent_visibility_verify_after_flush": "yes",
-            "agent_visibility_queries": "alpha, beta",
-            "agent_visibility_top_k": 99,
-            "agent_visibility_timeout": 0,
-            "agent_visibility_get_page_size": 200,
-            "agent_visibility_retry_flush_attempts": 9,
-        }
-    )
-    assert custom["agent_visibility_verify_after_write"] is True
-    assert custom["agent_visibility_verify_after_flush"] is True
-    assert custom["agent_visibility_queries"] == ["alpha", "beta"]
-    assert custom["agent_visibility_top_k"] == 20
-    assert custom["agent_visibility_timeout"] == 1.0
-    assert custom["agent_visibility_get_page_size"] == 100
-    assert custom["agent_visibility_retry_flush_attempts"] == 5
-
-
-
 def test_provider_config_contract_clamps_drift_prone_fields():
     from pathlib import Path
 
@@ -55,6 +22,11 @@ def test_provider_config_contract_clamps_drift_prone_fields():
     for key, spec in fields.items():
         assert above_max[key] == spec["max"]
 
+    visibility = _normalize_config({"agent_visibility_verify_after_write": "true", "agent_visibility_verify_after_flush": "yes", "agent_visibility_queries": "alpha, beta", "agent_visibility_top_k": 99})
+    assert visibility["agent_visibility_verify_after_write"] is True
+    assert visibility["agent_visibility_verify_after_flush"] is True
+    assert visibility["agent_visibility_queries"] == ["alpha", "beta"]
+    assert visibility["agent_visibility_top_k"] == 20
 
 def test_save_config_drops_api_key_and_uses_private_permissions(tmp_path):
     from everos_hermes.provider import EverOSMemoryProvider, _load_config

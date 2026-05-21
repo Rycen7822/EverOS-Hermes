@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::thread;
@@ -36,6 +36,28 @@ fn set_env(key: &str, value: &str) {
 
 fn remove_env(key: &str) {
     unsafe { std::env::remove_var(key) }
+}
+
+fn set_client_env(base_url: &str) {
+    set_env("EVEROS_API_KEY", "test-key");
+    set_env("EVEROS_USER_ID", "u1");
+    set_env("EVEROS_BASE_URL", base_url);
+}
+
+fn clear_client_env() {
+    remove_env("EVEROS_API_KEY");
+    remove_env("EVEROS_USER_ID");
+    remove_env("EVEROS_BASE_URL");
+}
+
+fn use_home_dotenv(home: &Path, base_url: &str) {
+    fs::write(
+        home.join(".env"),
+        format!("EVEROS_API_KEY=test-key\nEVEROS_USER_ID=u1\nEVEROS_BASE_URL={base_url}\n"),
+    )
+    .unwrap();
+    clear_client_env();
+    set_env("HERMES_HOME", home.to_str().unwrap());
 }
 
 fn one_request_server(response: Value) -> (String, thread::JoinHandle<String>) {
@@ -124,14 +146,25 @@ fn snapshot_json(name: &str) -> Value {
     serde_json::from_str(&raw).unwrap()
 }
 
-fn simplify_provider_property(schema: &Value) -> Value {
-    let mut out = serde_json::Map::new();
-    for key in ["type", "enum"] {
-        if let Some(value) = schema.get(key) {
-            out.insert(key.to_string(), value.clone());
-        }
+fn provider_property_signature(name: &str, schema: &Value) -> Value {
+    let kind = schema.get("type").and_then(Value::as_str).unwrap_or("?");
+    if let (true, Some(item)) = (kind == "array", schema.get("items")) {
+        let item_kind = item.get("type").and_then(Value::as_str).unwrap_or("?");
+        let enum_values = sorted_string_values(item.get("enum"));
+        let suffix = if enum_values.is_empty() {
+            String::new()
+        } else {
+            format!(":{}", enum_values.join("|"))
+        };
+        return json!(format!("{name}:array<{item_kind}{suffix}>"));
     }
-    Value::Object(out)
+    let enum_values = sorted_string_values(schema.get("enum"));
+    let suffix = if enum_values.is_empty() {
+        String::new()
+    } else {
+        format!(":{}", enum_values.join("|"))
+    };
+    json!(format!("{name}:{kind}{suffix}"))
 }
 
 fn sorted_string_values(value: Option<&Value>) -> Vec<String> {
@@ -156,19 +189,12 @@ fn provider_schema_snapshot() -> Value {
             .map(|schema| {
                 let params = &schema["parameters"];
                 let properties = params["properties"].as_object().unwrap();
-                let mut simplified = serde_json::Map::<String, Value>::new();
                 let mut keys = properties.keys().cloned().collect::<Vec<_>>();
                 keys.sort();
-                for key in keys {
-                    simplified.insert(
-                        key.clone(),
-                        simplify_provider_property(properties.get(&key).unwrap()),
-                    );
-                }
                 let mut item = json!({
                     "name": schema["name"],
                     "required": sorted_string_values(params.get("required")),
-                    "properties": simplified,
+                    "properties": keys.iter().map(|key| provider_property_signature(key, properties.get(key).unwrap())).collect::<Vec<_>>(),
                 });
                 if item["required"].as_array().is_some_and(Vec::is_empty) {
                     item.as_object_mut().unwrap().remove("required");
@@ -427,6 +453,8 @@ fn parse_http_body(raw: &str) -> Value {
 mod client_core;
 #[path = "parity/contracts_settings.rs"]
 mod contracts_settings;
+#[path = "parity/edge_contracts.rs"]
+mod edge_contracts;
 #[path = "parity/import_verify.rs"]
 mod import_verify;
 #[path = "parity/provider_lifecycle.rs"]

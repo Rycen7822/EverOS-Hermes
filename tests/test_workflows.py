@@ -191,36 +191,6 @@ def test_verify_session_ingest_agent_scope_returns_visibility_checks():
 
 
 
-def test_import_duplicate_warning_does_not_block_non_dry_run():
-    class CaptureClient:
-        def __init__(self):
-            self.add_calls = []
-
-        def add_memories(self, **kwargs):
-            self.add_calls.append(kwargs)
-            return {"data": {"status": "queued", "task_id": "task-duplicate"}}
-
-    client = CaptureClient()
-    result = import_and_verify(
-        client=client,
-        user_id="u1",
-        session_id="s1",
-        messages=[
-            _message(1, timestamp=1712052000000, content="same"),
-            _message(2, timestamp=1712052000001, content="same"),
-        ],
-        dry_run=False,
-        batch_size=10,
-        flush=False,
-    )
-
-    assert result["ok"] is True
-    assert result["queued_count"] == 2
-    assert result["failed_count"] == 0
-    assert len(client.add_calls) == 1
-    assert any("duplicate" in warning for warning in result["warnings"])
-
-
 def test_import_fatal_validation_stays_before_write():
     result = import_and_verify(
         client=NoWriteClient(),

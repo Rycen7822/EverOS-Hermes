@@ -7,21 +7,18 @@
         },
         "timezone": "Asia/Tokyo"
       },
-      "strict": true,
       "valid": true
     },
     {
       "settings": {
         "timezone": "Mars/Base"
       },
-      "strict": true,
       "valid": false
     },
     {
       "settings": {
         "extraction_mode": "fast"
       },
-      "strict": true,
       "valid": false
     },
     {
@@ -35,12 +32,10 @@
       "settings": {
         "llm_custom_setting": []
       },
-      "strict": true,
       "valid": false
     },
     {
       "settings": {},
-      "strict": true,
       "valid": false
     }
   ]

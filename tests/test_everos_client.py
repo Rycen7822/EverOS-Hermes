@@ -44,6 +44,7 @@ def test_add_memories_posts_bearer_json(monkeypatch):
     result = client.add_memories(user_id="user_001", session_id="session_001", messages=[message], async_mode=True)
     client.add_memories(user_id="user_001", messages=[agent_message], scope="agent")
     client.add_memories(user_id="user_001", messages=[agent_message], agent=True)
+    client.flush_memories(user_id="user_001", session_id="session_001", scope="agent", timeout=31)
 
     assert result["data"]["task_id"] == "task-1"
     assert captured[0] == {
@@ -57,10 +58,13 @@ def test_add_memories_posts_bearer_json(monkeypatch):
         "body": {"user_id": "user_001", "session_id": "session_001", "messages": [message], "async_mode": True},
         "timeout": 7,
     }
-    assert [call["url"] for call in captured[1:]] == [
+    assert [call["url"] for call in captured[1:3]] == [
         "https://api.evermind.ai/api/v1/memories/agent",
         "https://api.evermind.ai/api/v1/memories/agent",
     ]
+    assert captured[3]["url"] == "https://api.evermind.ai/api/v1/memories/agent/flush"
+    assert captured[3]["timeout"] == 31
+    assert captured[3]["body"] == {"user_id": "user_001", "session_id": "session_001"}
 
 def test_client_reads_api_key_from_hermes_dotenv_when_env_missing(monkeypatch, tmp_path):
     from everos_hermes.client import EverOSClient
@@ -152,23 +156,6 @@ def test_search_memories_strips_vectors_from_original_data_by_default(monkeypatc
     assert "embedding" not in rendered
     assert result["data"]["episodes"][0]["summary"] == "Coffee"
     assert debug["data"]["episodes"][0]["vector"] == [0.1, 0.2]
-
-
-def test_flush_memories_accepts_timeout_and_agent_scope(monkeypatch):
-    from everos_hermes.client import EverOSClient
-
-    captured = {}
-
-    def fake_urlopen(req, timeout):
-        captured.update({"url": req.full_url, "timeout": timeout, "body": json.loads(req.data.decode("utf-8"))})
-        return FakeHTTPResponse({"data": {"status": "extracted"}})
-
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
-    client = EverOSClient(api_key="sk-test", timeout=7)
-
-    client.flush_memories(user_id="user_001", session_id="sess-1", scope="agent", timeout=31)
-
-    assert captured == {"url": "https://api.evermind.ai/api/v1/memories/agent/flush", "timeout": 31, "body": {"user_id": "user_001", "session_id": "sess-1"}}
 
 
 def test_timeout_error_is_actionable(monkeypatch):

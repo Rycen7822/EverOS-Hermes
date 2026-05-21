@@ -70,7 +70,7 @@ def test_mcp_save_memory_supports_agent_scope_tool_role_and_unchecked_visibility
         flush=True,
     ))
     add_raw = asyncio.run(mcp_server.everos_add_memories(
-        messages=[{"role": "assistant", "timestamp": 1711900000000, "content": "agent note"}],
+        messages=[{"role": "assistant", "timestamp": 1711900000000, "content": "agent note", "message_id": "msg-agent-1"}],
         scope="agent",
         session_id="sess-agent",
         flush=False,
@@ -86,33 +86,8 @@ def test_mcp_save_memory_supports_agent_scope_tool_role_and_unchecked_visibility
     assert calls[0][1]["messages"][0]["role"] == "tool"
     assert calls[0][1]["messages"][0]["tool_call_id"] == "tool-call-1"
     assert calls[1][1] == {"user_id": "u1", "session_id": "sess-1", "scope": "agent", "timeout": None}
-
-def test_mcp_add_memories_preserves_message_id_and_agent_endpoint(monkeypatch):
-    from everos_hermes import mcp_server
-    from everos_hermes.client import EverOSClient
-
-    captured = {}
-
-    def fake_request_json(self, method, path, body=None, *, timeout=None):
-        captured.update({"method": method, "path": path, "body": body, "timeout": timeout})
-        return {"data": {"status": "queued"}}
-
-    monkeypatch.setenv("EVEROS_API_KEY", "sk-test")
-    monkeypatch.setenv("EVEROS_USER_ID", "u1")
-    monkeypatch.setattr(EverOSClient, "request_json", fake_request_json)
-
-    asyncio.run(mcp_server.everos_add_memories(
-        messages=[
-            {"role": "assistant", "timestamp": 1711900000000, "content": "diagnosed retry path", "message_id": "msg-agent-1"},
-            {"role": "tool", "timestamp": 1711900000001, "content": "tool output", "tool_call_id": "call-1", "message_id": "msg-tool-1"},
-        ],
-        scope="agent",
-        session_id="sess-agent",
-    ))
-
-    assert captured["path"] == "/api/v1/memories/agent"
-    assert [message["message_id"] for message in captured["body"]["messages"]] == ["msg-agent-1", "msg-tool-1"]
-
+    assert calls[2][1]["scope"] == "agent"
+    assert calls[2][1]["messages"][0]["message_id"] == "msg-agent-1"
 
 def test_mcp_search_passes_filters_radius_timeout_and_fallback(monkeypatch):
     from everos_hermes import mcp_server

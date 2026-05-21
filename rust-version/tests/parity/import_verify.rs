@@ -46,9 +46,7 @@ fn mcp_import_and_verify_batches_flushes_and_verifies() {
         ],
         500,
     );
-    set_env("EVEROS_API_KEY", "test-key");
-    set_env("EVEROS_USER_ID", "u1");
-    set_env("EVEROS_BASE_URL", &base_url);
+    set_client_env(&base_url);
 
     let raw = everos_hermes_rust::mcp::call_tool(
         "everos_import_and_verify",
@@ -96,9 +94,7 @@ fn mcp_import_and_verify_batches_flushes_and_verifies() {
         2
     );
 
-    remove_env("EVEROS_API_KEY");
-    remove_env("EVEROS_USER_ID");
-    remove_env("EVEROS_BASE_URL");
+    clear_client_env();
 }
 #[test]
 fn mcp_verify_session_ingest_is_read_only_and_reports_misses() {
@@ -110,9 +106,7 @@ fn mcp_verify_session_ingest_is_read_only_and_reports_misses() {
         ],
         500,
     );
-    set_env("EVEROS_API_KEY", "test-key");
-    set_env("EVEROS_USER_ID", "u1");
-    set_env("EVEROS_BASE_URL", &base_url);
+    set_client_env(&base_url);
 
     let raw = everos_hermes_rust::mcp::call_tool(
         "everos_verify_session_ingest",
@@ -133,9 +127,7 @@ fn mcp_verify_session_ingest_is_read_only_and_reports_misses() {
             .all(|raw| raw.starts_with("POST /api/v1/memories/search "))
     );
 
-    remove_env("EVEROS_API_KEY");
-    remove_env("EVEROS_USER_ID");
-    remove_env("EVEROS_BASE_URL");
+    clear_client_env();
 }
 
 #[test]
@@ -151,9 +143,7 @@ fn mcp_verify_session_ingest_agent_scope_reuses_agent_memory_search_and_compacts
         ],
         500,
     );
-    set_env("EVEROS_API_KEY", "test-key");
-    set_env("EVEROS_USER_ID", "u1");
-    set_env("EVEROS_BASE_URL", &base_url);
+    set_client_env(&base_url);
 
     let raw = everos_hermes_rust::mcp::call_tool(
         "everos_verify_session_ingest",
@@ -181,7 +171,5 @@ fn mcp_verify_session_ingest_agent_scope_reuses_agent_memory_search_and_compacts
         json!(["agent_memory"])
     );
 
-    remove_env("EVEROS_API_KEY");
-    remove_env("EVEROS_USER_ID");
-    remove_env("EVEROS_BASE_URL");
+    clear_client_env();
 }
